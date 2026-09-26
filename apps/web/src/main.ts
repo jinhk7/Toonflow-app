@@ -1,3 +1,4 @@
+import "./lib/cryptoCompatibility";
 import { createApp, h, nextTick } from "vue";
 import { ElButton, ElResult } from "element-plus";
 import { createPinia } from "pinia";
