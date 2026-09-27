@@ -158,6 +158,32 @@ type GenerateMedia<TRequest, TConfig = Record<string, unknown>> = (
   request: TRequest,
 ) => Promise<MediaAsset[]>;
 
+/** 异步提交返回的上游任务身份；字段随安装 Provider 扩展，宿主只持久化标准 taskId。 */
+interface MediaTaskSubmitResult {
+  taskId: string;
+  raw?: Record<string, unknown>;
+}
+
+type MediaTaskQueryStatus = "pending" | "completed" | "failed";
+
+/** 续查结果；completed 时 assets 为待归档媒体，failed 时 errorMessage 可读。 */
+interface MediaTaskQueryResult {
+  status: MediaTaskQueryStatus;
+  assets?: MediaAsset[];
+  errorMessage?: string;
+  raw?: Record<string, unknown>;
+}
+
+type SubmitMedia<TRequest, TConfig = Record<string, unknown>> = (
+  this: ProviderContext<TConfig>,
+  request: TRequest,
+) => Promise<MediaTaskSubmitResult>;
+
+type QueryMediaTask<TConfig = Record<string, unknown>> = (
+  this: ProviderContext<TConfig>,
+  taskId: string,
+) => Promise<MediaTaskQueryResult>;
+
 interface ProviderUpdateInfo {
   hasUpdate: boolean;
   latestVersion: string;
@@ -189,4 +215,11 @@ interface ProviderDefinition<TRules extends readonly ProviderFormRule[] = readon
   generateImage?: GenerateMedia<ImageRequest, ProviderConfig<TRules>>;
   generateVideo?: GenerateMedia<VideoRequest, ProviderConfig<TRules>>;
   generateAudio?: GenerateMedia<AudioRequest, ProviderConfig<TRules>>;
+  /** 可选异步提交/续查；缺省时宿主按同步 generate* 处理，重启后无法按 ID 恢复。 */
+  submitImage?: SubmitMedia<ImageRequest, ProviderConfig<TRules>>;
+  queryImageTask?: QueryMediaTask<ProviderConfig<TRules>>;
+  submitVideo?: SubmitMedia<VideoRequest, ProviderConfig<TRules>>;
+  queryVideoTask?: QueryMediaTask<ProviderConfig<TRules>>;
+  submitAudio?: SubmitMedia<AudioRequest, ProviderConfig<TRules>>;
+  queryAudioTask?: QueryMediaTask<ProviderConfig<TRules>>;
 }

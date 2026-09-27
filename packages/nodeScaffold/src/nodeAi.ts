@@ -1,4 +1,4 @@
-import { onScopeDispose } from "vue";
+import { inject, onScopeDispose } from "vue";
 import { runAgentLoop, type AgentTool, type AgentToolResult } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Message, type Model } from "@earendil-works/pi-ai";
 import { EventSourceParserStream } from "eventsource-parser/stream";
@@ -17,8 +17,39 @@ export type NodeAiModel = {
 export type NodeMediaModel = Omit<MediaModel, "mode"> & {
   mode?: (string | string[])[];
 };
-export type NodeImageRequest = {
+export type MediaJobCanvasBinding = {
+  canvasPath?: string;
+  nodeId?: string;
+  outputSlot?: string;
+  expectedNodeVersion?: number;
+};
+export type PrepareMediaJobResult = {
+  canvasPath: string;
+  nodeId: string;
+  outputSlot: string;
+  expectedNodeVersion: number;
+};
+export type PendingMediaJobState = {
+  idempotencyKey: string;
+  outputSlot: string;
+  canvasPath: string;
+  expectedNodeVersion: number;
+  startedAt: number;
+};
+export type NodeMediaJobView = {
+  jobId: string;
+  idempotencyKey: string;
+  status: string;
+  mediaType?: string;
+  files?: { path: string; mimeType: string; mediaType: "image" | "video" }[];
+  errorMessage?: string | null;
+};
+export type PrepareMediaJobFn = (nodeId: string, outputSlot: string) => Promise<PrepareMediaJobResult>;
+export type PersistNodeGraphFn = (nodeId: string, expectedVersion: number) => Promise<void>;
+
+export type NodeImageRequest = MediaJobCanvasBinding & {
   directory: string;
+  idempotencyKey?: string;
   providerId: string;
   modelId: string;
   prompt: string;
@@ -28,7 +59,7 @@ export type NodeImageRequest = {
   size?: string;
 };
 export type NodeImageResult = { path: string; mimeType: string; mediaType: "image" };
-export type NodeVideoRequest = Omit<MediaGenerationRequest, "size"> & { directory: string; outputDirectory: string };
+export type NodeVideoRequest = Omit<MediaGenerationRequest, "size"> & MediaJobCanvasBinding & { directory: string; outputDirectory: string; idempotencyKey?: string };
 export type NodeVideoResult = { path: string; mimeType: string; mediaType: "video" };
 export type NodeAiRequest = {
   providerId: string;
@@ -54,6 +85,91 @@ export type NodeAiTool = {
   parameters: Record<string, unknown>;
   execute(args: Record<string, unknown>, signal?: AbortSignal): unknown | Promise<unknown>;
 };
+
+export function useNodeMediaPersistence(nodeId: string, getData: () => Record<string, unknown>) {
+  const prepareMediaJob = inject<PrepareMediaJobFn | undefined>("prepareMediaJob", undefined);
+  const persistNodeGraph = inject<PersistNodeGraphFn | undefined>("persistNodeGraph", undefined);
+
+  async function prepare(outputSlot: string) {
+    if (readPending()) throw new Error("已有未决媒体任务，请先核对原任务，不能使用新键重复提交");
+    if (!prepareMediaJob || !persistNodeGraph) throw new Error("画布未提供持久任务入口，不能提交媒体生成");
+    const idempotencyKey = crypto.randomUUID();
+    const binding = await prepareMediaJob(nodeId, outputSlot);
+    const data = getData();
+    data.pendingMediaJob = {
+      idempotencyKey,
+      outputSlot,
+      canvasPath: binding.canvasPath,
+      expectedNodeVersion: binding.expectedNodeVersion + 1,
+      startedAt: Date.now(),
+    } satisfies PendingMediaJobState;
+    await persistNodeGraph(nodeId, binding.expectedNodeVersion);
+    binding.expectedNodeVersion++;
+    return { idempotencyKey, binding };
+  }
+
+  async function clearPending(outputSlot: string) {
+    const data = getData();
+    if (!data.pendingMediaJob) return;
+    delete data.pendingMediaJob;
+    if (!persistNodeGraph) return;
+    const binding = prepareMediaJob ? await prepareMediaJob(nodeId, outputSlot) : undefined;
+    await persistNodeGraph(nodeId, binding?.expectedNodeVersion ?? 0);
+  }
+
+  function readPending(): PendingMediaJobState | undefined {
+    const pending = getData().pendingMediaJob;
+    if (!pending || typeof pending !== "object") return undefined;
+    const state = pending as Partial<PendingMediaJobState>;
+    if (typeof state.idempotencyKey !== "string" || typeof state.outputSlot !== "string") return undefined;
+    return state as PendingMediaJobState;
+  }
+
+  return { prepare, clearPending, readPending, hasGraphPersistence: !!prepareMediaJob && !!persistNodeGraph };
+}
+
+async function readMediaJobPayload(response: Response) {
+  const payload = await response.json() as { code: number; data?: NodeMediaJobView; message?: string };
+  if (!response.ok || payload.code !== 200) throw new Error(payload.message || "查询媒体任务失败");
+  if (!payload.data) throw new Error("媒体任务不存在");
+  return payload.data;
+}
+
+export async function fetchMediaJob(directory: string, idempotencyKey: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ directory, idempotencyKey });
+  const response = await fetch(`/api/ai/media/getJob?${query}`, {
+    headers: { "x-toonflow-workspace": "1" },
+    signal,
+  });
+  return readMediaJobPayload(response);
+}
+
+export async function listMediaJobs(directory: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ directory });
+  const response = await fetch(`/api/ai/media/list?${query}`, {
+    headers: { "x-toonflow-workspace": "1" },
+    signal,
+  });
+  if (response.status === 404) throw new Error("媒体任务列表接口尚未就绪");
+  const payload = await response.json() as { code: number; data?: NodeMediaJobView[]; message?: string };
+  if (!response.ok || payload.code !== 200) throw new Error(payload.message || "查询媒体任务列表失败");
+  return payload.data ?? [];
+}
+
+export async function pollMediaJobUntilDone(directory: string, idempotencyKey: string, signal: AbortSignal) {
+  while (true) {
+    signal.throwIfAborted();
+    const job = await fetchMediaJob(directory, idempotencyKey, signal);
+    if (job.status === "completed") {
+      if (!job.files?.length) throw new Error("任务已完成但没有结果文件");
+      return job.files;
+    }
+    if (job.status === "failed") throw new Error(job.errorMessage || "媒体生成失败");
+    if (job.status === "unknown") throw new Error(job.errorMessage || "提交状态未知，需人工核对");
+    if (job.status === "collectionFailed") throw new Error(job.errorMessage || "媒体已生成但下载归档失败，请重试收取，不要重新生成");
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
 
 export function groupNodeModels<T extends Pick<NodeAiModel, "providerId" | "providerLabel">>(models: readonly T[]) {
   return [...Map.groupBy(models, item => item.providerId)].map(([id, items]) => ({
@@ -163,12 +279,29 @@ export function useNodeAi() {
   }
 
   async function generateMedia<T extends "image" | "video">(mediaType: T, input: NodeImageRequest | NodeVideoRequest, signal?: AbortSignal) {
-    return readResult<{ path: string; mimeType: string; mediaType: T }[]>(await fetch("/api/ai/media/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
-      body: JSON.stringify({ ...input, mediaType }),
-      signal: requestSignal(signal),
-    }));
+    const idempotencyKey = input.idempotencyKey || crypto.randomUUID();
+    const activeSignal = requestSignal(signal);
+    const body = { ...input, mediaType, idempotencyKey, wait: false };
+    try {
+      const response = await fetch("/api/ai/media/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+        body: JSON.stringify(body),
+        signal: activeSignal,
+      });
+      if (!response.ok && response.status < 500) {
+        const payload = await response.json() as { message?: string };
+        throw Object.assign(new Error(payload.message || "媒体任务提交失败"), { definitive: true });
+      }
+      if (response.ok) {
+        try { await response.json(); } catch { /* 按 key 核对原任务。 */ }
+      }
+      return await pollMediaJobUntilDone(input.directory, idempotencyKey, activeSignal) as { path: string; mimeType: string; mediaType: T }[];
+    } catch (err) {
+      if (activeSignal.aborted) throw err;
+      if (typeof err === "object" && err && "definitive" in err) throw err;
+      return pollMediaJobUntilDone(input.directory, idempotencyKey, activeSignal) as Promise<{ path: string; mimeType: string; mediaType: T }[]>;
+    }
   }
 
   function generateImage(input: NodeImageRequest, signal?: AbortSignal) {
@@ -227,7 +360,17 @@ export function useNodeAi() {
     const text = message.content.filter(part => part.type === "text").map(part => part.text).join("");
     const reasoning = message.content.filter(part => part.type === "thinking").map(part => part.thinking).join("");
     return { text, ...(reasoning ? { reasoning } : {}) };
+
   }
 
-  return { getModels, getMediaModels, generateImage, generateVideo, generate };
+  return {
+    getModels,
+    getMediaModels,
+    generateImage,
+    generateVideo,
+    generate,
+    fetchMediaJob: (directory: string, jobKey: string, pollSignal?: AbortSignal) => fetchMediaJob(directory, jobKey, requestSignal(pollSignal)),
+    listMediaJobs: (directory: string, pollSignal?: AbortSignal) => listMediaJobs(directory, requestSignal(pollSignal)),
+    pollMediaJob: (directory: string, jobKey: string, pollSignal: AbortSignal) => pollMediaJobUntilDone(directory, jobKey, requestSignal(pollSignal)),
+  };
 }

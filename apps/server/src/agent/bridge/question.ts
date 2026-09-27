@@ -1,13 +1,25 @@
 import { z } from "zod";
 import type { QuestionAnswer, QuestionContext, QuestionRequest } from "@toonflow/tools-scaffold/runtime";
 import type { AgentEvent } from "@/agent/runtime/types";
+import { finishPendingQuestion, getPendingQuestion, insertPendingQuestion } from "@/agent/runtime/store";
+import { maybeContinueRunAfterQuestions } from "@/agent/runtime/runContinuation";
 
-type PendingQuestion = { cwd: string; request: QuestionRequest; cancel(): void; finish(result: QuestionAnswer | Error): void };
+type PendingQuestion = {
+  cwd: string;
+  request: QuestionRequest;
+  cancel(): void;
+  finish(result: QuestionAnswer | Error): void;
+};
 
-// ACT: 提问随当前流存活，不设用户答题超时；断开或停止时取消，多进程时需共享通道。
+// ACT: 提问持久化到运行账本；HTTP 断开不取消，仅终止运行或用户作答结束。
 const pendingQuestions = new Map<string, PendingQuestion>();
 
-export function createQuestionContext(cwd: string, send: (event: Extract<AgentEvent, { type: "question" }>) => void, onCancel?: () => void) {
+export function createQuestionContext(
+  cwd: string,
+  send: (event: Extract<AgentEvent, { type: "question" }>) => void,
+  onCancel?: () => void,
+  options?: { runId?: string },
+) {
   const activeQuestions = new Set<string>();
   let disposed = false;
   const context: QuestionContext = {
@@ -15,6 +27,7 @@ export function createQuestionContext(cwd: string, send: (event: Extract<AgentEv
       if (disposed) throw new Error("提问所属对话已结束");
       signal?.throwIfAborted();
       const callId = crypto.randomUUID();
+      if (options?.runId) insertPendingQuestion({ callId, runId: options.runId, cwd, toolCallId, request });
       return new Promise((resolve, reject) => {
         const finish = (result: QuestionAnswer | Error) => {
           if (!pendingQuestions.delete(callId)) return;
@@ -23,7 +36,10 @@ export function createQuestionContext(cwd: string, send: (event: Extract<AgentEv
           if (result instanceof Error) reject(result);
           else resolve(result);
         };
-        const abort = () => finish(new Error("提问已取消"));
+        const abort = () => {
+          if (options?.runId) finishPendingQuestion(callId, "cancelled");
+          finish(new Error("提问已取消"));
+        };
         pendingQuestions.set(callId, { cwd, request, finish, cancel() { onCancel?.(); abort(); } });
         activeQuestions.add(callId);
         signal?.addEventListener("abort", abort, { once: true });
@@ -38,22 +54,30 @@ export function createQuestionContext(cwd: string, send: (event: Extract<AgentEv
       disposed = true;
       for (const callId of activeQuestions) pendingQuestions.get(callId)?.finish(new Error("提问所属对话已结束"));
     },
+    detach() {
+      // 页面断开时保留等待中的提问，后台运行继续等待作答。
+    },
   };
 }
 
 export function answerQuestion(cwd: string, callId: string, response: { answer?: string; values?: unknown; cancelled?: boolean; skipped?: boolean }) {
   const pending = pendingQuestions.get(callId);
-  if (!pending || pending.cwd !== cwd) throw Object.assign(new Error("提问不存在或已结束"), { status: 404 });
+  const stored = getPendingQuestion(callId);
+  if ((!pending || pending.cwd !== cwd) && (!stored || stored.cwd !== cwd)) {
+    throw Object.assign(new Error("提问不存在或已结束"), { status: 404 });
+  }
   if (response.cancelled) {
-    pending.cancel();
+    if (pending) pending.cancel();
+    else finishPendingQuestion(callId, "cancelled");
     return;
   }
   if (response.skipped) {
     const result: QuestionAnswer = { answer: "用户跳过了本次提问", skipped: true };
-    pending.finish(result);
+    finishPendingQuestion(callId, result);
+    pending?.finish(result);
     return result;
   }
-  const fields = pending.request.fields;
+  const fields = (pending?.request ?? stored?.request)?.fields;
   let result: QuestionAnswer;
   if (fields?.length) {
     const shape = Object.fromEntries(fields.map(field => {
@@ -80,6 +104,9 @@ export function answerQuestion(cwd: string, callId: string, response: { answer?:
     if (!parsed.success) throw Object.assign(new Error("请输入回答"), { status: 400 });
     result = { answer: parsed.data };
   }
-  pending.finish(result);
+  const runId = stored?.runId;
+  finishPendingQuestion(callId, result);
+  pending?.finish(result);
+  if (runId) void maybeContinueRunAfterQuestions(runId);
   return result;
 }

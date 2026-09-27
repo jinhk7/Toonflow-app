@@ -45,14 +45,16 @@ import { Panel, useVueFlow, type FlowExportObject } from "@vue-flow/core";
 import { ElMessage, ElMessageBox, type InputInstance } from "element-plus";
 import { IconEdit, IconCheck, IconChevronDown, IconPlus, IconTrash } from "@tabler/icons-vue";
 import { useWorkspaceStore } from "@/stores/workspace";
-import useWorkspaceFiles from "@/lib/workspaceFiles";
-import { getCanvasAssetDirectories, isCanvasFile } from "@/pages/workspace/canvasFile";
+import useWorkspaceFiles, { type WorkspaceGraph } from "@/lib/workspaceFiles";
+import { isCanvasFile } from "@/pages/workspace/canvasFile";
 
 const props = defineProps<{
   directory?: string;
   initialCanvasId?: string;
   activateCanvas?: (id: string, signal?: AbortSignal) => Promise<void>;
   flushSave: (action?: () => Promise<void>) => Promise<void>;
+  onGraphLoaded?: (path: string, graph: WorkspaceGraph) => void;
+  onGraphRenamed?: (previous: string, target: string) => void;
 }>();
 const workspaceStore = useWorkspaceStore();
 const workspaceName = computed(() => workspaceStore.project?.name || "未命名工作区");
@@ -61,16 +63,18 @@ watch([() => workspaceStore.project?.directory, workspaceName], () => {
   projectNameDraft.value = workspaceName.value;
 }, { immediate: true });
 
-function saveProjectName(event: Event) {
+async function saveProjectName(event: Event) {
   if (event instanceof KeyboardEvent && event.isComposing) return;
   const project = workspaceStore.project;
-  if (project) workspaceStore.renameProject(project.directory, projectNameDraft.value);
+  const nextName = projectNameDraft.value.trim();
+  if (!project || !nextName || nextName === workspaceName.value) { projectNameDraft.value = workspaceName.value; return; }
+  try { await workspaceStore.renameProject(project.directory, nextName); }
+  catch (err) { ElMessage.error(errorMessage(err, "重命名项目失败")); }
   projectNameDraft.value = workspaceName.value;
 }
 
 type Canvas = { id: string; name: string; flow?: Pick<FlowExportObject, "nodes" | "edges" | "viewport"> };
 const canvases = inject<ShallowRef<Canvas[]>>("canvasList", shallowRef<Canvas[]>([]));
-const getRetainedNodes = inject<(id: string) => { id: string; data?: unknown }[]>("canvasAssetNodes", () => []);
 const boundCanvas = shallowRef<Canvas>();
 const activeCanvasId = defineModel<string>("canvasId", { default: "" });
 watch(canvases, () => {
@@ -161,17 +165,13 @@ async function applyCanvas(canvasId: string, directory: string, signal?: AbortSi
     checkCanvasDirectory(directory, signal);
     return;
   }
-  if (!nextCanvas.flow) {
-    const data = await useWorkspaceFiles(directory).readJson<Partial<NonNullable<Canvas["flow"]>> & { toonflowCanvas?: boolean } | null>(nextCanvas.id);
-    checkCanvasDirectory(directory, signal);
-    if (data?.toonflowCanvas !== true || !Array.isArray(data.nodes) || !Array.isArray(data.edges) || !data.viewport
-      || ![data.viewport.x, data.viewport.y, data.viewport.zoom].every(Number.isFinite) || data.viewport.zoom <= 0) throw new Error("画布文件格式无效");
-    // 旧画布可能保存了临时导出进度，重新打开时任务已不存在。
-    for (const node of data.nodes) if (node.type === "remote-videoNode" && node.data) delete node.data.exportProgress;
-    nextCanvas.flow = { nodes: data.nodes, edges: data.edges, viewport: data.viewport };
-  }
   await props.flushSave();
   checkCanvasDirectory(directory, signal);
+  const data = await useWorkspaceFiles(directory).readGraph(nextCanvas.id);
+  checkCanvasDirectory(directory, signal);
+  props.onGraphLoaded?.(nextCanvas.id, structuredClone(data));
+  for (const node of data.nodes) if (node.type === "remote-videoNode" && node.data) delete (node.data as Record<string, unknown>).exportProgress;
+  nextCanvas.flow = { nodes: data.nodes as FlowExportObject["nodes"], edges: data.edges as FlowExportObject["edges"], viewport: data.viewport };
   if (currentCanvas) currentCanvas.flow = toObject();
   // 应用画布数据时暂时清空文件名，避免初始化触发自动保存。
   activeCanvasId.value = "";
@@ -215,7 +215,7 @@ async function removeCanvas(canvas: Canvas) {
   busy.value = true;
   canvasListVisible.value = false;
   try {
-    const confirmed = await ElMessageBox.confirm(`确定删除“${canvas.name}”？对应的 ${id} 文件及独占的节点素材也会被删除，其他画布共用的素材会保留。此操作不可撤销。`, "删除画布", {
+    const confirmed = await ElMessageBox.confirm("确定删除“" + canvas.name + "”？只删除画布文件；任务成果和媒体素材仍保留在项目中。此操作不可撤销。", "删除画布", {
       type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", closeOnClickModal: false,
     }).then(() => true, () => false);
     if (!confirmed) return;
@@ -228,28 +228,11 @@ async function removeCanvas(canvas: Canvas) {
       if (canvas.id !== id || !canvases.value.includes(canvas)) throw new Error("画布已变更，请重新选择");
       if (canvases.value.length <= 1) throw new Error("至少保留一个画布");
       const files = useWorkspaceFiles(directory);
-      const storedCanvases = await Promise.all((await listCanvases(directory)).map(async canvas => {
-        const data = await files.readJson<{ toonflowCanvas?: boolean; nodes?: { id: string; data?: unknown }[] }>(canvas.id);
-        if (data?.toonflowCanvas !== true || !Array.isArray(data.nodes) || data.nodes.some(node => !node || typeof node.id !== "string")) {
-          throw new Error(`无法确认 ${canvas.id} 的素材引用，已停止删除`);
-        }
-        return { id: canvas.id, nodes: [...data.nodes, ...getRetainedNodes(canvas.id)] };
-      }));
-      const removedCanvas = storedCanvases.find(canvas => canvas.id === id);
-      if (!removedCanvas) throw new Error("画布不存在，请重新获取画布列表");
-      if (storedCanvases.length <= 1) throw new Error("至少保留一个画布");
-      const assetDirectories = getCanvasAssetDirectories(removedCanvas.nodes, storedCanvases.filter(canvas => canvas.id !== id).flatMap(canvas => canvas.nodes));
-      checkCanvasDirectory(directory);
-      await files.remove(id);
+      await files.removeGraph(id);
       checkCanvasDirectory(directory);
       canvases.value = canvases.value.filter(item => item !== canvas);
-      // 等待宿主停止并卸载已删除画布，再恢复其他画布的自动保存。
+      // 媒体可能仍被在途任务或成果引用，画布删除不清理素材目录。
       await nextTick();
-      const results = await Promise.allSettled(assetDirectories.map(path => files.remove(path, true).catch(error => {
-        if (!axios.isAxiosError<{ data?: { code?: string } }>(error) || error.response?.data.data?.code !== "ENOENT") throw error;
-      })));
-      const failed = results.flatMap((result, index) => result.status === "rejected" ? [assetDirectories[index]] : []);
-      if (failed.length) throw new Error(`画布已删除，但 ${failed.length} 个素材目录清理失败：${failed.join("、")}`);
     });
     if (props.directory === directory) ElMessage.success("画布已删除");
   } catch (err) {
@@ -357,8 +340,9 @@ async function renameCanvasFile(id: string, name: string, directory: string, sig
   await props.flushSave(async () => {
     checkCanvasDirectory(directory, signal);
     const target = `${name}.json`;
-    await useWorkspaceFiles(directory).rename(id, target);
+    await useWorkspaceFiles(directory).renameGraph(id, target);
     checkCanvasDirectory(directory);
+    props.onGraphRenamed?.(id, target);
     // 文件已改名时先更新保存路径，再响应取消，避免自动保存重新创建旧文件。
     if (activeCanvasId.value === id) activeCanvasId.value = target;
     if (newCanvasId.value === id) newCanvasId.value = target;

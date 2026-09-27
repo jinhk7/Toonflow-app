@@ -83,7 +83,7 @@
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessage, ElLoading, ElImageViewer } from "element-plus";
 import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, nodeTools, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { groupNodeModels, nodeSkeleton, nodeTools, useNode, useNodeGeneration, useNodeMediaPersistence, useNodeReferences, z, type NodeMediaModel, type NodeHandle, type PrepareMediaJobResult } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import generationSettings from "./components/generationSettings.vue";
@@ -108,6 +108,8 @@ data.value.model ??= "";
 data.value.size ??= "";
 data.value.ratio ??= "16:9";
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
+const mediaPersistence = useNodeMediaPersistence(id, () => data.value as Record<string, unknown>);
+const outputSlot = "image";
 const models = ref<NodeMediaModel[]>([]);
 const modelsLoading = ref(false);
 const uploading = ref(false);
@@ -151,7 +153,9 @@ const previewUrl = files.useFileUrl(
   (error) => showError(error, "图片读取失败")
 );
 
-onMounted(() => loadModels().catch((error) => showError(error, "模型读取失败")));
+onMounted(() => loadModels()
+  .then(() => resumePendingGeneration())
+  .catch((error) => showError(error, "模型读取失败")));
 onScopeDispose(() => {
   disposed = true;
   generationController?.abort();
@@ -199,6 +203,71 @@ function loadModels() {
   return modelsRequest;
 }
 
+function mediaBindingFields(binding?: PrepareMediaJobResult) {
+  return binding ? {
+    canvasPath: binding.canvasPath,
+    nodeId: binding.nodeId,
+    outputSlot: binding.outputSlot,
+    expectedNodeVersion: binding.expectedNodeVersion,
+  } : {};
+}
+
+function buildImageInput(choice: NodeMediaModel) {
+  return {
+    providerId: choice.providerId,
+    modelId: choice.modelId,
+    prompt: generationPrompt.value,
+    size: data.value.size,
+    ratio: data.value.ratio,
+    outputDirectory: `assets/${id}`,
+    images: refList.value.flatMap((item) => (item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : [])),
+  };
+}
+
+async function waitForImageResult(directory: string, idempotencyKey: string, binding?: PrepareMediaJobResult, signal?: AbortSignal) {
+  const choice = selectedModel.value;
+  if (!choice) throw new Error("请先选择图片模型");
+  const [result] = await ai.generateImage({
+    directory,
+    idempotencyKey,
+    ...buildImageInput(choice),
+    ...mediaBindingFields(binding),
+  }, signal);
+  if (!result) throw new Error("供应商未返回图片");
+  outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+  await mediaPersistence.clearPending(outputSlot);
+}
+
+async function resumePendingGeneration() {
+  const pending = mediaPersistence.readPending();
+  if (!pending || pending.outputSlot !== outputSlot || generating.value || uploading.value || deleting.value) return;
+  const workspace = files.getWorkspaceFiles();
+  const controller = new AbortController();
+  generationController = controller;
+  generation = generationState.run(async () => {
+    const { directory } = await workspace.list();
+    controller.signal.throwIfAborted();
+    const job = await ai.fetchMediaJob(directory, pending.idempotencyKey, controller.signal);
+    if (job.status === "completed" && job.files?.length) {
+      const result = job.files.find(file => file.mediaType === "image") ?? job.files[0];
+      outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+      await mediaPersistence.clearPending(outputSlot);
+      return;
+    }
+    if (job.status === "failed" || job.status === "unknown" || job.status === "collectionFailed") {
+      throw new Error(job.errorMessage || "媒体生成失败");
+    }
+    const [result] = await ai.pollMediaJob(directory, pending.idempotencyKey, controller.signal);
+    if (!result) throw new Error("供应商未返回图片");
+    outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+    await mediaPersistence.clearPending(outputSlot);
+  })
+    .catch((error) => showError(error, "图片生成失败"))
+    .finally(() => {
+      generationController = undefined;
+    });
+}
+
 async function startGeneration() {
   const choice = selectedModel.value;
   if (generating.value) throw new Error("图片正在生成，请等待完成");
@@ -209,27 +278,14 @@ async function startGeneration() {
   if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
   const workspace = files.getWorkspaceFiles();
   const controller = new AbortController();
-  const input = {
-    providerId: choice.providerId,
-    modelId: choice.modelId,
-    prompt: generationPrompt.value,
-    size: data.value.size,
-    ratio: data.value.ratio,
-    outputDirectory: `assets/${id}`,
-    images: refList.value.flatMap((item) => (item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : [])),
-  };
+  const { idempotencyKey, binding } = await mediaPersistence.prepare(outputSlot);
   generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消。
+  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消本地等待。
   generation = generationState.run(() => workspace
     .list()
     .then(({ directory }) => {
       controller.signal.throwIfAborted();
-      return ai.generateImage({ ...input, directory }, controller.signal);
-    })
-    .then(([result]) => {
-      controller.signal.throwIfAborted();
-      if (!result) throw new Error("供应商未返回图片");
-      outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+      return waitForImageResult(directory, idempotencyKey, binding, controller.signal);
     }))
     .catch((error) => showError(error, "图片生成失败"))
     .finally(() => {

@@ -34,5 +34,21 @@ export type AgentEvent =
   | { type: "subAgentEvent"; file: string; event: AgentEvent }
   | { type: "report"; parentFile: string; file: string; name: string; content: string; id: string }
   | { type: "accepted" }
+  | { type: "run"; runId: string; sessionFile?: string }
   | { type: "stats"; stats: AgentStats; contextUsage?: AgentContext }
   | { type: "done" };
+
+export type AgentRunControl = {
+  signal: AbortSignal;
+  shouldPauseBeforeStep(): boolean;
+  shouldTerminate(): boolean;
+};
+
+export type AgentPendingQuestion = {
+  callId: string;
+  toolCallId: string;
+  title: string;
+  question: string;
+  options?: string[];
+  fields?: QuestionRequest["fields"];
+};

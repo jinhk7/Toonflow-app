@@ -10,6 +10,7 @@ import "element-plus/es/components/button/style/css";
 import "element-plus/es/components/result/style/css";
 
 import router from "@/router";
+import { registerPwaServiceWorker } from "@/lib/pwaRegister";
 import { registerDesktopProtocol } from "@/lib/desktopProtocol";
 import { registerDesktopDownloads } from "@/lib/saveFile";
 import { registerAnonymousData } from "@/lib/anonymousData";
@@ -38,6 +39,7 @@ async function notifyDesktopReady(failed = false) {
   : loadSettings()).then(async () => {
   app.use(createPinia().use(createPersistedState({ storage: settingsStorage })));
   app.use(router);
+  registerPwaServiceWorker();
   await router.isReady();
   app.onUnmount(registerAnonymousData());
   app.mount("#app");

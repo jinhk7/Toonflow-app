@@ -10,7 +10,7 @@ import conf from "@/utils/conf";
 import { callControl, getConnection, listConnections } from "@/utils/mcp/control";
 import { appOperations, runAppOperation } from "@/utils/mcp/operations";
 import { listTools } from "@/utils/plugins/tools";
-import { isWithin, lockWorkspaceFiles, protectWorkspaceRoot, renameWorkspaceFile, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
+import { isWithin, lockWorkspaceFiles, protectWorkspaceRoot, renameWorkspaceFile, resolveWorkspacePath, writeWorkspaceFile, assertNoManagedGraph } from "@/utils/workspace/files";
 
 const targetSchema = z.strictObject({ connectionId: z.uuid().optional(), directory: z.string().min(1).max(4096).optional(), canvasId: z.string().min(1).max(256).optional() });
 const requestSchema = z.strictObject({ target: targetSchema.optional(), args: z.record(z.string(), z.unknown()) });
@@ -162,6 +162,10 @@ export async function getMcpTools(): Promise<McpTool[]> {
     if (destination) protectWorkspaceRoot(directory!, destination.path);
     const release = lockWorkspaceFiles([source.path, ...(destination ? [destination.path] : [])]);
     try {
+      if (["writeBinary", "rename", "remove"].includes(args.action)) {
+        await assertNoManagedGraph(source.path);
+        if (destination) await assertNoManagedGraph(destination.path);
+      }
       if (args.action === "writeBinary") {
         if (args.base64 === undefined) throw new Error("写入二进制文件需要 base64");
         const bytes = Buffer.from(args.base64, "base64");
