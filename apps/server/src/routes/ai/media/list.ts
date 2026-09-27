@@ -7,6 +7,6 @@ import { listProjectMediaJobs } from "@/utils/media/jobLedger";
 import { toMediaJobView } from "@/utils/media/mediaJobs";
 
 export default Router().get("/", validateFields({ directory: z.string().min(1).max(4096) }, "query"), async (req, res) => {
-  const directory = await u.workspace.resolveWorkspace(req, String(req.query.directory));
+  const directory = await u.workspace.resolveWorkspace(String(req.query.directory));
   res.set("Cache-Control", "no-store").json(success(listProjectMediaJobs(directory).map(toMediaJobView)));
 });

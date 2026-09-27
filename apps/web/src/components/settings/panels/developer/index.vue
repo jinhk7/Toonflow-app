@@ -323,7 +323,7 @@ async function installPlugin(sourceType: "file" | "url", file?: File) {
     if (file) {
       installedName.value = await installPluginFile(type, file, forceInstall.value);
     } else {
-      const { data } = await axios.post(`/api/${type}s/install`, { url: pluginUrl.value.trim(), force: forceInstall.value }, { headers: { "x-toonflow-workspace": "1" } });
+      const { data } = await axios.post(`/api/${type}s/install`, { url: pluginUrl.value.trim(), force: forceInstall.value });
       if (data.code !== 200) throw new Error(data.message || "安装失败");
       installedName.value = data.data.name;
       window.dispatchEvent(new CustomEvent("toonflow:plugin-installed", { detail: { type, name: data.data.name } }));
@@ -344,7 +344,7 @@ async function openDevTools() {
   opening.value = true;
   requestError.value = "";
   try {
-    const response = await fetch("/api/desktop/devtools", { method: "POST", headers: { "x-toonflow-desktop": "1" } });
+    const response = await fetch("/api/desktop/devtools", { method: "POST" });
     if (!response.ok) throw new Error((await response.json()).message || "打开开发者工具失败，请重试。");
   } catch (error) {
     requestError.value = error instanceof Error ? error.message : "打开开发者工具失败，请重试。";

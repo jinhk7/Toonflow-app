@@ -78,7 +78,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 import axios from "axios";
 import type { Connection } from "@vue-flow/core";
 import mobileTopBar from "./components/mobileTopBar.vue";
@@ -202,10 +202,6 @@ async function saveParent() {
 async function saveMediaSettings() {
   if (!graph.value || !node.value || !isMediaNode.value) return;
   if (node.value.data?.model === modelDraft.value && node.value.data?.prompt === promptDraft.value) return;
-  if (node.value.data?.pendingMediaJob) {
-    try { await ElMessageBox.confirm("编辑生成输入会使未完成任务的自动结果关联失效；仍要保存吗？", "确认修改", { confirmButtonText: "保存", cancelButtonText: "取消" }); }
-    catch { return; }
-  }
   try {
     await applyChanges([changeForNode(graph.value, { ...node.value, data: { ...node.value.data, model: modelDraft.value, prompt: promptDraft.value } }, node.value.id)]);
     ElMessage.success("已保存生成设置");
@@ -245,7 +241,7 @@ onMounted(async () => {
   }
   await load();
   try {
-    const { data } = await axios.get<{ code: number; data: typeof mediaModels.value }>("/api/ai/media/models", { headers: { "x-toonflow-workspace": "1" } });
+    const { data } = await axios.get<{ code: number; data: typeof mediaModels.value }>("/api/ai/media/models");
     if (data.code === 200) mediaModels.value = data.data.filter(model => model.type === (node.value?.type === "remote-videoGenerationNode" ? "video" : "image"));
   } catch { /* 已有节点仍可查看；无可用模型时不提交新任务 */ }
 });

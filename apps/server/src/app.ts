@@ -40,7 +40,7 @@ export async function createApp({
   if (dataDirectory && skillsRoot) await initializePlugins(resolve(dataDirectory, "skills"), skillsRoot);
   if (dataDirectory && agentsRoot) await initializePlugins(resolve(dataDirectory, "agents"), agentsRoot);
   const app = express();
-  // 仅信任本机反向代理提供的 HTTPS 协议，直连请求不能伪造远程页面来源。
+  // 仅信任本机反向代理提供的 HTTPS 协议，用于生成 A2A、MCP 等对外地址。
   app.set("trust proxy", "loopback");
 
   if (process.env.NODE_ENV === "dev") {

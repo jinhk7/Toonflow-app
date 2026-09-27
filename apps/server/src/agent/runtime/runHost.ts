@@ -9,6 +9,7 @@ import { applyAnsweredQuestionsToSession } from "@/agent/runtime/sessionRecovery
 import {
   appendRunEvent,
   ensureAgentRunStore,
+  finishPendingQuestion,
   getActiveRunForSession,
   getAgentRun,
   insertAgentRun,
@@ -257,6 +258,7 @@ export async function controlAgentRun(runId: string, action: "pause" | "resume" 
   const record = getAgentRun(runId);
   if (!record) throw Object.assign(new Error("运行不存在"), { status: 404 });
   if (action === "pause") {
+    if (!run) throw Object.assign(new Error("运行未在执行，无需暂停"), { status: 409 });
     updateAgentRun(runId, { intent: "pause", status: "paused" });
     return getAgentRun(runId)!;
   }
@@ -281,9 +283,15 @@ export async function controlAgentRun(runId: string, action: "pause" | "resume" 
     }
     throw Object.assign(new Error("当前状态无法继续运行"), { status: 409 });
   }
+  if (!run) {
+    if (record.status === "completed") throw Object.assign(new Error("运行已结束"), { status: 409 });
+    for (const question of listWaitingQuestionsForRun(runId)) finishPendingQuestion(question.callId, "cancelled");
+    updateAgentRun(runId, { intent: "terminate", status: "completed", errorMessage: "本次流程已终止" });
+    return getAgentRun(runId)!;
+  }
   updateAgentRun(runId, { intent: "terminate", status: "terminating" });
-  run?.stopGeneration.abort();
-  run?.runAbort.abort();
+  run.stopGeneration.abort();
+  run.runAbort.abort();
   return getAgentRun(runId)!;
 }
 

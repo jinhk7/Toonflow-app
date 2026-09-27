@@ -71,7 +71,7 @@
             :disabled="deleting || uploading || (!generating && (!generationPrompt || !selectedModel))"
             :title="generating ? '停止生成' : '生成视频'"
             :aria-label="generating ? '停止生成' : '生成视频'"
-            @click="generating ? generationController?.abort() : startGeneration().catch((error) => showError(error, '视频生成失败'))" />
+            @click="generating ? generationController?.abort() : startFromButton().catch((error) => showError(error, '视频生成失败'))" />
         </div>
       </el-card>
     </template>
@@ -80,7 +80,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
-import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessage, ElLoading } from "element-plus";
+import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessage, ElMessageBox, ElLoading } from "element-plus";
 import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer } from "@tabler/icons-vue";
 import { groupNodeModels, nodeSkeleton, nodeTools, useNode, useNodeGeneration, useNodeMediaPersistence, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle, type PrepareMediaJobResult } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
@@ -297,13 +297,16 @@ async function resumePendingGeneration() {
     const { directory } = await workspace.list();
     controller.signal.throwIfAborted();
     const job = await ai.fetchMediaJob(directory, pending.idempotencyKey, controller.signal);
-    if (job.status === "completed" && job.files?.length) {
+    if (!job) throw new Error("未找到任务记录，点击生成可核对并确认放弃原任务");
+    if (job.status === "completed" && job.linkStatus !== "pending" && job.files?.length) {
       const result = job.files.find(file => file.mediaType === "video") ?? job.files[0];
       outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
       await mediaPersistence.clearPending(outputSlot);
       return;
     }
-    if (job.status === "failed" || job.status === "unknown" || job.status === "collectionFailed") {
+    if (job.status === "failed") throw Object.assign(new Error(job.errorMessage || "媒体生成失败"), { definitive: true });
+    if (job.status === "unknown") throw new Error(`${job.errorMessage || "提交结果未知"}；结果未知，点击生成可确认放弃后重新提交`);
+    if (job.status === "collectionFailed") {
       throw new Error(job.errorMessage || "媒体生成失败");
     }
     const [result] = await ai.pollMediaJob(directory, pending.idempotencyKey, controller.signal);
@@ -311,10 +314,44 @@ async function resumePendingGeneration() {
     outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
     await mediaPersistence.clearPending(outputSlot);
   })
-    .catch((error) => showError(error, "视频生成失败"))
+    .catch(async (error) => {
+      showError(error, "视频生成失败");
+      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showError(releaseError, "解除任务占用失败"));
+    })
     .finally(() => {
       generationController = undefined;
     });
+}
+
+// 结果未知的任务不会再写回节点；只有按钮操作经用户确认后才解除占用，Agent 调用仍被 prepare 拒绝。
+async function releaseUnknownPending() {
+  const pending = mediaPersistence.readPending();
+  if (!pending || pending.outputSlot !== outputSlot || generating.value) return true;
+  const { directory } = await files.getWorkspaceFiles().list();
+  const job = await ai.fetchMediaJob(directory, pending.idempotencyKey);
+  if (job && job.status !== "unknown") {
+    await resumePendingGeneration();
+    return false;
+  }
+  try {
+    await ElMessageBox.confirm(
+      "上次任务结果未知，服务可能仍在生成或已计费。请先在服务端核对；放弃后原任务的结果不会写回节点，本次会产生新的生成请求。",
+      "放弃上次任务？",
+      { type: "warning", confirmButtonText: "放弃并重新生成", cancelButtonText: "取消" },
+    );
+  } catch { return false; }
+  if (disposed || mediaPersistence.readPending()?.idempotencyKey !== pending.idempotencyKey) return false;
+  const current = await ai.fetchMediaJob(directory, pending.idempotencyKey);
+  if (current && current.status !== "unknown") {
+    await resumePendingGeneration();
+    return false;
+  }
+  await mediaPersistence.clearPending(outputSlot);
+  return true;
+}
+
+async function startFromButton() {
+  if (await releaseUnknownPending()) await startGeneration();
 }
 
 async function startGeneration() {
@@ -337,7 +374,10 @@ async function startGeneration() {
       controller.signal.throwIfAborted();
       return waitForVideoResult(directory, idempotencyKey, binding, controller.signal);
     }))
-    .catch((error) => showError(error, "视频生成失败"))
+    .catch(async (error) => {
+      showError(error, "视频生成失败");
+      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showError(releaseError, "解除任务占用失败"));
+    })
     .finally(() => {
       generationController = undefined;
     });

@@ -16,7 +16,6 @@ export interface Plugin {
   github?: string;
   version?: string;
   enabled?: boolean;
-  canConfigure?: boolean;
   configRules?: Raw<Rule[]>;
   config?: Record<string, unknown>;
   url?: string;

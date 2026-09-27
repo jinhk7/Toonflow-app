@@ -42,7 +42,6 @@ const loading = ref(true);
 const loaded = ref(false);
 const saving = ref(false);
 const error = ref("");
-const headers = { "x-toonflow-workspace": "1" };
 const controller = new AbortController();
 onBeforeUnmount(() => controller.abort());
 onMounted(async () => {
@@ -56,7 +55,7 @@ function errorMessage(cause: unknown) {
 }
 
 async function load() {
-  const { data } = await axios.get<{ code: number; data: A2aSettings; message?: string }>("/api/agents/a2a/get", { headers, signal: controller.signal });
+  const { data } = await axios.get<{ code: number; data: A2aSettings; message?: string }>("/api/agents/a2a/get", { signal: controller.signal });
   if (data.code !== 200) throw new Error(data.message || "读取 A2A 设置失败");
   applySettings(data.data);
 }
@@ -82,7 +81,7 @@ async function save() {
     const { data } = await axios.put("/api/agents/a2a/save", {
       enabled: enabled.value, directory: directory.value.trim(), providerId: model?.providerId ?? "", modelId: model?.modelId ?? "",
       ...(thinkingLevel.value ? { thinkingLevel: thinkingLevel.value } : {}),
-    }, { headers });
+    });
     if (data.code !== 200) throw new Error(data.message || "保存 A2A 设置失败");
     applySettings(data.data);
     emit("saved");

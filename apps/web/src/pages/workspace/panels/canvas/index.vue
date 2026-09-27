@@ -351,7 +351,7 @@ async function saveDocumentNode(directory: string, canvasPath: string, nodeId: s
       const updated = await files.modifyGraph(canvasPath, [{ kind: "output", nodeId, slot: handleId,
         expectedVersion: canvas.toonflowGraph.outputs[JSON.stringify([nodeId, handleId])] ?? 0,
         value: output?.dataType === "STRING" ? { ...output, value: text } : { dataType: "STRING", value: text } }]);
-      graphSnapshots.set(canvasPath, updated);
+      rememberGraph(canvasPath, updated);
     }
     checkDocumentDirectory(directory);
     if (liveNode && canvasId.value === canvasPath && findNode(nodeId) === liveNode) {
@@ -441,7 +441,8 @@ let changedWhilePaused = false;
 let saveRevision = 0;
 const graphSnapshots = new Map<string, WorkspaceGraph>();
 function rememberGraph(path: string, graph: WorkspaceGraph) {
-  graphSnapshots.set(path, graph);
+  // 保存基线必须与 Vue Flow 的可变节点数据隔离，否则修改 pending 会同时篡改基线而被漏写。
+  graphSnapshots.set(path, JSON.parse(JSON.stringify(graph)) as WorkspaceGraph);
 }
 function renameGraphSnapshot(previous: string, target: string) {
   const graph = graphSnapshots.get(previous);
@@ -502,7 +503,7 @@ async function refreshGraph() {
       lastConflictRevision = remote.toonflowGraph.revision;
       return;
     }
-    graphSnapshots.set(path, remote);
+    rememberGraph(path, remote);
     mergeSavedGraph(baseline, remote);
   } catch (error) {
     console.error("画布同步失败", error);
@@ -516,7 +517,7 @@ const saveCanvas = debounce((directory: string, fileName: string) => {
       const baseline = graphSnapshots.get(fileName);
       if (!baseline) throw new Error("画布快照尚未加载，无法安全保存");
       const updated = await useWorkspaceFiles(directory).saveGraph(fileName, baseline, { nodes: flow.nodes as WorkspaceGraph["nodes"], edges: flow.edges as WorkspaceGraph["edges"], viewport: flow.viewport });
-      graphSnapshots.set(fileName, updated);
+      rememberGraph(fileName, updated);
       if (canvasId.value === fileName && project.value?.directory === directory) mergeSavedGraph(flow, updated);
       saveError = undefined;
     } catch (err) {
@@ -878,7 +879,8 @@ provide("prepareMediaJob", async (nodeId: string, outputSlot: string) => {
   const directory = project.value?.directory;
   const path = canvasId.value;
   if (!directory || !path) throw new Error("请先打开画布");
-  await flushCanvasSave();
+  await useNodeEvent(nodeId, flow).emit("save");
+  await saving;
   if (project.value?.directory !== directory || canvasId.value !== path) throw new Error("画布已切换，请重新提交");
   const graph = graphSnapshots.get(path);
   const node = graph?.nodes.find(item => item.id === nodeId);
@@ -889,28 +891,40 @@ provide("prepareMediaJob", async (nodeId: string, outputSlot: string) => {
 provide("persistNodeGraph", async (nodeId: string, expectedVersion: number) => {
   const directory = project.value?.directory;
   const path = canvasId.value;
-  const sent = toObject();
-  const node = sent.nodes.find(item => item.id === nodeId);
-  if (!directory || !path || !node) throw new Error("画布节点已离开，不能提交任务");
-  saveCanvas.cancel();
-  await saving;
-  const baseline = graphSnapshots.get(path);
-  if (!baseline || baseline.toonflowGraph.nodes[nodeId] !== expectedVersion) throw new Error("节点版本已变化，不能提交任务");
-  const files = useWorkspaceFiles(directory);
-  let updated: WorkspaceGraph;
-  try {
-    updated = await files.modifyGraph(path, [{ kind: "node", id: nodeId, expectedVersion,
-      dependencies: node.parentNode ? { [node.parentNode]: baseline.toonflowGraph.nodes[node.parentNode] ?? 0 } : {}, value: node }]);
-  } catch (error) {
-    const remote = await files.readGraph(path);
-    const current = remote.nodes.find(item => item.id === nodeId);
-    if (remote.toonflowGraph.nodes[nodeId] !== expectedVersion + 1
-      || JSON.stringify(current?.data?.pendingMediaJob) !== JSON.stringify(node.data?.pendingMediaJob)) throw error;
-    updated = remote;
-  }
-  if (project.value?.directory !== directory || canvasId.value !== path) throw new Error("画布已切换，不能继续提交任务");
-  graphSnapshots.set(path, updated);
-  mergeSavedGraph(sent, updated);
+  if (!directory || !path || !findNode(nodeId)) throw new Error("画布节点已离开，不能提交任务");
+  // 等待已排队的整画布写入，但不取消其他节点的未保存修改。
+  saveCanvas.flush();
+  const persist = saving.then(async () => {
+    if (project.value?.directory !== directory || canvasId.value !== path || saveCancelled || savePaused)
+      throw new Error("画布已切换，不能继续提交任务");
+    const sent = toObject();
+    const node = sent.nodes.find(item => item.id === nodeId);
+    const baseline = graphSnapshots.get(path);
+    if (!node || !baseline) throw new Error("画布节点已离开，不能提交任务");
+    const sameNode = (item: typeof node | undefined) => JSON.stringify(item, (key, value) => key === "outputs" ? undefined : value)
+      === JSON.stringify(node, (key, value) => key === "outputs" ? undefined : value);
+    const currentVersion = baseline.toonflowGraph.nodes[nodeId] ?? 0;
+    if (currentVersion >= expectedVersion && sameNode(baseline.nodes.find(item => item.id === nodeId))) return currentVersion;
+    if (currentVersion !== expectedVersion) throw new Error("节点版本已变化，不能提交任务");
+    const files = useWorkspaceFiles(directory);
+    let updated: WorkspaceGraph;
+    try {
+      updated = await files.modifyGraph(path, [{ kind: "node", id: nodeId, expectedVersion,
+        dependencies: node.parentNode ? { [node.parentNode]: baseline.toonflowGraph.nodes[node.parentNode] ?? 0 } : {}, value: node }]);
+    } catch (error) {
+      const remote = await files.readGraph(path);
+      if ((remote.toonflowGraph.nodes[nodeId] ?? 0) <= expectedVersion || !sameNode(remote.nodes.find(item => item.id === nodeId))) throw error;
+      updated = remote;
+    }
+    if (project.value?.directory !== directory || canvasId.value !== path) throw new Error("画布已切换，不能继续提交任务");
+    if ((graphSnapshots.get(path)?.toonflowGraph.revision ?? -1) <= updated.toonflowGraph.revision) {
+      rememberGraph(path, updated);
+      mergeSavedGraph(sent, updated);
+    }
+    return updated.toonflowGraph.nodes[nodeId] ?? 0;
+  });
+  saving = persist.then(() => {}, () => {});
+  return persist;
 });
 provide("workspaceDirectory", () => {
   const directory = project.value?.directory;
@@ -968,7 +982,7 @@ async function loadRemoteNodes(reloadName?: string) {
   try {
     const { data } = await axios.get<{ code: number; data: { name: string; displayName: string; url: string; enabled?: boolean; config?: Record<string, unknown> }[] }>(
       "/api/nodes/get",
-      { headers: { "Cache-Control": "no-cache", "x-toonflow-workspace": "1" } }
+      { headers: { "Cache-Control": "no-cache" } }
     );
     if (requestId !== loadRequest) return;
     if (data.code !== 200 || !Array.isArray(data.data)) throw new Error("节点列表格式错误");

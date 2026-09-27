@@ -5,7 +5,7 @@ import { validateFields } from "@/lib/middleware";
 import { success } from "@/lib/responseFormat";
 
 export default Router().get("/", validateFields({ directory: z.string().min(1).max(4096) }, "query"), async (req, res) => {
-  const cwd = await u.workspace.resolveWorkspace(req, req.query.directory as string);
+  const cwd = await u.workspace.resolveWorkspace(req.query.directory as string);
   res.set("Cache-Control", "no-store");
   try {
     const { path } = await u.workspaceFile.resolveWorkspacePath(cwd, ".agent/sessions");

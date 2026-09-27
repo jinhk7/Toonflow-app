@@ -10,7 +10,7 @@ export default Router().post("/", validateFields({
   directory: z.string().min(1).max(4096),
 }), async (req, res) => {
   try {
-    const directory = await u.workspace.resolveWorkspace(req, req.body.directory);
+    const directory = await u.workspace.resolveWorkspace(req.body.directory);
     res.json(success(await retryMediaJobCollection(req.body.jobId, directory)));
   } catch (err) {
     const status = typeof err === "object" && err && "status" in err ? Number((err as { status: number }).status) : 500;

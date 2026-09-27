@@ -117,7 +117,6 @@ import route114 from "./routes/workspaces/projects/list";
 import route115 from "./routes/workspaces/projects/open";
 import route116 from "./routes/workspaces/projects/remove";
 import route117 from "./routes/workspaces/projects/rename";
-import route118 from "./routes/workspaces/selectDirectory";
 
 export default (app: Express) => {
   app.use("/api/agent", route1);
@@ -237,5 +236,4 @@ export default (app: Express) => {
   app.use("/api/workspaces/projects/open", route115);
   app.use("/api/workspaces/projects/remove", route116);
   app.use("/api/workspaces/projects/rename", route117);
-  app.use("/api/workspaces/selectDirectory", route118);
 }

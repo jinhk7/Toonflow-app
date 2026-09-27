@@ -8,7 +8,7 @@ type Item = { id: string; type?: string; parentNode?: string; data?: { handles?:
 type Edge = Item & { source: string; target: string; sourceHandle?: string; targetHandle?: string };
 type Graph = { toonflowCanvas: true; nodes: Item[]; edges: Edge[]; viewport: { x: number; y: number; zoom: number }; toonflowGraph?: GraphState; [key: string]: unknown };
 type GraphState = { id: string; revision: number; nodes: Record<string, number>; edges: Record<string, number>; outputs: Record<string, number>; viewport: number; receipts: Record<string, { digest: string; revision: number }> };
-export type GraphChange = { kind: "node" | "edge"; id: string; expectedVersion: number; dependencies?: Record<string, number>; value: Item | Edge | null } | { kind: "output"; nodeId: string; slot: string; expectedVersion: number; expectedNodeVersion?: number; value: unknown } | { kind: "viewport"; expectedVersion: number; value: Graph["viewport"] };
+export type GraphChange = { kind: "node" | "edge"; id: string; expectedVersion: number; dependencies?: Record<string, number>; value: Item | Edge | null } | { kind: "output"; nodeId: string; slot: string; expectedVersion: number; pendingJobKey?: string; value: unknown } | { kind: "viewport"; expectedVersion: number; value: Graph["viewport"] };
 
 function invalid(message: string, status = 400): never {
   throw Object.assign(new Error(message), { status });
@@ -40,10 +40,12 @@ function state(graph: Graph): GraphState {
     nodes: Object.fromEntries(graph.nodes.map(item => [item.id, 1])),
     edges: Object.fromEntries(graph.edges.map(item => [item.id, 1])), outputs: {}, viewport: 1, receipts: {} };
 }
-function validateGraph(graph: Graph) {
+// ACT: 只校验本次改动及其相连的元素，旧画布里未改动的历史坏边不阻塞其他编辑。
+function validateGraph(graph: Graph, changedNodes: Set<string>, changedEdges: Set<string>) {
   const nodes = new Map(graph.nodes.map(node => [node.id, node]));
   if (nodes.size !== graph.nodes.length || new Set(graph.edges.map(edge => edge.id)).size !== graph.edges.length) invalid("画布元素 ID 重复");
   for (const node of graph.nodes) {
+    if (!changedNodes.has(node.id) && !(node.parentNode && changedNodes.has(node.parentNode))) continue;
     const seen = new Set([node.id]);
     let parent = node.parentNode;
     while (parent) {
@@ -53,6 +55,7 @@ function validateGraph(graph: Graph) {
     }
   }
   for (const edge of graph.edges) {
+    if (!changedEdges.has(edge.id) && !changedNodes.has(edge.source) && !changedNodes.has(edge.target)) continue;
     const source = nodes.get(edge.source);
     const target = nodes.get(edge.target);
     if (!source || !target || source === target) invalid("连接端点不存在或自连接");
@@ -70,6 +73,8 @@ export async function readGraphUnlocked(path: string) {
   }
   return graph;
 }
+// ACT: 回执只保留最近 1000 次；更早的操作重放按新操作处理，由实体版本号拒绝过期内容。
+const receiptLimit = 1000;
 // 同一画布的独立节点写入等待前一次落盘，真正的实体冲突仍由版本号判断。
 const pendingGraphs = new Map<string, Promise<void>>();
 async function serializeGraph<T>(path: string, action: () => Promise<T>): Promise<T> {
@@ -126,16 +131,21 @@ export async function modifyGraph(path: string, operationId: string, changes: Gr
       if (touched.has(key)) invalid("同一操作不能重复修改同一元素");
       touched.add(key);
       const current = change.kind === "viewport" ? meta.viewport : change.kind === "output" ? meta.outputs[key] ?? 0 : meta[change.kind === "node" ? "nodes" : "edges"][change.id] ?? 0;
-      if (current !== change.expectedVersion) invalid(`画布版本冲突：${key}，当前版本 ${current}`, 409);
+      const outputNode = change.kind === "output" ? graph.nodes.find(item => item.id === change.nodeId) : undefined;
+      if (current !== change.expectedVersion) {
+        // 后台任务与在线节点可能先后写入同一结果，内容相同即视为已完成，不算冲突。
+        if (change.kind === "output" && JSON.stringify(outputNode?.data?.outputs?.[change.slot] ?? null) === JSON.stringify(change.value ?? null)) continue;
+        invalid(`画布版本冲突：${key}，当前版本 ${current}`, 409);
+      }
       if (change.kind === "viewport") {
         if (!validViewport(change.value)) invalid("视口参数无效");
         graph.viewport = change.value;
         meta.viewport++;
       } else if (change.kind === "output") {
-        const node = graph.nodes.find(item => item.id === change.nodeId);
-        if (change.expectedNodeVersion !== undefined && meta.nodes[change.nodeId] !== change.expectedNodeVersion)
-          invalid("节点已变化，不能关联过期任务结果", 409);
+        const node = outputNode;
         if (!node || !change.slot || change.slot.length > 255) invalid("输出槽位或节点无效", 409);
+        if (change.pendingJobKey !== undefined && (node.data?.pendingMediaJob as { idempotencyKey?: unknown } | undefined)?.idempotencyKey !== change.pendingJobKey)
+          invalid("节点已不再等待该任务结果", 409);
         (node.data ??= {}).outputs ??= {};
         if (change.value === null) delete node.data.outputs[change.slot];
         else node.data.outputs[change.slot] = change.value;
@@ -158,9 +168,13 @@ export async function modifyGraph(path: string, operationId: string, changes: Gr
         versions[change.id] = current + 1;
       }
     }
-    validateGraph(graph);
+    validateGraph(graph,
+      new Set(changes.flatMap(change => change.kind === "node" ? [change.id] : [])),
+      new Set(changes.flatMap(change => change.kind === "edge" ? [change.id] : [])));
     meta.revision++;
     meta.receipts[operationId] = { digest, revision: meta.revision };
+    const receiptIds = Object.keys(meta.receipts);
+    for (const id of receiptIds.slice(0, Math.max(0, receiptIds.length - receiptLimit))) delete meta.receipts[id];
     await writeWorkspaceFile(path, `${JSON.stringify(graph, null, 2)}\n`);
     return graph;
   } finally { release(); }

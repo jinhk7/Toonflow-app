@@ -29,39 +29,15 @@ export function getMcpSettings() {
   };
 }
 
-function allowedHost(req: Request) {
-  const local = process.env.toonflowDesktop === "1" || (process.env.NODE_ENV === "dev" && ["win32", "darwin"].includes(process.platform));
-  return !local || ["localhost", "127.0.0.1", "[::1]"].includes(req.hostname);
-}
-
-export function getAppOrigin(req: Request) {
-  const source = req.get("origin") ?? req.get("referer");
-  if (!source || !allowedHost(req)) throw Object.assign(new Error("只允许 Toonflow 页面访问控制连接"), { status: 403 });
-  let url: URL;
-  try { url = new URL(source); }
-  catch { throw Object.assign(new Error("页面来源无效"), { status: 403 }); }
-  if (!["http:", "https:"].includes(url.protocol) || url.host !== req.get("host")) throw Object.assign(new Error("页面来源与服务地址不一致"), { status: 403 });
-  return url.origin;
-}
-
 export function authorizeMcp(req: Request) {
   const { enabled, token } = getMcpSettings();
-  if (!enabled || token.length < 32 || !allowedHost(req)) return false;
+  if (!enabled || token.length < 32) return false;
   const actual = Buffer.from(req.get("authorization") ?? "");
   const expected = Buffer.from(`Bearer ${token}`);
-  if (req.get("origin")) {
-    try { getAppOrigin(req); } catch { return false; }
-  }
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-export function assertAppRequest(req: Request) {
-  getAppOrigin(req);
-  if (req.get("x-toonflow-workspace") !== "1") throw Object.assign(new Error("只允许 Toonflow 页面访问控制连接"), { status: 403 });
-}
-
 export function assertControlRequest(req: Request) {
-  assertAppRequest(req);
   if (!authorizeMcp(req)) throw Object.assign(new Error("MCP 未开启或访问凭证无效"), { status: 403 });
 }
 

@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import { copyFile, link, lstat, rename, unlink, writeFile, realpath, readFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import type { Request } from "express";
 import { resolveWorkspace } from "@/utils/workspace";
 
 export async function writeWorkspaceFile(path: string, content: string | Uint8Array, exclusive = false) {
@@ -38,8 +37,8 @@ export function isWithin(root: string, path: string) {
   return offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset);
 }
 
-export async function resolveWorkspaceFile(req: Request, directory: string, path: string) {
-  const root = await resolveWorkspace(req, directory);
+export async function resolveWorkspaceFile(directory: string, path: string) {
+  const root = await resolveWorkspace(directory);
   return resolveWorkspacePath(root, path);
 }
 

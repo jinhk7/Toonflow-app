@@ -21,7 +21,7 @@ export type AgentRunSnapshot = {
 export async function controlAgentRun(runId: string, action: "pause" | "resume" | "terminate" | "stopGeneration", canvas?: { id: string; tools: unknown[] }) {
   const response = await fetch("/api/agent/run/control", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ runId, action, ...(canvas ? { canvas } : {}) }),
   });
   const payload = await response.json().catch(() => null);
@@ -31,7 +31,6 @@ export async function controlAgentRun(runId: string, action: "pause" | "resume" 
 
 export async function fetchAgentRunSnapshot(runId: string) {
   const response = await fetch(`/api/agent/run/get?runId=${encodeURIComponent(runId)}`, {
-    headers: { "x-toonflow-workspace": "1" },
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) throw new Error(payload?.message || "读取运行状态失败");
@@ -41,7 +40,7 @@ export async function fetchAgentRunSnapshot(runId: string) {
 export async function grantAgentAuthorization(runId: string, toolCallId: string, remaining = 1) {
   const response = await fetch("/api/agent/authorize/grant", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ runId, toolCallId, remaining }),
   });
   const payload = await response.json().catch(() => null);
@@ -51,7 +50,6 @@ export async function grantAgentAuthorization(runId: string, toolCallId: string,
 
 export async function subscribeAgentRunEvents(runId: string, afterSeq: number, onEvent: (event: AgentEvent, meta?: { seq: number }) => void, signal?: AbortSignal) {
   const response = await fetch(`/api/agent/events/get?runId=${encodeURIComponent(runId)}&afterSeq=${afterSeq}`, {
-    headers: { "x-toonflow-workspace": "1" },
     signal,
   });
   for await (const raw of readAgentEvents(response, signal ?? AbortSignal.timeout(600_000))) {
@@ -66,7 +64,7 @@ export async function subscribeAgentRunEvents(runId: string, afterSeq: number, o
 export async function reviewAgentRun(runId: string, toolCallId: string) {
   const response = await fetch("/api/agent/run/review", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ runId, toolCallId }),
   });
   const payload = await response.json().catch(() => null);

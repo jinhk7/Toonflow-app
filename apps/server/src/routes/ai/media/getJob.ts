@@ -19,7 +19,7 @@ export default Router().get("/", validateFields({
     res.status(400).json(error("请提供 jobId 或 idempotencyKey", null, 400));
     return;
   }
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
+  const cwd = await u.workspace.resolveWorkspace(directory);
   const job = jobId ? getMediaJob(jobId) : getMediaJobByIdempotency(cwd, idempotencyKey!);
   if (job && job.workspaceDirectory !== cwd) {
     res.status(404).json(error("媒体任务不存在", null, 404));

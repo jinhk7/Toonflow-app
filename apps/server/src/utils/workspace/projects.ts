@@ -62,11 +62,6 @@ export async function isWithinServerWorkspace(directory: string) {
   return offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset);
 }
 
-export async function isRegisteredProjectDirectory(directory: string) {
-  const key = directoryKey(directory);
-  return !!projectDb().query("SELECT 1 FROM projects WHERE directoryKey = ? LIMIT 1").get(key);
-}
-
 function getProjectByDirectoryKey(key: string) {
   const row = projectDb().query("SELECT * FROM projects WHERE directoryKey = ? LIMIT 1").get(key) as Record<string, unknown> | null;
   return row ? readProject(row) : null;

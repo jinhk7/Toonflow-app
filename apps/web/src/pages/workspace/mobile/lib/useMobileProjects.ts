@@ -2,7 +2,6 @@ import axios from "axios";
 import { ref } from "vue";
 import type { Project } from "@/stores/workspace";
 
-const workspaceHeaders = { "x-toonflow-workspace": "1" };
 
 export function useMobileProjects() {
   const projects = ref<Project[]>([]);
@@ -26,8 +25,7 @@ export function useMobileProjects() {
   async function touchOpen(directory: string, name?: string) {
     const { data } = await axios.post<{ code: number; data?: { project: Project }; message?: string }>(
       "/api/workspaces/projects/open",
-      { directory, name },
-      { headers: workspaceHeaders },
+      { directory, name }
     );
     if (data.code !== 200 || !data.data?.project) throw new Error(data.message || "打开项目失败");
     return data.data.project;

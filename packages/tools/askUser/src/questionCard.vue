@@ -148,7 +148,7 @@ async function submitAnswer(skip: boolean) {
       directory: props.directory,
       callId,
       ...(skip ? { skipped: true } : formRules.value.length ? { values: formApi.value!.formData() } : { answer: value }),
-    }, { headers: { "x-toonflow-workspace": "1" } });
+    });
     if (response.data.code !== 200) throw new Error(response.data.message || "提交回答失败");
     submittedAnswer.value = response.data.data.answer;
     submittedSkipped.value = response.data.data.skipped === true;

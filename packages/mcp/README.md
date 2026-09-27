@@ -142,7 +142,7 @@ app.use("/mcp", mcp);
 
 `resources` 可选，提供时声明 MCP 资源能力。`list(signal)` 返回 `Promise<Resource[]>`，`read(uri, signal)` 返回 `Promise<ReadResourceResult>`；这两个官方 SDK 类型可从 `@toonflow/mcp` 导入。目录扫描、URI 校验、文件读取和权限检查由宿主实现，包负责协议转发与取消信号传递。
 
-宿主负责 MCP 开关、Bearer 凭证、Host/Origin 校验和工作区权限。包不依赖 `apps/server/src` 或前端组件，也不自行创建 HTTP 监听端口。
+宿主负责 MCP 开关、Bearer 凭证和工作区路径校验，不按访问地址或页面来源区分权限。包不依赖 `apps/server/src` 或前端组件，也不自行创建 HTTP 监听端口。
 
 ```sh
 bun run --filter @toonflow/mcp typecheck

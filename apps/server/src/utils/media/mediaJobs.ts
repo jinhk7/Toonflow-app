@@ -105,8 +105,10 @@ export async function acceptMediaJob(input: AcceptMediaJobInput): Promise<Accept
     const graph = await readGraph(path);
     const node = graph.nodes.find(item => item.id === nodeId);
     const type = input.mediaType === "image" ? "imageGenerationNode" : "videoGenerationNode";
-    if (!node || (node.type !== type && node.type !== `remote-${type}`) || graph.toonflowGraph!.nodes[nodeId] !== expectedNodeVersion)
-      throw Object.assign(new Error("节点已变化，请刷新后重新确认生成"), { status: 409 });
+    const pending = node?.data?.pendingMediaJob as { idempotencyKey?: unknown; outputSlot?: unknown } | undefined;
+    if (!node || (node.type !== type && node.type !== `remote-${type}`) || graph.toonflowGraph!.nodes[nodeId] !== expectedNodeVersion
+      || pending?.idempotencyKey !== input.idempotencyKey || pending.outputSlot !== outputSlot)
+      throw Object.assign(new Error("节点已变化或不再等待此任务，请刷新后重新确认生成"), { status: 409 });
     binding = { canvasId: graph.toonflowGraph!.id, canvasPath, nodeId, nodeVersion: expectedNodeVersion,
       outputSlot, outputVersion: graph.toonflowGraph!.outputs[JSON.stringify([nodeId, outputSlot])] ?? 0 };
   }

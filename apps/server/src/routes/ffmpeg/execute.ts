@@ -27,9 +27,8 @@ const inputSchema = z.object({
 const requests = new Map<string, AbortController>();
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
-  u.mcpControl.assertAppRequest(req);
   const input = inputSchema.parse(req.body) as BrowserFfmpegRequest;
-  const cwd = await u.workspace.resolveWorkspace(req, input.directory);
+  const cwd = await u.workspace.resolveWorkspace(input.directory);
   const requestKey = `${cwd}\0${input.requestId}`;
   if (input.operation.method === "cancel") {
     requests.get(requestKey)?.abort();

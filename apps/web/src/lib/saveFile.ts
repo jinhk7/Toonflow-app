@@ -8,7 +8,6 @@ export default async function saveFile(content: Blob | (() => Promise<Blob>), fi
     const { data: selectData } = await axios.post<{ code: number; data: { token: string | null }; message?: string }>(
       "/api/desktop/selectSaveFile",
       { fileName },
-      { headers: { "x-toonflow-desktop": "1" } },
     );
     if (selectData.code !== 200) throw new Error(selectData.message || "选择保存位置失败");
     const token = selectData.data?.token;
@@ -16,7 +15,7 @@ export default async function saveFile(content: Blob | (() => Promise<Blob>), fi
     const blob = typeof content === "function" ? await content() : content;
     const { data } = await axios.post<{ code: number; data: { saved: boolean }; message?: string }>("/api/desktop/saveFile", blob, {
       params: { token },
-      headers: { "Content-Type": "application/octet-stream", "x-toonflow-desktop": "1" },
+      headers: { "Content-Type": "application/octet-stream" },
     });
     if (data.code !== 200 || typeof data.data?.saved !== "boolean") throw new Error(data.message || "保存文件失败");
     return data.data.saved;

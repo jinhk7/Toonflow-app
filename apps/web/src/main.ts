@@ -14,7 +14,7 @@ import { registerPwaServiceWorker } from "@/lib/pwaRegister";
 import { registerDesktopProtocol } from "@/lib/desktopProtocol";
 import { registerDesktopDownloads } from "@/lib/saveFile";
 import { registerAnonymousData } from "@/lib/anonymousData";
-import { loadSettings, settingsStorage } from "@/stores/settings";
+import { loadSettings } from "@/stores/settings";
 import { checkDesktopUpdate } from "@/stores/desktopUpdate";
 
 const app = createApp(App);
@@ -27,7 +27,7 @@ async function notifyDesktopReady(failed = false) {
   if (!isDesktop) return;
   const response = await fetch("/api/desktop/ready", {
     method: "POST",
-    headers: { "x-toonflow-desktop": "1", "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ failed }),
   });
   if (!response.ok) throw new Error((await response.json()).message || `通知桌面就绪失败（${response.status}）`);
@@ -37,7 +37,7 @@ async function notifyDesktopReady(failed = false) {
 (requiresWebView2Update
   ? Promise.reject(new Error("当前 Microsoft Edge WebView2 Runtime 版本过旧。请以管理员身份运行微软最新版安装器；若仍提示已安装，请修复 WebView2 或联系管理员检查更新服务。更新完成后，请完全退出 Toonflow 再重新打开。"))
   : loadSettings()).then(async () => {
-  app.use(createPinia().use(createPersistedState({ storage: settingsStorage })));
+  app.use(createPinia().use(createPersistedState()));
   app.use(router);
   registerPwaServiceWorker();
   await router.isReady();

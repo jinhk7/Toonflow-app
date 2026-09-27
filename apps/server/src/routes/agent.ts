@@ -27,7 +27,7 @@ const inputSchema = z.object({
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
   const { directory, canvas, ...options } = req.body as z.infer<typeof inputSchema>;
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
+  const cwd = await u.workspace.resolveWorkspace(directory);
   const { runId, done } = await startAgentRun({
     cwd,
     canvas: canvas as CanvasInfo | undefined,

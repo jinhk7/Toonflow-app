@@ -10,6 +10,6 @@ export default Router().get("/", validateFields({
 }, "query"), async (req, res) => {
   const snapshot = getAgentRunSnapshot(req.query.runId as string);
   if (!snapshot) return res.status(404).json(error("运行不存在", null, 404));
-  await u.workspace.resolveWorkspace(req, snapshot.cwd);
+  await u.workspace.resolveWorkspace(snapshot.cwd);
   res.set("Cache-Control", "no-store").json(success(snapshot));
 });

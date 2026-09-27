@@ -40,12 +40,14 @@ export type NodeMediaJobView = {
   jobId: string;
   idempotencyKey: string;
   status: string;
+  linkStatus?: string;
   mediaType?: string;
   files?: { path: string; mimeType: string; mediaType: "image" | "video" }[];
   errorMessage?: string | null;
 };
 export type PrepareMediaJobFn = (nodeId: string, outputSlot: string) => Promise<PrepareMediaJobResult>;
-export type PersistNodeGraphFn = (nodeId: string, expectedVersion: number) => Promise<void>;
+export type PersistNodeGraphFn = (nodeId: string, expectedVersion: number) => Promise<number>;
+
 
 export type NodeImageRequest = MediaJobCanvasBinding & {
   directory: string;
@@ -89,32 +91,52 @@ export type NodeAiTool = {
 export function useNodeMediaPersistence(nodeId: string, getData: () => Record<string, unknown>) {
   const prepareMediaJob = inject<PrepareMediaJobFn | undefined>("prepareMediaJob", undefined);
   const persistNodeGraph = inject<PersistNodeGraphFn | undefined>("persistNodeGraph", undefined);
-
+  let preparing = false;
   async function prepare(outputSlot: string) {
-    if (readPending()) throw new Error("已有未决媒体任务，请先核对原任务，不能使用新键重复提交");
+    if (preparing || readPending()) throw new Error("已有未决媒体任务，请先核对原任务，不能使用新键重复提交");
     if (!prepareMediaJob || !persistNodeGraph) throw new Error("画布未提供持久任务入口，不能提交媒体生成");
-    const idempotencyKey = crypto.randomUUID();
-    const binding = await prepareMediaJob(nodeId, outputSlot);
-    const data = getData();
-    data.pendingMediaJob = {
-      idempotencyKey,
-      outputSlot,
-      canvasPath: binding.canvasPath,
-      expectedNodeVersion: binding.expectedNodeVersion + 1,
-      startedAt: Date.now(),
-    } satisfies PendingMediaJobState;
-    await persistNodeGraph(nodeId, binding.expectedNodeVersion);
-    binding.expectedNodeVersion++;
-    return { idempotencyKey, binding };
+    preparing = true;
+    try {
+      const idempotencyKey = crypto.randomUUID();
+      const binding = await prepareMediaJob(nodeId, outputSlot);
+      const data = getData();
+      data.pendingMediaJob = {
+        idempotencyKey,
+        outputSlot,
+        canvasPath: binding.canvasPath,
+        expectedNodeVersion: binding.expectedNodeVersion + 1,
+        startedAt: Date.now(),
+      } satisfies PendingMediaJobState;
+      try {
+        binding.expectedNodeVersion = await persistNodeGraph(nodeId, binding.expectedNodeVersion);
+      } catch (error) {
+        if ((getData().pendingMediaJob as PendingMediaJobState | undefined)?.idempotencyKey === idempotencyKey) delete getData().pendingMediaJob;
+        throw error;
+      }
+      return { idempotencyKey, binding };
+    } finally {
+      preparing = false;
+    }
   }
 
   async function clearPending(outputSlot: string) {
-    const data = getData();
-    if (!data.pendingMediaJob) return;
-    delete data.pendingMediaJob;
-    if (!persistNodeGraph) return;
+    const pending = readPending();
+    if (!pending) return;
     const binding = prepareMediaJob ? await prepareMediaJob(nodeId, outputSlot) : undefined;
-    await persistNodeGraph(nodeId, binding?.expectedNodeVersion ?? 0);
+    const data = getData();
+    if (readPending()?.idempotencyKey !== pending.idempotencyKey) throw new Error("节点任务已变化，不能清除占用");
+    delete data.pendingMediaJob;
+    try {
+      if (persistNodeGraph) await persistNodeGraph(nodeId, binding?.expectedNodeVersion ?? 0);
+    } catch (error) {
+      if (!data.pendingMediaJob) data.pendingMediaJob = pending;
+      throw error;
+    }
+  }
+
+  // 仅任务已失败或提交被服务端拒绝（未建任务）时解锁；未知或待收取状态继续占用，避免重复计费。
+  async function releaseFailed(outputSlot: string, error: unknown) {
+    if (typeof error === "object" && error && "definitive" in error) await clearPending(outputSlot);
   }
 
   function readPending(): PendingMediaJobState | undefined {
@@ -125,20 +147,18 @@ export function useNodeMediaPersistence(nodeId: string, getData: () => Record<st
     return state as PendingMediaJobState;
   }
 
-  return { prepare, clearPending, readPending, hasGraphPersistence: !!prepareMediaJob && !!persistNodeGraph };
+  return { prepare, clearPending, releaseFailed, readPending, hasGraphPersistence: !!prepareMediaJob && !!persistNodeGraph };
 }
 
 async function readMediaJobPayload(response: Response) {
   const payload = await response.json() as { code: number; data?: NodeMediaJobView; message?: string };
   if (!response.ok || payload.code !== 200) throw new Error(payload.message || "查询媒体任务失败");
-  if (!payload.data) throw new Error("媒体任务不存在");
-  return payload.data;
+  return payload.data ?? null;
 }
 
 export async function fetchMediaJob(directory: string, idempotencyKey: string, signal?: AbortSignal) {
   const query = new URLSearchParams({ directory, idempotencyKey });
   const response = await fetch(`/api/ai/media/getJob?${query}`, {
-    headers: { "x-toonflow-workspace": "1" },
     signal,
   });
   return readMediaJobPayload(response);
@@ -147,7 +167,6 @@ export async function fetchMediaJob(directory: string, idempotencyKey: string, s
 export async function listMediaJobs(directory: string, signal?: AbortSignal) {
   const query = new URLSearchParams({ directory });
   const response = await fetch(`/api/ai/media/list?${query}`, {
-    headers: { "x-toonflow-workspace": "1" },
     signal,
   });
   if (response.status === 404) throw new Error("媒体任务列表接口尚未就绪");
@@ -160,12 +179,13 @@ export async function pollMediaJobUntilDone(directory: string, idempotencyKey: s
   while (true) {
     signal.throwIfAborted();
     const job = await fetchMediaJob(directory, idempotencyKey, signal);
-    if (job.status === "completed") {
+    if (!job) throw new Error("未找到任务记录，需核对原提交；不会自动重新生成");
+    if (job.status === "completed" && job.linkStatus !== "pending") {
       if (!job.files?.length) throw new Error("任务已完成但没有结果文件");
       return job.files;
     }
-    if (job.status === "failed") throw new Error(job.errorMessage || "媒体生成失败");
-    if (job.status === "unknown") throw new Error(job.errorMessage || "提交状态未知，需人工核对");
+    if (job.status === "failed") throw Object.assign(new Error(job.errorMessage || "媒体生成失败"), { definitive: true });
+    if (job.status === "unknown") throw new Error(`${job.errorMessage || "提交状态未知"}；结果未知，需人工核对，点击生成可确认放弃后重新提交`);
     if (job.status === "collectionFailed") throw new Error(job.errorMessage || "媒体已生成但下载归档失败，请重试收取，不要重新生成");
     await new Promise(resolve => setTimeout(resolve, 500));
   }
@@ -226,7 +246,7 @@ async function requestModel(input: NodeAiRequest, context: Context, model: Model
   try {
     signal.throwIfAborted();
     const response = await fetch("/api/ai/generate", {
-      method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ providerId, modelId, context, directory, references }), signal,
     });
     if (!response.ok) await readResult(response);
@@ -285,7 +305,7 @@ export function useNodeAi() {
     try {
       const response = await fetch("/api/ai/media/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: activeSignal,
       });

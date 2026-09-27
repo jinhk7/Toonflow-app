@@ -10,7 +10,7 @@ export default Router().post("/", validateFields({ runId: z.uuid(), toolCallId: 
   const { runId, toolCallId } = req.body as { runId: string; toolCallId: string };
   const snapshot = getAgentRunSnapshot(runId);
   if (!snapshot) return res.status(404).json(error("运行不存在", null, 404));
-  await u.workspace.resolveWorkspace(req, snapshot.cwd);
+  await u.workspace.resolveWorkspace(snapshot.cwd);
   reviewInterruptedToolCalls(runId);
   acknowledgeRunReview(runId, toolCallId);
   res.json(success(getAgentRunSnapshot(runId)));

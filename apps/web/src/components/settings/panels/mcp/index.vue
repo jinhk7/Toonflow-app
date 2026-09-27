@@ -88,7 +88,6 @@ type McpStatus = {
   error: string | null;
 };
 
-const headers = { "x-toonflow-workspace": "1" };
 const mcpSettings = computed(() => {
   const raw = settings.value.mcp;
   const value = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
@@ -121,7 +120,7 @@ async function refreshStatus() {
   loading.value = true;
   statusError.value = "";
   try {
-    const { data } = await axios.get<{ code: number; data: McpStatus; message?: string }>("/api/mcp/status", { headers });
+    const { data } = await axios.get<{ code: number; data: McpStatus; message?: string }>("/api/mcp/status");
     if (data.code !== 200) throw new Error(data.message || "读取 MCP 状态失败");
     if (portDraft.value === (status.value?.preferredPort ?? mcpSettings.value.port)) portDraft.value = data.data.preferredPort;
     status.value = data.data;
@@ -198,7 +197,7 @@ async function copyText(content: string, title: string, hasCredential = false) {
 async function handleSkill(action: "view" | "copy" | "download") {
   skillAction.value = action;
   try {
-    const readSkill = () => axios.get<Blob>("/api/mcp/skill", { headers, responseType: "blob" }).then(({ data }) => data);
+    const readSkill = () => axios.get<Blob>("/api/mcp/skill", { responseType: "blob" }).then(({ data }) => data);
     if (action === "download") {
       await saveFile(readSkill, "SKILL.md");
       return;

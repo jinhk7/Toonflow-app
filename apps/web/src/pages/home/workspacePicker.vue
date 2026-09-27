@@ -66,19 +66,13 @@ async function chooseDirectory(): Promise<string | null> {
   selecting.value = true;
   try {
     if (isDesktop) {
-      const { data } = await axios.post<{ data: { directory: string | null } }>("/api/desktop/selectDirectory", null, { headers: { "x-toonflow-desktop": "1" } });
+      const { data } = await axios.post<{ data: { directory: string | null } }>("/api/desktop/selectDirectory", null);
       if (data.data.directory) selectedDirectory.value = data.data.directory;
       return data.data.directory;
     }
-    const { data } = await axios.post<{ code: number; data: { native: boolean; directory: string | null } }>("/api/workspaces/selectDirectory", null, { headers: { "x-toonflow-workspace": "1" } });
-    if (data.data.native) {
-      if (data.data.directory) selectedDirectory.value = data.data.directory;
-      return data.data.directory;
-    } else {
-      dialogVisible.value = true;
-      void loadDirectory("");
-      return await new Promise<string | null>(resolve => { finishSelection = resolve; });
-    }
+    dialogVisible.value = true;
+    void loadDirectory("");
+    return await new Promise<string | null>(resolve => { finishSelection = resolve; });
   } catch (error) {
     ElMessage.error(axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || "无法打开文件夹选择器，请重试" : "无法打开文件夹选择器，请重试");
     return null;

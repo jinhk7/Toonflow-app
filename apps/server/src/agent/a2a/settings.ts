@@ -3,7 +3,6 @@ import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { Request } from "express";
 import conf from "@/utils/conf";
-import { getAppOrigin } from "@/utils/mcp/control";
 import { isWithin } from "@/utils/workspace/files";
 
 export type A2aSettings = {
@@ -53,11 +52,6 @@ export async function resolveA2aWorkspace(path = getA2aSettings().directory) {
 export function authenticateA2a(req: Request) {
   const { enabled, token } = getA2aSettings();
   if (!enabled || token.length < 32) return;
-  const local = process.env.toonflowDesktop === "1" || (process.env.NODE_ENV === "dev" && ["win32", "darwin"].includes(process.platform));
-  if (local && !["localhost", "127.0.0.1", "[::1]"].includes(req.hostname)) return;
-  if (req.get("origin")) {
-    try { getAppOrigin(req); } catch { return; }
-  }
   const actual = Buffer.from(req.get("authorization") ?? "");
   const expected = Buffer.from(`Bearer ${token}`);
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return;

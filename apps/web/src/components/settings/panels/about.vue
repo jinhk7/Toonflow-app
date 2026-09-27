@@ -335,7 +335,6 @@ async function runUpdate(nextAction: "check" | "download" | "apply") {
     if (nextAction === "check") await checkDesktopUpdate();
     else {
       const { data } = await axios.post<{ data: updateSnapshot }>(`/api/desktop/update/${nextAction}`, null, {
-        headers: { "x-toonflow-desktop": "1" },
         signal: controller.signal,
         timeout: 0,
       });

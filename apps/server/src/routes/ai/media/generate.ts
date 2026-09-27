@@ -28,7 +28,7 @@ export default Router().post("/", validateFields({
   }
   const specified = [canvasPath, nodeId, outputSlot, expectedNodeVersion].filter(value => value !== undefined).length;
   if (specified && specified !== 4) return res.status(400).json(error("节点绑定字段必须同时提供", null, 400));
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
+  const cwd = await u.workspace.resolveWorkspace(directory);
   const accepted = await acceptMediaJob({
     cwd,
     mediaType,

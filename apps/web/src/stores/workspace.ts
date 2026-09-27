@@ -2,7 +2,6 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import axios from "axios";
 
-const workspaceHeaders = { "x-toonflow-workspace": "1" };
 
 export type Project = {
   projectId?: string;
@@ -12,10 +11,6 @@ export type Project = {
   status?: "ok" | "missing";
   message?: string;
 };
-
-function isLocalWorkspacePage() {
-  return ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
-}
 
 function readLegacyProjectList(): Project[] {
   try {
@@ -45,12 +40,12 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   }
 
   async function importLegacyProjectListIfNeeded() {
-    if (importAttempted || !isLocalWorkspacePage()) return;
+    if (importAttempted) return;
     importAttempted = true;
     const legacy = readLegacyProjectList();
     if (!legacy.length) return;
     try {
-      await axios.post("/api/workspaces/projects/importLocal", { projects: legacy }, { headers: workspaceHeaders });
+      await axios.post("/api/workspaces/projects/importLocal", { projects: legacy });
     } catch {
       // ACT: 导入失败不阻塞首页，仍由服务端列表作为权威来源。
     }
@@ -63,7 +58,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 
   async function openProject(path: string, previousDirectory = path, signal?: AbortSignal) {
     const { data: check } = await axios.get<{ code: number; data?: { directory: string }; message?: string }>("/api/workspaces/check", {
-      params: { directory: path }, headers: workspaceHeaders, signal,
+      params: { directory: path }, signal,
     });
     signal?.throwIfAborted();
     if (check.code !== 200 || !check.data?.directory) throw new Error(check.message || "工作目录校验失败");
@@ -74,7 +69,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
       directory: checkedDirectory,
       previousDirectory: previousDirectory !== checkedDirectory ? previousDirectory : undefined,
       name: existing?.name,
-    }, { headers: workspaceHeaders, signal });
+    }, { signal });
     signal?.throwIfAborted();
     if (opened.code !== 200 || !opened.data?.project) throw new Error(opened.message || "登记项目失败");
     pendingAgentMessage.value = null;
@@ -88,7 +83,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
     const { data } = await axios.put<{ code: number; data?: { project: Project }; message?: string }>("/api/workspaces/projects/rename", {
       directory: path,
       name: trimmed,
-    }, { headers: workspaceHeaders });
+    });
     if (data.code !== 200 || !data.data?.project) throw new Error(data.message || "重命名失败");
     const target = data.data.project;
     const index = projectList.value.findIndex(item => item.directory === path);
@@ -99,7 +94,6 @@ export const useWorkspaceStore = defineStore("workspace", () => {
   async function removeProject(path: string) {
     const { data } = await axios.delete<{ code: number; message?: string }>("/api/workspaces/projects/remove", {
       data: { directory: path },
-      headers: workspaceHeaders,
     });
     if (data.code !== 200) throw new Error(data.message || "移除项目失败");
     projectList.value = projectList.value.filter(item => item.directory !== path);
@@ -110,6 +104,7 @@ export const useWorkspaceStore = defineStore("workspace", () => {
 }, {
   persist: {
     key: "toonflow.projectList",
+    storage: localStorage,
     pick: ["project"],
   },
 });

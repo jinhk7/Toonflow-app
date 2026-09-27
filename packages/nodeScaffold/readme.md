@@ -158,11 +158,15 @@ await ai.generate({
 文本 AI 只提供 `generate({ ...input, onEvent, signal })`；服务端只接收 `Context` 请求并返回 SSE，不保留旧调用格式。
 
 
-- `ai.getMediaModels(signal?)`：读取已安装供应商声明的图片、视频模型，返回供应商与模型 ID、名称、类型及模式参数。图片模型可通过 `imageSizes`、`imageRatios` 声明支持的分辨率与比例选项，节点生成时使用 `size`、`ratio` 传入选择值。
+- `ai.getMediaModels(signal?)`：读取已安装供应商声明的图片、视频模型，返回供应商与模型 ID、名称、类型及模式参数。图片模型可通过 `imageSizes`、`imageRatios` 声明支持的分辨率与比例选项；未声明的选项不显示、不发送，不推断 `2K` 或 `16:9` 默认值。
 - `ai.generateImage(input, signal?)`：非流式生成并落盘，返回 `{ path, mimeType, mediaType: "image" }[]`。`input` 包含工作区绝对路径 `directory`、`providerId`、`modelId`、`prompt`、工作区相对目录 `outputDirectory`；可传 `images: { path, mimeType }[]`、`ratio`、`size`。图片参考只传工作区相对路径，由后端读取。
 - `ai.generateVideo(input, signal?)`：视频生成并落盘，返回 `{ path, mimeType, mediaType: "video" }[]`。基础字段同图片生成；使用 `duration`、`resolution`、`ratio`、`generateAudio`、`mode` 配置视频，可传 `images`、`videos`、`audios` 和 `firstFrame`、`lastFrame`，素材均为工作区内 `{ path, mimeType }` 引用。
 
 `directory` 在生成前通过 `files.getWorkspaceFiles().list()` 取得快照，`outputDirectory` 使用 `assets/${id}`。结果可直接赋给 `outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } }`；使用 `files.useFileUrl` 预览。图片生成节点会合并文本参考、传入图片参考，成功后替换输出，失败或停止时保留上次图片；删除节点前取消请求，并清理其文件目录。
+
+画布中的媒体任务按节点独立准备与提交，同一节点的未决任务阻止重复提交，不等待其他节点生成结束。保存基线与界面节点对象隔离，节点任务标记使用服务端确认的版本持久化。停止按钮仅取消本地等待；再次点击生成时先恢复已有任务，已完成任务收取并清除占用，不重新发起生成。结果未知或找不到任务记录时需人工确认放弃；发出供应商 HTTP 请求前的参数错误是确定失败，发出请求后的异常保留结果未知，均不自动重试。
+
+手机端提交后自动查询任务状态；完成任务需等结果关联结束后再解除节点占用。项目列表由服务端登记，当前打开的项目仅存于浏览器本地，不通过项目导航整包保存全局设置。
 
 ### Agent 节点函数
 

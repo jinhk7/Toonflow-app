@@ -23,7 +23,7 @@ export default Router().post("/", validateFields({
   const { runId, action, canvas } = req.body as { runId: string; action: "pause" | "resume" | "terminate" | "stopGeneration"; canvas?: CanvasInfo };
   const snapshot = getAgentRunSnapshot(runId);
   if (!snapshot) return res.status(404).json(error("运行不存在", null, 404));
-  await u.workspace.resolveWorkspace(req, snapshot.cwd);
+  await u.workspace.resolveWorkspace(snapshot.cwd);
   try {
     if (action === "stopGeneration") {
       stopAgentGeneration(runId);

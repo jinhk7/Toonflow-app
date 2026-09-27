@@ -15,7 +15,7 @@ export default Router().get("/", validateFields({
   const afterSeq = Number(req.query.afterSeq ?? 0);
   const record = getAgentRun(runId);
   if (!record) return res.status(404).json(error("运行不存在", null, 404));
-  await u.workspace.resolveWorkspace(req, record.cwd);
+  await u.workspace.resolveWorkspace(record.cwd);
   res.set({ "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
   res.flushHeaders();
   let closed = false;

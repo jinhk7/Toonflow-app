@@ -31,7 +31,7 @@ function remoteError(value: unknown) {
 
 async function request(input: BrowserFfmpegRequest, signal?: AbortSignal) {
   const response = await fetch("/api/ffmpeg/execute", {
-    method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input), signal,
   });
   if (!response.ok) throw remoteError(await response.json());

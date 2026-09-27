@@ -32,23 +32,26 @@ async function failJob(jobId: string, message: string) {
   updateMediaJob(jobId, { status: "failed", errorMessage: message });
 }
 async function linkCompletedMedia(job: MediaJobRow) {
-  if (job.linkStatus !== "pending" || !job.canvasId || !job.canvasPath || !job.nodeId || !job.outputSlot || job.nodeVersion === null || job.outputVersion === null || !job.resultJson) return;
+  if (job.linkStatus !== "pending" || !job.canvasId || !job.canvasPath || !job.nodeId || !job.outputSlot || job.outputVersion === null || !job.resultJson) return;
   try {
     const { path } = await resolveWorkspacePath(job.workspaceDirectory, job.canvasPath);
     const graph = await readGraph(path);
-    if (graph.toonflowGraph?.receipts[job.jobId]) {
+    const files = JSON.parse(job.resultJson) as { path: string; mimeType: string }[];
+    if (!files[0]) throw new Error("任务没有可关联的文件");
+    const value = { dataType: job.mediaType.toUpperCase(), value: { url: files[0].path, mimeType: files[0].mimeType } };
+    const node = graph.nodes.find(item => item.id === job.nodeId);
+    if (graph.toonflowGraph?.receipts[job.jobId]
+      || (graph.toonflowGraph?.id === job.canvasId && JSON.stringify(node?.data?.outputs?.[job.outputSlot]) === JSON.stringify(value))) {
       updateMediaJob(job.jobId, { linkStatus: "linked", errorMessage: null });
       return;
     }
-    if (graph.toonflowGraph?.id !== job.canvasId || graph.toonflowGraph.nodes[job.nodeId] !== job.nodeVersion) {
-      updateMediaJob(job.jobId, { linkStatus: "unlinked", errorMessage: "原节点已删除或改变；成果保留在项目任务列表" });
+    // 按节点上的待接收任务键关联：用户在生成期间改提示词、移动节点不影响结果写回；节点被删除重建或已放弃该任务则不写。
+    if (graph.toonflowGraph?.id !== job.canvasId || (node?.data?.pendingMediaJob as { idempotencyKey?: unknown } | undefined)?.idempotencyKey !== job.idempotencyKey) {
+      updateMediaJob(job.jobId, { linkStatus: "unlinked", errorMessage: "原节点已删除或不再等待该任务；成果保留在项目任务列表" });
       return;
     }
-    const files = JSON.parse(job.resultJson) as { path: string; mimeType: string }[];
-    if (!files[0]) throw new Error("任务没有可关联的文件");
     await modifyGraph(path, job.jobId, [{ kind: "output", nodeId: job.nodeId, slot: job.outputSlot,
-      expectedVersion: job.outputVersion, expectedNodeVersion: job.nodeVersion,
-      value: { dataType: job.mediaType.toUpperCase(), value: { url: files[0].path, mimeType: files[0].mimeType } } }]);
+      expectedVersion: job.outputVersion, pendingJobKey: job.idempotencyKey, value }]);
     updateMediaJob(job.jobId, { linkStatus: "linked", errorMessage: null });
   } catch (error) {
     const status = (error as { status?: number }).status;
@@ -115,7 +118,7 @@ async function pollRemoteTask(job: MediaJobRow, provider: LoadedMediaProvider) {
         queryResult = await provider.queryAudioTask(taskId);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "续查失败";
+      const message = Error.isError(err) ? err.message : String(err);
       updateMediaJob(job.jobId, { errorMessage: message });
       await sleep(3000);
       continue;
@@ -159,7 +162,7 @@ async function runAsyncProvider(job: MediaJobRow, provider: LoadedMediaProvider,
       taskId = submitted.taskId;
       updateMediaJob(job.jobId, { remoteTaskId: taskId, status: "tracking" });
     } catch (err) {
-      updateMediaJob(job.jobId, { status: "unknown", errorMessage: err instanceof Error ? err.message : "提交结果未知，需人工核对；不会自动重试" });
+      updateMediaJob(job.jobId, { status: provider.requestStarted ? "unknown" : "failed", errorMessage: Error.isError(err) ? err.message : String(err) });
       return;
     }
   } else {
@@ -177,7 +180,7 @@ async function runSyncProvider(job: MediaJobRow, provider: LoadedMediaProvider, 
     const assets = await generateProviderAssets(job.workspaceDirectory, job.mediaType, request, provider, undefined, providerRequest);
     await collectAssets(job, assets);
   } catch (err) {
-    updateMediaJob(job.jobId, { status: "unknown", errorMessage: err instanceof Error ? err.message : "同步生成结果未知，需人工核对；不会自动重试" });
+    updateMediaJob(job.jobId, { status: provider.requestStarted ? "unknown" : "failed", errorMessage: Error.isError(err) ? err.message : String(err) });
   }
 }
 
@@ -207,7 +210,7 @@ export async function runMediaJob(jobId: string, options: { collectionOnly?: boo
     let provider: LoadedMediaProvider;
     try { provider = await loadMediaGenerationProvider(job.workspaceDirectory, job.mediaType, request, undefined, job.providerRevision); }
     catch (error) {
-      updateMediaJob(job.jobId, { status: "unknown", errorMessage: error instanceof Error ? error.message : "无法继续查询远端任务" });
+      updateMediaJob(job.jobId, { status: "unknown", errorMessage: Error.isError(error) ? error.message : String(error) });
       return;
     }
     await pollRemoteTask(job, provider);
@@ -222,14 +225,18 @@ export async function runMediaJob(jobId: string, options: { collectionOnly?: boo
 
   if (job.status === "collectionFailed") return;
 
-  if (job.status !== "prepared" && job.status !== "submitting") return;
+  if (job.status === "submitting") {
+    updateMediaJob(jobId, { status: "unknown", errorMessage: "提交结果未知，需人工核对；不会自动重新生成" });
+    return;
+  }
+  if (job.status !== "prepared") return;
 
   const request = JSON.parse(job.requestJson) as MediaGenerationRequest;
   let provider: LoadedMediaProvider;
   try {
     provider = await loadMediaGenerationProvider(job.workspaceDirectory, job.mediaType, request, undefined, job.providerRevision);
   } catch (err) {
-    await failJob(jobId, err instanceof Error ? err.message : "加载媒体供应商失败");
+    await failJob(jobId, Error.isError(err) ? err.message : String(err));
     return;
   }
 

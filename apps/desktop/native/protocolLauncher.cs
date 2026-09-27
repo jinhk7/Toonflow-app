@@ -89,8 +89,6 @@ internal static class protocolLauncher
         var request = (HttpWebRequest)WebRequest.Create(origin + "/api/desktop/openUrl");
         request.Method = "POST";
         request.ContentType = "application/json";
-        request.Headers["Origin"] = origin;
-        request.Headers["x-toonflow-desktop"] = "1";
         request.ContentLength = body.Length;
         request.Proxy = null;
         request.AllowAutoRedirect = false;

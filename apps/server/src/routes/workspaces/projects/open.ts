@@ -10,9 +10,9 @@ export default Router().post("/", validateFields({
   name: z.string().max(256).optional(),
   previousDirectory: z.string().max(4096).optional(),
 }), async (req, res) => {
-  const directory = await workspace.resolveWorkspace(req, req.body.directory);
+  const directory = await workspace.resolveWorkspace(req.body.directory);
   const previousDirectory = req.body.previousDirectory
-    ? await workspace.resolveWorkspace(req, req.body.previousDirectory)
+    ? await workspace.resolveWorkspace(req.body.previousDirectory)
     : undefined;
   const relocated = previousDirectory && previousDirectory !== directory
     ? relocateProject(previousDirectory, directory, { name: req.body.name, lastOpenedAt: Date.now() })

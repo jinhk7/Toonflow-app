@@ -10,12 +10,12 @@
       </nav>
       <div class="fileContent">
         <messageMarkdown v-if="!selectedPath" :content="readme" />
-        <el-input v-else-if="selectedFile" v-model="selectedFile.content" class="sourceInput" type="textarea" :rows="20" resize="none" :readonly="!canManage" :disabled="saving" :spellcheck="false" :aria-label="selectedPath" />
+        <el-input v-else-if="selectedFile" v-model="selectedFile.content" class="sourceInput" type="textarea" :rows="20" resize="none" :disabled="saving" :spellcheck="false" :aria-label="selectedPath" />
       </div>
     </div>
     <template #footer>
       <el-button :disabled="saving || confirming" @click="close()">关闭</el-button>
-      <el-button v-if="canManage" type="primary" :loading="saving" :disabled="loading || !selectedFile || selectedFile.content === selectedFile.original" @click="save">保存当前文件</el-button>
+      <el-button type="primary" :loading="saving" :disabled="loading || !selectedFile || selectedFile.content === selectedFile.original" @click="save">保存当前文件</el-button>
     </template>
   </el-dialog>
 </template>
@@ -28,7 +28,7 @@ import { IconBook, IconFile } from "@tabler/icons-vue";
 import messageMarkdown from "@/components/messageMarkdown.vue";
 import type { Plugin } from "./types";
 
-const { agent, canManage } = defineProps<{ agent: Plugin; canManage: boolean }>();
+const { agent } = defineProps<{ agent: Plugin }>();
 const emit = defineEmits<{ saved: []; closed: [] }>();
 const visible = ref(true);
 const loading = ref(true);
@@ -39,12 +39,11 @@ const readme = ref("");
 const files = ref<{ path: string; content: string; original: string }[]>([]);
 const selectedPath = ref("");
 const selectedFile = computed(() => files.value.find(file => file.path === selectedPath.value));
-const headers = { "x-toonflow-workspace": "1" };
 const controller = new AbortController();
 onBeforeUnmount(() => controller.abort());
 onMounted(async () => {
   try {
-    const { data } = await axios.get("/api/agents/read", { params: { name: agent.name }, headers, signal: controller.signal });
+    const { data } = await axios.get("/api/agents/read", { params: { name: agent.name }, signal: controller.signal });
     if (data.code !== 200 || !Array.isArray(data.data?.files) || !data.data.files.every((file: { path?: unknown; content?: unknown }) => typeof file.path === "string" && typeof file.content === "string")) {
       throw new Error(data.message || "Agent 文件列表无效");
     }
@@ -78,12 +77,12 @@ async function close(done?: () => void) {
 
 async function save() {
   const file = selectedFile.value;
-  if (!file || !canManage || saving.value || file.content === file.original) return;
+  if (!file || saving.value || file.content === file.original) return;
   saving.value = true;
   error.value = "";
   const content = file.content;
   try {
-    const { data } = await axios.put("/api/agents/save", { name: agent.name, path: file.path, content }, { headers });
+    const { data } = await axios.put("/api/agents/save", { name: agent.name, path: file.path, content });
     if (data.code !== 200) throw new Error(data.message || "保存失败");
     file.original = content;
     emit("saved");

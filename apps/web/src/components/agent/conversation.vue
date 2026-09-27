@@ -358,7 +358,6 @@ async function deleteMessage(item: AgentMessage) {
           directory, sessionFile: props.sessionFile,
           ...(item.replyTo ? { replyTo: item.replyTo } : { entryIds: [item.entryId!] }),
         },
-        headers: { "x-toonflow-workspace": "1" },
       });
       if (data.code !== 200) throw new Error(data.message || "删除消息失败");
       stats.value = data.data.stats;
@@ -485,7 +484,7 @@ async function sendCanvasResult(event: Extract<AgentEvent, { type: "canvasCall" 
   if (cancelled) payload = { error: "画布操作已取消" };
   const response = await fetch("/api/agent/canvasResult", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ directory, callId: event.callId, ...payload }),
     keepalive: cancelled,
     signal: cancelled ? AbortSignal.timeout(5000) : signal,
@@ -536,7 +535,7 @@ async function sendMessage(source?: AgentMessage) {
     await uploadAttachments(attachments, directory, requestController.signal);
     const response = await fetch("/api/agent", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, attachments: attachments.map(({ name, path, mimeType }) => ({ name, path, mimeType })), directory, providerId: model.providerId, modelId: model.modelId, thinkingLevel: reasoningEffort.value || undefined, sessionFile: props.sessionFile, resendFrom, canvas: canvasContext ? { id: canvasContext.id, tools: canvasContext.tools } : undefined }),
       signal: requestController.signal,
     });
@@ -612,7 +611,7 @@ async function sendMessage(source?: AgentMessage) {
     if (!currentRunId.value || !remoteRunning.value) {
       for (const callId of pendingQuestions.values()) {
         void fetch("/api/agent/answer", {
-          method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ directory, callId, cancelled: true }), keepalive: true,
         }).catch(() => {});
       }

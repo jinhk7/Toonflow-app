@@ -14,7 +14,7 @@ export default Router().post("/", validateFields({
   const { runId, toolCallId, remaining } = req.body as { runId: string; toolCallId: string; remaining?: number };
   const run = getAgentRun(runId);
   if (!run) return res.status(404).json(error("运行不存在", null, 404));
-  await u.workspace.resolveWorkspace(req, run.cwd);
+  await u.workspace.resolveWorkspace(run.cwd);
   grantAuthorization(runId, toolCallId, remaining);
   res.json(success(getAgentRunSnapshot(runId)));
 });

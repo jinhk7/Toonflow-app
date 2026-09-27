@@ -90,7 +90,7 @@ async function loadRuns() {
   loading.value = true;
   try {
     const { data } = await axios.get<{ code: number; data: RunSummary[]; message?: string }>("/api/agent/run/list", {
-      params: { directory: props.directory }, headers: { "x-toonflow-workspace": "1" },
+      params: { directory: props.directory },
     });
     if (data.code !== 200) throw new Error(data.message || "读取运行列表失败");
     runs.value = data.data;
@@ -133,7 +133,7 @@ async function answer(item: Question, skipped: boolean) {
   try {
     const { data } = await axios.post<{ code: number; message?: string }>("/api/agent/answer", {
       directory: props.directory, callId: item.callId, ...response,
-    }, { headers: { "x-toonflow-workspace": "1" } });
+    });
     if (data.code !== 200) throw new Error(data.message || "回答失败");
     await loadRun();
   } catch (error) { ElMessage.error(axios.isAxiosError(error) ? error.response?.data?.message || "回答失败" : error instanceof Error ? error.message : "回答失败"); }

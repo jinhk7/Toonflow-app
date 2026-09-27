@@ -12,7 +12,7 @@ export async function fetchEnabledNodeTypes(): Promise<MobileNodeType[]> {
   const { data } = await axios.get<{
     code: number;
     data: { name: string; displayName: string; url: string; enabled?: boolean }[];
-  }>("/api/nodes/get", { headers: { "Cache-Control": "no-cache", "x-toonflow-workspace": "1" } });
+  }>("/api/nodes/get", { headers: { "Cache-Control": "no-cache" } });
   if (data.code !== 200 || !Array.isArray(data.data)) throw new Error("节点列表格式错误");
   return data.data
     .filter(node => node.enabled !== false && /^[a-z][a-zA-Z0-9]*$/.test(node.name) && node.url === `/api/nodes/files?name=${node.name}`)

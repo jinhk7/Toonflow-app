@@ -9,7 +9,7 @@ import { success } from "@/lib/responseFormat";
 const router = Router();
 
 export default router.get("/", validateFields({ directory: z.string().min(1).max(4096), path: z.string().max(4096).optional() }, "query"), async (req, res) => {
-  const { directory, path } = await u.workspaceFile.resolveWorkspaceFile(req, req.query.directory as string, (req.query.path as string | undefined) ?? "");
+  const { directory, path } = await u.workspaceFile.resolveWorkspaceFile(req.query.directory as string, (req.query.path as string | undefined) ?? "");
   const entries = await readdir(path, { withFileTypes: true });
   res.set("Cache-Control", "no-store").json(success({
     directory,
