@@ -458,7 +458,21 @@ function mergeSavedGraph(sent: Pick<WorkspaceGraph, "nodes" | "edges" | "viewpor
     const result = server[kind].map(item => {
       const live = currentItems.get(item.id);
       currentItems.delete(item.id);
-      return live && JSON.stringify(live) !== JSON.stringify(sentItems.get(item.id)) ? live : item;
+      if (!live || JSON.stringify(live) === JSON.stringify(sentItems.get(item.id))) return item;
+      if (kind === "nodes") {
+        const before = sentItems.get(item.id) as Node | undefined;
+        const local = live as Node;
+        const remote = item as Node;
+        const outputs = { ...remote.data?.outputs };
+        for (const slot of new Set([...Object.keys(before?.data?.outputs ?? {}), ...Object.keys(local.data?.outputs ?? {})])) {
+          const value = local.data?.outputs?.[slot];
+          if (JSON.stringify(value) === JSON.stringify(before?.data?.outputs?.[slot])) continue;
+          if (value === undefined) delete outputs[slot];
+          else outputs[slot] = value;
+        }
+        return { ...local, data: { ...local.data, outputs } };
+      }
+      return live;
     });
     for (const item of currentItems.values()) {
       if (JSON.stringify(item) !== JSON.stringify(sentItems.get(item.id))) result.push(item);
@@ -510,11 +524,14 @@ async function refreshGraph() {
   } finally { refreshingGraph = false; }
 }
 const saveCanvas = debounce((directory: string, fileName: string) => {
-  const flow = toObject();
-  // ACT: 同页保存按顺序完成，防止慢请求覆盖后续修改；不处理多个客户端的并发编辑。
+  const queuedFlow = toObject();
+  const queuedBaseline = graphSnapshots.get(fileName);
+  // 排队完成后一起读取当前图和基线，不能用旧图搭配更新后的输出版本。
   saving = saving.then(async () => {
+    const active = canvasId.value === fileName && project.value?.directory === directory;
+    const flow = active ? toObject() : queuedFlow;
     try {
-      const baseline = graphSnapshots.get(fileName);
+      const baseline = active ? graphSnapshots.get(fileName) : queuedBaseline;
       if (!baseline) throw new Error("画布快照尚未加载，无法安全保存");
       const updated = await useWorkspaceFiles(directory).saveGraph(fileName, baseline, { nodes: flow.nodes as WorkspaceGraph["nodes"], edges: flow.edges as WorkspaceGraph["edges"], viewport: flow.viewport });
       rememberGraph(fileName, updated);
