@@ -127,8 +127,10 @@ async function pollRemoteTask(job: MediaJobRow, provider: LoadedMediaProvider) {
     } catch (err) {
       const message = Error.isError(err) ? err.message : String(err);
       const status = (err as { status?: unknown } | null)?.status;
-      if (typeof status === "number" && [401, 403, 404, 410].includes(status)) {
-        // 查询被拒绝不代表生成失败：保留远端 ID 和节点占用，停止确定无效的自动轮询。
+      // 4xx 默认需要人工处理；仅 408（超时）、425（Too Early）、429（限流）允许原查询重试。
+      // 409 需要解决请求与任务状态的冲突；没有供应商明确约定时，不能假定重复同一请求会恢复。
+      if (typeof status === "number" && status >= 400 && status < 500 && ![408, 425, 429].includes(status)) {
+        // 查询被拒绝不代表生成失败：保留远端 ID 和节点占用，不重新提交生成。
         updateMediaJob(job.jobId, { status: "unknown", errorMessage: `${message}；已暂停查询，远端任务 ID 已保留，请核对供应商权限与任务状态；不会重新提交生成` });
         return;
       }
