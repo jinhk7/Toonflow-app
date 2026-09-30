@@ -1,5 +1,6 @@
 import { mkdir, readFile, realpath, stat, rm } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { createHash } from "node:crypto";
 import { mediaProviders, type Provider } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
@@ -113,6 +114,8 @@ export async function snapshotMediaRequest(cwd: string, jobId: string, request: 
 }
 
 async function downloadAsset(url: string, signal?: AbortSignal) {
+  // 收取也必须能退出：超时保留结果快照，用户只重试下载而不是重新生成。
+  signal = AbortSignal.any([AbortSignal.timeout(5 * 60_000), ...(signal ? [signal] : [])]);
   if (!/^https?:\/\//i.test(url)) invalid("生成结果必须使用 HTTP 或 HTTPS 地址");
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`下载生成结果失败（HTTP ${response.status}）`);
@@ -233,6 +236,7 @@ export async function buildProviderMediaRequest(
   };
 }
 
+// 供应商返回值由任务收取阶段校验；不能把已返回的畸形成果误判为提交结果未知。
 export async function generateProviderAssets(
   cwd: string,
   mediaType: "image" | "video" | "audio",
@@ -245,18 +249,15 @@ export async function generateProviderAssets(
   if (mediaType === "audio") {
     if (typeof provider.generateAudio !== "function") invalid("此供应商不支持音频生成");
     const assets = await provider.generateAudio(providerRequest as never);
-    if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
     return assets;
   }
   if (mediaType === "image") {
     if (typeof provider.generateImage !== "function") invalid("此供应商不支持图片生成");
     const assets = await provider.generateImage(providerRequest as never);
-    if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
     return assets;
   }
   if (typeof provider.generateVideo !== "function") invalid("此供应商不支持视频生成");
   const assets = await provider.generateVideo(providerRequest as never);
-  if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
   return assets;
 }
 
@@ -265,6 +266,8 @@ function jobOutputDirectory(request: MediaGenerationRequest, jobId: string) {
   return `${base.replace(/\\/g, "/").replace(/\/+$/, "")}/jobs/${jobId}`;
 }
 
+export type CollectedMedia = GeneratedMedia & { index: number; sha256: string };
+
 export async function persistProviderAssets(
   cwd: string,
   mediaType: "image" | "video" | "audio",
@@ -272,6 +275,7 @@ export async function persistProviderAssets(
   request: MediaGenerationRequest,
   assets: MediaAsset[],
   signal?: AbortSignal,
+  progress?: { files: CollectedMedia[]; save: (files: CollectedMedia[]) => void },
 ): Promise<GeneratedMedia[]> {
   signal?.throwIfAborted();
   const directory = await realpath(cwd);
@@ -280,6 +284,16 @@ export async function persistProviderAssets(
   const result: GeneratedMedia[] = [];
   for (const [index, asset] of assets.entries()) {
     signal?.throwIfAborted();
+    const saved = progress?.files.find(file => file.index === index);
+    if (saved) {
+      const expected = `${outputDirectory}/${mediaType}${index}.${mediaExtensions[saved.mimeType]}`;
+      if (saved.path !== expected || saved.mediaType !== mediaType) throw new Error("已收取文件记录与任务不匹配，拒绝覆盖");
+      const { path } = await resolveWorkspacePath(directory, saved.path);
+      const bytes = await readFile(path);
+      if (createHash("sha256").update(bytes).digest("hex") !== saved.sha256) throw new Error("已收取的任务成果已变化，拒绝覆盖");
+      result.push({ path: saved.path, mimeType: saved.mimeType, mediaType });
+      continue;
+    }
     const { bytes, mimeType } = await assetBytes(asset, mediaType, signal);
     const output = await resolveWorkspacePath(directory, outputDirectory, true);
     const release = lockWorkspaceFiles([output.path]);
@@ -294,7 +308,12 @@ export async function persistProviderAssets(
         const saved = await readFile(path);
         if (!Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).equals(saved)) throw new Error("已保存的任务成果内容不一致，拒绝覆盖");
       }
-      result.push({ path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType });
+      const collected = { path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType };
+      result.push(collected);
+      if (progress) {
+        progress.files.push({ ...collected, index, sha256: createHash("sha256").update(bytes).digest("hex") });
+        progress.save(progress.files);
+      }
     } finally { release(); }
   }
   return result;

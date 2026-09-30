@@ -38,6 +38,7 @@ export type MediaJobRow = {
   remoteTaskId: string | null;
   pendingAssetsJson: string | null;
   resultJson: string | null;
+  collectedFilesJson: string | null;
   errorMessage: string | null;
   createdAt: number;
   updatedAt: number;
@@ -76,6 +77,7 @@ function getDb() {
       remoteTaskId TEXT,
       pendingAssetsJson TEXT,
       resultJson TEXT,
+      collectedFilesJson TEXT,
       errorMessage TEXT,
       createdAt INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL
@@ -85,7 +87,7 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS mediaJobs_status ON mediaJobs (status);
   `);
   const columns = new Set((database.query("PRAGMA table_info(mediaJobs)").all() as { name: string }[]).map(column => column.name));
-  for (const [name, definition] of Object.entries({ providerRevision: "TEXT NOT NULL DEFAULT ''", canvasId: "TEXT", canvasPath: "TEXT", nodeId: "TEXT", nodeVersion: "INTEGER", outputSlot: "TEXT", outputVersion: "INTEGER", linkStatus: "TEXT NOT NULL DEFAULT 'none'" })) {
+  for (const [name, definition] of Object.entries({ collectedFilesJson: "TEXT", providerRevision: "TEXT NOT NULL DEFAULT ''", canvasId: "TEXT", canvasPath: "TEXT", nodeId: "TEXT", nodeVersion: "INTEGER", outputSlot: "TEXT", outputVersion: "INTEGER", linkStatus: "TEXT NOT NULL DEFAULT 'none'" })) {
     if (!columns.has(name)) database.exec(`ALTER TABLE mediaJobs ADD COLUMN ${name} ${definition}`);
   }
   return database;
@@ -114,6 +116,7 @@ function rowToJob(row: Record<string, unknown>): MediaJobRow {
     remoteTaskId: row.remoteTaskId == null ? null : String(row.remoteTaskId),
     pendingAssetsJson: row.pendingAssetsJson == null ? null : String(row.pendingAssetsJson),
     resultJson: row.resultJson == null ? null : String(row.resultJson),
+    collectedFilesJson: row.collectedFilesJson == null ? null : String(row.collectedFilesJson),
     errorMessage: row.errorMessage == null ? null : String(row.errorMessage),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt),
@@ -179,7 +182,7 @@ export function insertMediaJob(input: InsertMediaJobInput) {
 export function updateMediaJob(
   jobId: string,
   patch: Partial<Pick<MediaJobRow,
-    "status" | "recoveryMode" | "remoteTaskId" | "pendingAssetsJson" | "resultJson" | "errorMessage" | "linkStatus" | "canvasPath"
+    "status" | "recoveryMode" | "remoteTaskId" | "pendingAssetsJson" | "resultJson" | "collectedFilesJson" | "errorMessage" | "linkStatus" | "canvasPath"
   >>,
 ) {
   const fields: string[] = [];

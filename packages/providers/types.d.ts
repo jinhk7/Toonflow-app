@@ -153,14 +153,14 @@ interface AudioRequest extends MediaRequest {
 
 /**
  * 三种生成函数统一返回最终媒体数组，不能返回任务 ID 或原始平台响应。
- * ACT: 本层只约定完整结果；供应商内部处理轮询/流读取，失败时抛出异常。
+ * 同步兼容入口；具备任务协议的供应商应同时实现 submit* / query*Task，供宿主持久化任务 ID 后续查。
  */
 type GenerateMedia<TRequest, TConfig = Record<string, unknown>> = (
   this: ProviderContext<TConfig>,
   request: TRequest,
 ) => Promise<MediaAsset[]>;
 
-/** 异步提交返回的上游任务身份；字段随安装 Provider 扩展，宿主只持久化标准 taskId。 */
+/** 异步提交返回的上游任务身份；宿主落账非空 taskId 后才开始续查。未拿到 ID 的提交不能自动重发。 */
 interface MediaTaskSubmitResult {
   taskId: string;
   raw?: Record<string, unknown>;
@@ -168,7 +168,7 @@ interface MediaTaskSubmitResult {
 
 type MediaTaskQueryStatus = "pending" | "completed" | "failed";
 
-/** 续查结果；completed 时 assets 为待归档媒体，failed 时 errorMessage 可读。 */
+/** 单次只读续查，不得重新提交生成；completed 时 assets 为待归档媒体，failed 时 errorMessage 可读。 */
 interface MediaTaskQueryResult {
   status: MediaTaskQueryStatus;
   assets?: MediaAsset[];

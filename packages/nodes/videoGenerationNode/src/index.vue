@@ -69,7 +69,7 @@
           <el-button
             class="sendButton"
             :icon="generating ? IconPlayerStop : IconArrowUp"
-            :disabled="deleting || uploading || (!generating && (!generationPrompt || !selectedModel))"
+            :disabled="deleting || uploading || (!generating && !mediaPersistence.readPending() && (!generationPrompt || !selectedModel))"
             :title="generating ? '停止生成' : '生成视频'"
             :aria-label="generating ? '停止生成' : '生成视频'"
             @click="generating ? generationController?.abort() : startFromButton().catch((error) => showNodeError(error, '视频生成失败'))" />
@@ -196,9 +196,11 @@ const previewUrl = files.useFileUrl(
   (error) => showNodeError(error, "视频读取失败")
 );
 
-onMounted(() => loadModels()
-  .then(() => resumePendingGeneration())
-  .catch((error) => showNodeError(error, "模型读取失败")));
+onMounted(async () => {
+  await loadModels().catch((error) => showNodeError(error, "模型读取失败"));
+  // 模型列表读取失败也继续恢复：续查和收取不依赖当前模型或提示词。
+  await resumePendingGeneration().catch((error) => showNodeError(error, "恢复任务失败"));
+});
 onScopeDispose(() => {
   disposed = true;
   generationController?.abort();
@@ -309,7 +311,7 @@ async function resumePendingGeneration() {
     if (job.status === "failed") throw Object.assign(new Error(job.errorMessage || "媒体生成失败"), { definitive: true });
     if (job.status === "unknown") throw new Error(`${job.errorMessage || "提交结果未知"}；结果未知，点击生成可确认放弃后重新提交`);
     if (job.status === "collectionFailed") {
-      throw new Error(job.errorMessage || "媒体生成失败");
+      throw new Error(`${job.errorMessage || "媒体归档失败"}；点击生成仅重试收取原结果，不重新生成`);
     }
     const [result] = await ai.pollMediaJob(directory, pending.idempotencyKey, controller.signal);
     if (!result) throw new Error("供应商未返回视频");
@@ -332,6 +334,7 @@ async function releaseUnknownPending() {
   const { directory } = await files.getWorkspaceFiles().list();
   const job = await ai.fetchMediaJob(directory, pending.idempotencyKey);
   if (job && job.status !== "unknown") {
+    if (job.status === "collectionFailed") await ai.retryMediaCollection(directory, job.jobId);
     await resumePendingGeneration();
     return false;
   }
