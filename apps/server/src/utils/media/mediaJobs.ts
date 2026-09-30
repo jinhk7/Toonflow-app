@@ -199,8 +199,8 @@ export async function retryMediaJobCollection(jobId: string, workspaceDirectory:
   if (row.status !== "collectionFailed") {
     throw Object.assign(new Error("只有收取失败的任务可以重试下载"), { status: 400 });
   }
-  if (!row.pendingAssetsJson) {
-    throw Object.assign(new Error("缺少待收取的媒体快照"), { status: 400 });
+  if (!row.pendingAssetsJson && !row.remoteTaskId) {
+    throw Object.assign(new Error("没有结果快照或远端任务 ID，请在供应商侧核对原结果；不会重新生成"), { status: 400 });
   }
   scheduleMediaJobRun(jobId, { collectionOnly: true });
   return toMediaJobView(findMediaJobById(jobId)!);

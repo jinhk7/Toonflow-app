@@ -12,7 +12,7 @@ const apiUrl = "https://api.toonflow.net/v1";
 const version = "2.0.1";
 
 function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("TF-router 响应格式错误");
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("TF-router 响应格式错误"), { retryable: false });
   return value as Record<string, unknown>;
 }
 
@@ -33,7 +33,13 @@ async function fetchJson(context: ProviderContext, path: string, body?: unknown,
     signal,
   });
   if (!response.ok) throw Object.assign(new Error(`TF-router 请求失败（HTTP ${response.status}）`), { status: response.status });
-  return object(await response.json());
+  const value: unknown = await response.json().catch(error => {
+    signal?.throwIfAborted();
+    if (error?.name === "SyntaxError") throw Object.assign(new Error("TF-router 返回无效 JSON"), { retryable: false });
+    throw error;
+  });
+  signal?.throwIfAborted();
+  return object(value);
 }
 
 function mediaUrl(input: MediaInput) {
@@ -48,9 +54,14 @@ function mediaUrl(input: MediaInput) {
 function mediaAsset(value: unknown, mediaType: MediaAsset["mediaType"]): MediaAsset[] {
   if (typeof value !== "string" || !value.trim()) throw new Error("TF-router 未返回生成结果");
   const url = value.trim();
-  if (/^https?:\/\//i.test(url)) return [{ mediaType, type: "url", url }];
+  if (/^https?:\/\//i.test(url)) {
+    new URL(url);
+    return [{ mediaType, type: "url", url }];
+  }
   const data = /^data:([^;,]+);base64,([\s\S]+)$/.exec(url);
   if (!data || !data[1].startsWith(`${mediaType}/`)) throw new Error("TF-router 返回的媒体地址无效");
+  const encoded = data[2].replace(/\s/g, "");
+  if (!encoded || !/^[a-zA-Z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 === 1) throw new Error("TF-router 返回的媒体编码无效");
   return [{ mediaType, type: "base64", mimeType: data[1], data: data[2] }];
 }
 
@@ -76,14 +87,21 @@ async function submitTask(context: ProviderContext, mediaType: "image" | "video"
 }
 
 async function queryTask(context: ProviderContext, mediaType: "image" | "video", taskId: string): Promise<MediaTaskQueryResult> {
-  const result = await fetchJson(context, `${mediaType}/get${mediaType === "image" ? "Image" : "Video"}Status`, { taskICode: taskId });
-  const data = result.data == null ? {} : object(result.data);
-  const status = String(result.status ?? data.status ?? "").toLowerCase();
-  if (status === "success" || status === "completed") return { status: "completed", assets: mediaAsset(data.data, mediaType) };
+  const signal = AbortSignal.any([AbortSignal.timeout(30_000), ...(context.signal ? [context.signal] : [])]);
+  const result = await fetchJson(context, `${mediaType}/get${mediaType === "image" ? "Image" : "Video"}Status`, { taskICode: taskId }, signal);
+  const data = result.data && typeof result.data === "object" && !Array.isArray(result.data) ? result.data as Record<string, unknown> : undefined;
+  const state = result.status ?? data?.status;
+  if (typeof state !== "string" || !state.trim()) throw Object.assign(new Error("TF-router 任务查询未返回状态"), { retryable: false });
+  const status = state.toLowerCase();
+  if (status === "success" || status === "completed") {
+    try { return { status: "completed", assets: mediaAsset(data?.data, mediaType) }; }
+    catch { return { status: "completed", assets: [] }; }
+  }
   if (status === "failed" || status === "failure") return {
     status: "failed", errorMessage: context.tool.errorMessage?.(result)
-      || (typeof data.failReason === "string" ? data.failReason : `${mediaType === "image" ? "图片" : "视频"}生成失败`),
+      || (typeof data?.failReason === "string" ? data.failReason : `${mediaType === "image" ? "图片" : "视频"}生成失败`),
   };
+  // ACT: 尚无已核实的中间态枚举，沿用既有非空非终态字符串的 pending 约定。
   return { status: "pending" };
 }
 
@@ -93,7 +111,10 @@ async function generateTask(context: ProviderContext, mediaType: "image" | "vide
   const { taskId } = await submit(context);
   while (true) {
     const result = await queryTask(context, mediaType, taskId);
-    if (result.status === "completed") return result.assets!;
+    if (result.status === "completed") {
+      if (!result.assets?.length) throw new Error("TF-router 未返回生成结果");
+      return result.assets;
+    }
     if (result.status === "failed") throw new Error(result.errorMessage);
     await wait(signal);
   }

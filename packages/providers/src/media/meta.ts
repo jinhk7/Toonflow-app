@@ -45,24 +45,33 @@ async function queryVideoTask(this: ProviderContext<ProviderConfig<typeof rules>
   if (!apiKey) throw new Error("请填写 API Key");
   if (!taskId.trim()) throw new Error("任务 ID 不能为空");
   const baseUrl = (this.config.baseUrl?.trim() || "https://metaso.cn/api/minimax").replace(/\/$/, "");
-  this.signal?.throwIfAborted();
+  const signal = AbortSignal.any([AbortSignal.timeout(30_000), ...(this.signal ? [this.signal] : [])]);
+  signal.throwIfAborted();
   const response = await this.tool.fetch(`${baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
-    signal: this.signal,
+    signal,
   });
   if (!response.ok) throw Object.assign(new Error(`查询任务失败：HTTP ${response.status}`), { status: response.status });
-  const data = await response.json();
-  const status = data?.task?.status;
+  const data = await response.json().catch(error => {
+    signal.throwIfAborted();
+    if (error?.name === "SyntaxError") throw Object.assign(new Error("任务查询返回无效 JSON"), { retryable: false });
+    throw error;
+  });
+  signal.throwIfAborted();
+  const task = data?.task;
+  const status = task && typeof task === "object" && !Array.isArray(task) ? task.status : undefined;
   if (status === "succeeded") {
-    const url = data.task.content?.url;
-    if (typeof url !== "string" || !url.trim()) throw new Error("未返回生成结果");
-    return { status: "completed", assets: [{ mediaType: "video", type: "url", url }] };
+    try {
+      const url = task.content?.url;
+      if (typeof url !== "string" || !["http:", "https:"].includes(new URL(url).protocol)) return { status: "completed", assets: [] };
+      return { status: "completed", assets: [{ mediaType: "video", type: "url", url }] };
+    } catch { return { status: "completed", assets: [] }; }
   }
   if (status === "failed" || status === "cancelled") {
     return { status: "failed", errorMessage: this.tool.errorMessage?.(data) || (status === "cancelled" ? "视频任务已取消" : "视频生成失败") };
   }
-  if (typeof status !== "string" || !status) throw new Error("任务查询未返回状态");
-  return { status: "pending" };
+  if (status === "queued" || status === "running") return { status: "pending" };
+  throw Object.assign(new Error(typeof status === "string" && status ? "任务查询返回未知状态" : "任务查询未返回状态"), { retryable: false });
 }
 
 async function submitVideo(this: ProviderContext<ProviderConfig<typeof rules>>, request: VideoRequest): Promise<MediaTaskSubmitResult> {
@@ -133,7 +142,10 @@ export default {
     const { taskId } = await submitVideo.call(context, request);
     while (true) {
       const result = await queryVideoTask.call(context, taskId);
-      if (result.status === "completed") return result.assets!;
+      if (result.status === "completed") {
+        if (!result.assets?.length) throw new Error("未返回生成结果");
+        return result.assets;
+      }
       if (result.status === "failed") throw new Error(result.errorMessage || "视频生成失败");
       await wait(signal, 5000);
     }

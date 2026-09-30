@@ -114,6 +114,8 @@ export async function snapshotMediaRequest(cwd: string, jobId: string, request: 
 }
 
 async function downloadAsset(url: string, signal?: AbortSignal) {
+  // 收取也必须能退出：超时保留结果快照，用户只重试下载而不是重新生成。
+  signal = AbortSignal.any([AbortSignal.timeout(5 * 60_000), ...(signal ? [signal] : [])]);
   if (!/^https?:\/\//i.test(url)) invalid("生成结果必须使用 HTTP 或 HTTPS 地址");
   const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`下载生成结果失败（HTTP ${response.status}）`);
@@ -234,6 +236,7 @@ export async function buildProviderMediaRequest(
   };
 }
 
+// 供应商返回值由任务收取阶段校验；不能把已返回的畸形成果误判为提交结果未知。
 export async function generateProviderAssets(
   cwd: string,
   mediaType: "image" | "video" | "audio",
@@ -246,18 +249,15 @@ export async function generateProviderAssets(
   if (mediaType === "audio") {
     if (typeof provider.generateAudio !== "function") invalid("此供应商不支持音频生成");
     const assets = await provider.generateAudio(providerRequest as never);
-    if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
     return assets;
   }
   if (mediaType === "image") {
     if (typeof provider.generateImage !== "function") invalid("此供应商不支持图片生成");
     const assets = await provider.generateImage(providerRequest as never);
-    if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
     return assets;
   }
   if (typeof provider.generateVideo !== "function") invalid("此供应商不支持视频生成");
   const assets = await provider.generateVideo(providerRequest as never);
-  if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
   return assets;
 }
 

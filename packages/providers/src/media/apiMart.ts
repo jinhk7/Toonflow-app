@@ -118,39 +118,54 @@ async function queryTask(context: ProviderContext<ProviderConfig<typeof rules>>,
   const apiKey = context.config.apiKey?.trim();
   if (!apiKey) throw new Error("请填写 API Key");
   if (!taskId.trim()) throw new Error("任务 ID 不能为空");
-  context.signal?.throwIfAborted();
+  const signal = AbortSignal.any([AbortSignal.timeout(30_000), ...(context.signal ? [context.signal] : [])]);
+  signal.throwIfAborted();
   const response = await context.tool.fetch(`${getBaseUrl(context.config.isOverseas)}/tasks/${encodeURIComponent(taskId)}`, {
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    signal: context.signal,
+    signal,
   });
   if (!response.ok) throw Object.assign(new Error(`查询任务失败：HTTP ${response.status}`), { status: response.status });
-  const result = object(await response.json());
-  const data = object(result.data ?? {});
-  const state = result.status ?? data.status;
-  if (typeof state !== "string" || !state.trim()) throw new Error("任务查询未返回状态");
+  const value: unknown = await response.json().catch(error => {
+    signal.throwIfAborted();
+    if (error?.name === "SyntaxError") throw Object.assign(new Error("任务查询返回无效 JSON"), { retryable: false });
+    throw error;
+  });
+  signal.throwIfAborted();
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("任务查询响应格式错误"), { retryable: false });
+  const result = value as Record<string, unknown>;
+  const data = result.data && typeof result.data === "object" && !Array.isArray(result.data) ? result.data as Record<string, unknown> : undefined;
+  const state = result.status ?? data?.status;
+  if (typeof state !== "string" || !state.trim()) throw Object.assign(new Error("任务查询未返回状态"), { retryable: false });
   const status = state.toLowerCase();
   if (status === "completed" || status === "success") {
-    const output = object(data.result ?? {});
-    const items = output[mediaType === "image" ? "images" : "videos"];
-    const item = Array.isArray(items) ? object(items[0]) : undefined;
-    const url = item && Array.isArray(item.url) ? item.url[0] : undefined;
-    if (typeof url !== "string" || !url.trim()) throw new Error("未返回生成结果");
-    return { status: "completed", assets: [{ mediaType, type: "url", url }] };
+    // 已知终态的成果异常交由宿主确定结束，不能退回查询重试。
+    try {
+      const output = object(data?.result);
+      const items = output[mediaType === "image" ? "images" : "videos"];
+      const item = Array.isArray(items) ? object(items[0]) : undefined;
+      const url = item && Array.isArray(item.url) ? item.url[0] : undefined;
+      if (typeof url !== "string" || !["http:", "https:"].includes(new URL(url).protocol)) return { status: "completed", assets: [] };
+      return { status: "completed", assets: [{ mediaType, type: "url", url }] };
+    } catch { return { status: "completed", assets: [] }; }
   }
   if (status === "failed" || status === "failure" || status === "cancelled") {
-    const error = (data.error as { message?: unknown } | undefined)?.message;
+    const error = (data?.error as { message?: unknown } | undefined)?.message;
     return {
       status: "failed",
       errorMessage: context.tool.errorMessage?.(result) || (typeof error === "string" ? error : status === "cancelled" ? "生成任务已取消" : "生成失败"),
     };
   }
-  return { status: "pending" };
+  if (status === "pending" || status === "processing" || status === "submitted") return { status: "pending" };
+  throw Object.assign(new Error("任务查询返回未知状态"), { retryable: false });
 }
 
 async function pollTaskResult(context: ProviderContext<ProviderConfig<typeof rules>>, taskId: string, mediaType: "image" | "video", signal: AbortSignal): Promise<MediaAsset[]> {
   while (true) {
     const result = await queryTask(context, taskId, mediaType);
-    if (result.status === "completed") return result.assets!;
+    if (result.status === "completed") {
+      if (!result.assets?.length) throw new Error("未返回生成结果");
+      return result.assets;
+    }
     if (result.status === "failed") throw new Error(result.errorMessage || "生成失败");
     await wait(signal, 3000);
   }
