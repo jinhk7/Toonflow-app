@@ -50,7 +50,7 @@ async function queryVideoTask(this: ProviderContext<ProviderConfig<typeof rules>
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: this.signal,
   });
-  if (!response.ok) throw new Error(`查询任务失败：HTTP ${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(`查询任务失败：HTTP ${response.status}`), { status: response.status });
   const data = await response.json();
   const status = data?.task?.status;
   if (status === "succeeded") {

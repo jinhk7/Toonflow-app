@@ -123,7 +123,7 @@ async function queryTask(context: ProviderContext<ProviderConfig<typeof rules>>,
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     signal: context.signal,
   });
-  if (!response.ok) throw new Error(`查询任务失败：HTTP ${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(`查询任务失败：HTTP ${response.status}`), { status: response.status });
   const result = object(await response.json());
   const data = object(result.data ?? {});
   const state = result.status ?? data.status;

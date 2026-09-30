@@ -32,7 +32,7 @@ async function fetchJson(context: ProviderContext, path: string, body?: unknown,
     body: JSON.stringify(body),
     signal,
   });
-  if (!response.ok) throw new Error(`TF-router 请求失败（HTTP ${response.status}）`);
+  if (!response.ok) throw Object.assign(new Error(`TF-router 请求失败（HTTP ${response.status}）`), { status: response.status });
   return object(await response.json());
 }
 
