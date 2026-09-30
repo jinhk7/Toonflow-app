@@ -6,6 +6,7 @@ import type { AgentSession, FileEntry, SessionEntry } from "@earendil-works/pi-c
 import type { AgentEvent, AgentMention, AgentSubAgent, AgentToolCall } from "@/agent/runtime/types";
 import { agentMentionsSchema } from "@/agent/runtime/mentions";
 import conf from "@/utils/conf";
+import { getActiveRunForSession, listWaitingQuestionsForRun } from "@/agent/runtime/store";
 import { providerSchema, getModelLimits } from "@/utils/ai";
 import { lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 
@@ -280,6 +281,8 @@ export async function getAgentSession(cwd: string, path: string) {
       entry.type === "message" && entry.message.role === "toolResult" ? [[entry.message.toolCallId, entry.message] as const] : []
     )
   );
+  const activeRunRecord = getActiveRunForSession(cwd, basename(path));
+  const waitingQuestions = activeRunRecord ? listWaitingQuestionsForRun(activeRunRecord.runId) : [];
   let replyTo: string | undefined;
   const entriesMessages = branch.flatMap<SessionMessage>((entry) => {
     if (entry.type === "custom" && entry.customType === "toonflowDeletedUser") replyTo = entry.id;
@@ -309,13 +312,22 @@ export async function getAgentSession(cwd: string, path: string) {
                 return {
                   id,
                   type: "tool" as const,
-                  tool: active?.tools.get(part.id) ?? {
-                    id: part.id,
-                    name: part.name,
-                    args: part.arguments,
-                    status: result ? (result.isError ? "error" as const : "success" as const) : "interrupted" as const,
-                    result: result ? getToolResultText(result.content) : undefined,
-                  },
+                  tool: (() => {
+                    const pendingQuestion = waitingQuestions.find(item => item.toolCallId === part.id);
+                    const base = active?.tools.get(part.id) ?? {
+                      id: part.id,
+                      name: part.name,
+                      args: part.arguments,
+                      status: result ? (result.isError ? "error" as const : "success" as const) : "interrupted" as const,
+                      result: result ? getToolResultText(result.content) : undefined,
+                    };
+                    if (!pendingQuestion) return base;
+                    return {
+                      ...base,
+                      status: "running" as const,
+                      question: { ...pendingQuestion.request, callId: pendingQuestion.callId },
+                    };
+                  })(),
                 };
               }
             })
@@ -394,6 +406,25 @@ export async function getAgentSession(cwd: string, path: string) {
     parentFile: getParentSessionFile(history),
     subAgents: [...subAgents.values()],
     running: Boolean(active),
+    activeRun: (() => {
+      const fileName = basename(path);
+      const activeRun = getActiveRunForSession(cwd, fileName);
+      if (!activeRun) return undefined;
+      return {
+        runId: activeRun.runId,
+        status: activeRun.status,
+        intent: activeRun.intent,
+        lastEventSeq: activeRun.lastEventSeq,
+        waitingQuestions: listWaitingQuestionsForRun(activeRun.runId).map(item => ({
+          callId: item.callId,
+          toolCallId: item.toolCallId,
+          title: item.request.title,
+          question: item.request.question,
+          options: item.request.options,
+          fields: item.request.fields,
+        })),
+      };
+    })(),
   };
 }
 

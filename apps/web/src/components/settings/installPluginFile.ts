@@ -10,7 +10,7 @@ export async function installPluginFile(type: "node" | "tool" | "skill" | "agent
         reader.readAsDataURL(file);
       }) }
     : { fileName: file.name, source: await file.text() };
-  const { data } = await axios.post(`/api/${type}s/install`, { ...payload, force }, { headers: { "x-toonflow-workspace": "1" } });
+  const { data } = await axios.post(`/api/${type}s/install`, { ...payload, force });
   if (data.code !== 200) throw new Error(data.message || "安装插件失败");
   const name = data.data?.name;
   if (typeof name !== "string" || !name.trim()) throw new Error("安装接口未返回有效的插件名称");

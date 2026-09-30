@@ -7,7 +7,6 @@ const router = Router();
 
 export default router.get("/", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  const canConfigure = u.workspace.isLocalWorkspaceRequest(req);
   const files = await readdir(u.nodePlugins.nodesDirectory, { withFileTypes: true }).catch((err: NodeJS.ErrnoException) => {
     if (err.code === "ENOENT") return [];
     throw err;
@@ -27,8 +26,7 @@ export default router.get("/", async (req, res) => {
         ...metadata,
         url: `/api/nodes/files?name=${name}`,
         enabled: !files.some((entry) => entry.name === `${name}.disabled`),
-        config: canConfigure ? u.nodePlugins.getNodeConfig(metadata) : {},
-        canConfigure,
+        config: u.nodePlugins.getNodeConfig(metadata),
       };
     }));
   res.json(success(nodes.filter((node) => node !== null)));

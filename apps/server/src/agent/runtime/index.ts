@@ -6,8 +6,15 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import type { CanvasContext, QuestionContext } from "@toonflow/tools-scaffold/runtime";
-import type { AgentEvent, AgentMention, AgentToolCall } from "@/agent/runtime/types";
+import type { AgentEvent, AgentMention, AgentRunControl, AgentToolCall } from "@/agent/runtime/types";
 import { agentMentionsSchema, mentionPrompt, snapshotMentions, validateMentionTokens } from "@/agent/runtime/mentions";
+import {
+  isSideEffectTool,
+  recordToolCallFinish,
+  recordToolCallStart,
+} from "@/agent/runtime/store";
+import { assertBackgroundToolAllowed } from "@/agent/runtime/toolExecution";
+import { guardAgentTools } from "@/agent/runtime/toolGuards";
 import { readAiReferences, referenceContent } from "@/utils/ai";
 import { createAgentTools } from "@/agent/tools";
 import { createAgentResources } from "@/agent/runtime/resources";
@@ -38,6 +45,9 @@ type AgentOptions = {
   question?: QuestionContext;
   signal?: AbortSignal;
   onCancel?: () => void;
+  runId?: string;
+  runControl?: AgentRunControl;
+  canvasAttached?: boolean;
 };
 
 export async function run(
@@ -55,6 +65,9 @@ export async function run(
     question,
     signal,
     onCancel,
+    runId,
+    runControl,
+    canvasAttached = Boolean(canvas),
   }: AgentOptions,
   send: (event: AgentEvent) => void
 ) {
@@ -124,7 +137,7 @@ export async function run(
       abort: () => { controller.abort(); onCancel?.(); return finished.promise; },
     };
     unregister = registerAgentSession(history.getSessionFile()!, active);
-    const tools = await createAgentTools(cwd, canvas, question);
+    let tools = await createAgentTools(cwd, canvas, question);
     if (isMemoryEnabled()) {
       const memoryTool = createMemoryTool();
       if (tools.some(tool => tool.name === memoryTool.name)) throw new Error("工具名称 memory 已被内置全局记忆工具占用");
@@ -137,9 +150,10 @@ export async function run(
     tools.push(await createSubAgentTool({
       cwd, tools, canvas, modelRuntime: runtime, model: runtime.getModel(providerId, modelId), thinkingLevel,
       runTask: (name, task, taskSignal, onProgress) => runDelegatedAgent({
-        cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress,
+        cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress, parentRunId: runId,
       }),
     }));
+    if (runId) tools = guardAgentTools(tools, { runId, runControl, canvasAttached, cwd, canvasPath: canvas?.id });
     const resources = await createAgentResources(cwd, tools, undefined, child
       ? `## 子 Agent 职责\n你正在执行委派任务：${JSON.stringify({ name: child.name, task: child.task })}。遵守当前工作区规则与授权，用户可以进入此子会话补充要求。重要进展与最终结论使用 report 上报父 Agent。`
       : "");
@@ -297,6 +311,26 @@ export async function run(
       }
       if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
         const tool = { id: event.toolCallId, name: event.toolName };
+        if (event.type === "tool_execution_start") {
+          if (runControl?.shouldTerminate()) {
+            throw Object.assign(new Error("本次流程已终止"), { status: 409 });
+          }
+          if (runControl?.shouldPauseBeforeStep()) {
+            throw Object.assign(new Error("运行已暂停"), { status: 409, code: "AGENT_PAUSED" });
+          }
+          try {
+            assertBackgroundToolAllowed(event.toolName, { canvasAttached });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "工具无法在后台执行";
+            if (runId) {
+              recordToolCallStart(runId, event.toolCallId, event.toolName, event.args, isSideEffectTool(event.toolName));
+              recordToolCallFinish(event.toolCallId, "error", message);
+            }
+            send({ type: "error", message });
+            void session.abort();
+            return;
+          }
+        }
         send({
           type: "tool",
           blockId: toolBlocks.get(event.toolCallId) ?? event.toolCallId,
@@ -343,6 +377,8 @@ export async function run(
     let failure: unknown;
     try {
       signal?.throwIfAborted();
+      if (runControl?.shouldPauseBeforeStep()) throw Object.assign(new Error("运行已暂停"), { status: 409 });
+      if (runControl?.shouldTerminate()) throw Object.assign(new Error("本次流程已终止"), { status: 409 });
       if (parentFile && child) {
         const agent = { ...child, file, parentFile, providerId, modelId, thinkingLevel, status: "running" as const, result: undefined };
         await updateSubAgent(cwd, parentFile, agent);
@@ -413,3 +449,4 @@ export async function run(
 
 export * from "@/agent/runtime/sessions";
 export { agentMentionsSchema } from "@/agent/runtime/mentions";
+export * from "@/agent/runtime/runHost";

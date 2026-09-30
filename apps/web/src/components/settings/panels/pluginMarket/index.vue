@@ -19,8 +19,8 @@
           </el-button>
           <input ref="pluginFileInput" type="file" :accept="agentMarketEnabled ? '.umd.js,.tool.js,.agent.zip,.zip,.md,.tar,.tar.gz,.tgz' : '.umd.js,.tool.js,.zip,.md,.tar,.tar.gz,.tgz'" hidden @change="installFile" />
           <template v-if="agentMarketEnabled && selectedType === 'agent'">
-            <el-button size="small" :icon="IconLink" :disabled="loading || !canManageAgents" @click="agentConnectVisible = true">连接远程 Agent</el-button>
-            <el-button size="small" :icon="IconSettings" :disabled="loading || !canManageAgents" @click="a2aSettingsVisible = true">A2A 服务</el-button>
+            <el-button size="small" :icon="IconLink" :disabled="loading" @click="agentConnectVisible = true">连接远程 Agent</el-button>
+            <el-button size="small" :icon="IconSettings" :disabled="loading" @click="a2aSettingsVisible = true">A2A 服务</el-button>
           </template>
         </template>
       </div>
@@ -209,16 +209,16 @@
                 size="small"
                 :icon="IconShare"
                 :loading="exportingPlugins.has(plugin.key)"
-                :disabled="loading || pendingPlugins.has(plugin.key) || (plugin.type === 'tool' && !canManageTools) || (plugin.type === 'agent' && !canManageAgents)"
+                :disabled="loading || pendingPlugins.has(plugin.key)"
                 :aria-label="`导出分享 ${plugin.displayName}`"
                 title="导出分享"
                 @click="exportPlugin(plugin)" />
-              <el-button v-if="plugin.type === 'agent' && plugin.kind === 'local'" size="small" :disabled="!canManageAgents || loading || pendingPlugins.has(plugin.key)" @click="selectedAgent = plugin">编辑</el-button>
+              <el-button v-if="plugin.type === 'agent' && plugin.kind === 'local'" size="small" :disabled="loading || pendingPlugins.has(plugin.key)" @click="selectedAgent = plugin">编辑</el-button>
               <el-button v-if="plugin.type === 'agent' && plugin.cardUrl" size="small" :icon="IconCopy" @click="copyCard(plugin.cardUrl)">Card</el-button>
               <el-badge v-if="(plugin.type === 'tool' || plugin.type === 'node') && plugin.configRules?.length" isDot :hidden="!hasMissingConfig(plugin)">
                 <el-button
                   size="small"
-                  :disabled="!canConfigurePlugin(plugin) || loading || pendingPlugins.has(plugin.key)"
+                  :disabled="loading || pendingPlugins.has(plugin.key)"
                   :aria-label="`配置 ${plugin.displayName}${hasMissingConfig(plugin) ? '，有必填配置未填写' : ''}`"
                   @click="
                     selectedConfigPlugin = plugin;
@@ -264,8 +264,8 @@
         :pagerCount="5"
         layout="total, prev, pager, next"
         size="small" />
-      <pluginConfigDialog v-if="selectedConfigPlugin" v-model="configVisible" :plugin="selectedConfigPlugin" :canManage="canConfigurePlugin(selectedConfigPlugin)" />
-      <agentEditorDialog v-if="selectedAgent" :key="selectedAgent.key" :agent="selectedAgent" :canManage="canManageAgents" @saved="refreshInstalled" @closed="selectedAgent = undefined" />
+      <pluginConfigDialog v-if="selectedConfigPlugin" v-model="configVisible" :plugin="selectedConfigPlugin" />
+      <agentEditorDialog v-if="selectedAgent" :key="selectedAgent.key" :agent="selectedAgent" @saved="refreshInstalled" @closed="selectedAgent = undefined" />
       <agentConnectDialog v-if="agentConnectVisible" @saved="refreshInstalled" @closed="agentConnectVisible = false" />
       <a2aSettingsDialog v-if="a2aSettingsVisible" @saved="refreshInstalled" @closed="a2aSettingsVisible = false" />
       <skillEditorDialog
@@ -355,8 +355,6 @@ let keyController: AbortController | undefined;
 const marketRefreshKey = ref(0);
 const loading = ref(false);
 const loadErrors = ref<Partial<Record<PluginType, string>>>({});
-const canManageTools = ref(false);
-const canManageAgents = ref(false);
 const selectedAgent = ref<Plugin>();
 const agentConnectVisible = ref(false);
 const a2aSettingsVisible = ref(false);
@@ -382,7 +380,6 @@ const selectedPlugin = ref<Plugin>();
 const selectedSkill = ref<Plugin>();
 const detailsVisible = ref(false);
 const messageMarkdown = defineAsyncComponent(() => import("@/components/messageMarkdown.vue"));
-const requestHeaders = { "x-toonflow-workspace": "1" };
 
 const searchQuery = ref("");
 const appliedQuery = ref("");
@@ -412,14 +409,14 @@ const visiblePlugins = computed(() => {
 });
 
 function canViewPlugin(plugin: Plugin) {
-  return activeTab.value === "installed" && (plugin.type === "skill" || (plugin.type === "agent" && plugin.kind === "local" && canManageAgents.value))
+  return activeTab.value === "installed" && (plugin.type === "skill" || (plugin.type === "agent" && plugin.kind === "local"))
     ? !loading.value && !pendingPlugins.value.has(plugin.key)
     : !!plugin.readme?.trim();
 }
 
 function openPlugin(plugin: Plugin) {
   if (!canViewPlugin(plugin)) return;
-  if (activeTab.value === "installed" && plugin.type === "agent" && plugin.kind === "local" && canManageAgents.value) {
+  if (activeTab.value === "installed" && plugin.type === "agent" && plugin.kind === "local") {
     selectedAgent.value = plugin;
     return;
   }
@@ -431,12 +428,7 @@ function openPlugin(plugin: Plugin) {
   detailsVisible.value = true;
 }
 
-function canConfigurePlugin(plugin: Plugin) {
-  return plugin.type === "node" ? plugin.canConfigure === true : plugin.type === "tool" && canManageTools.value;
-}
-
 function hasMissingConfig(plugin: Plugin) {
-  if (!canConfigurePlugin(plugin)) return false;
   return (plugin.configRules ?? []).some((rule) => {
     const required = rule.required === true || (Array.isArray(rule.validate) && rule.validate.some((validation) =>
       validation && typeof validation === "object" && "required" in validation && validation.required === true));
@@ -537,8 +529,6 @@ watch(
     onCleanup(() => controller.abort());
     loading.value = true;
     loadErrors.value = {};
-    canManageTools.value = false;
-    canManageAgents.value = false;
     installedPlugins.value = [];
     const results = await Promise.all(
       (Object.keys(pluginTypes) as PluginType[]).map(async (type) => {
@@ -547,14 +537,12 @@ watch(
         try {
           const { data } = await axios.get(`/api/${category.path}/get`, {
             signal: controller.signal,
-            headers: { ...requestHeaders, "Cache-Control": "no-cache" },
+            headers: { "Cache-Control": "no-cache" },
           });
           const items = type === "tool" ? data.data?.tools : type === "agent" ? data.data?.agents : data.data;
           if (data.code !== 200 || !Array.isArray(items) || items.some((item) => !item || typeof item.name !== "string"))
             throw new Error(`${category.label}列表格式错误`);
           if (controller.signal.aborted) return [];
-          if (type === "tool") canManageTools.value = data.data.canManage === true;
-          if (type === "agent") canManageAgents.value = data.data.canManage === true;
           return items.map((item) => ({
             ...item,
             type,
@@ -648,8 +636,7 @@ async function copyCard(url: string) {
 function canEditPlugin(plugin: Plugin) {
   return (
     activeTab.value === "installed" &&
-    (plugin.author !== "Toonflow" || plugin.type === "agent") &&
-    (plugin.type === "node" || plugin.type === "skill" || (plugin.type === "tool" && canManageTools.value) || (plugin.type === "agent" && canManageAgents.value))
+    (plugin.author !== "Toonflow" || plugin.type === "agent")
   );
 }
 
@@ -690,7 +677,7 @@ async function installMarketPlugin(plugin: Plugin) {
   if (action === "已安装") return;
   pendingPlugins.value.add(plugin.key);
   try {
-    const { data } = await axios.post(`/api/${path}/install`, { url: plugin.url, fileName: plugin.fileName }, { headers: requestHeaders });
+    const { data } = await axios.post(`/api/${path}/install`, { url: plugin.url, fileName: plugin.fileName });
     if (data.code !== 200) throw new Error(data.message || "安装插件失败");
     window.dispatchEvent(new CustomEvent("toonflow:plugin-installed", { detail: { type: plugin.type, name: data.data.name } }));
     ElMessage.success(`${plugin.displayName}已${action}`);
@@ -731,11 +718,10 @@ async function installFile(event: Event) {
 async function exportPlugin(plugin: Plugin) {
   if (
     activeTab.value !== "installed" ||
-    (plugin.type === "agent" && (plugin.kind !== "local" || !canManageAgents.value)) ||
+    (plugin.type === "agent" && plugin.kind !== "local") ||
     exportingPlugins.value.has(plugin.key) ||
     pendingPlugins.value.has(plugin.key) ||
-    loading.value ||
-    (plugin.type === "tool" && !canManageTools.value)
+    loading.value
   )
     return;
   exportingPlugins.value.add(plugin.key);
@@ -744,7 +730,7 @@ async function exportPlugin(plugin: Plugin) {
     await saveFile(
       () =>
         axios
-          .get<Blob>("/api/plugins/export", { params: { type: plugin.type, name: plugin.name }, responseType: "blob", headers: requestHeaders })
+          .get<Blob>("/api/plugins/export", { params: { type: plugin.type, name: plugin.name }, responseType: "blob" })
           .then(({ data }) => data),
       fileName
     );
@@ -778,8 +764,8 @@ async function updatePlugin(plugin: Plugin, action: "setEnabled" | "uninstall", 
     const url = `/api/${pluginTypes[plugin.type].path}/${action}`;
     const { data } =
       action === "uninstall"
-        ? await axios.delete(url, { data: { name: plugin.name }, headers: requestHeaders })
-        : await axios.put(url, { name: plugin.name, enabled }, { headers: requestHeaders });
+        ? await axios.delete(url, { data: { name: plugin.name } })
+        : await axios.put(url, { name: plugin.name, enabled });
     if (data.code !== 200) throw new Error(data.message || `${actionLabel}失败`);
     if (action === "uninstall") {
       installedPlugins.value = installedPlugins.value.filter((item) => item.key !== plugin.key);

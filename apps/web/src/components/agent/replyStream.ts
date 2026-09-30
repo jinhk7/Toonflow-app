@@ -22,9 +22,9 @@ export async function* readAgentEvents(response: Response, signal: AbortSignal) 
       for (const line of lines) {
         if (!line.trim()) continue;
         const event = JSON.parse(line) as AgentEvent;
+        yield event;
         if (event.type === "error") throw new Error(event.message);
         if (event.type === "done") return;
-        yield event;
         signal.throwIfAborted();
       }
       if (done) throw new Error("连接已中断，请重试");

@@ -82,7 +82,6 @@ watch(visible, async (open, _previous, onCleanup) => {
   try {
     const { data } = await axios.get("/api/agent/skills", {
       params: { directory: props.directory }, signal: controller.signal,
-      headers: { "x-toonflow-workspace": "1" },
     });
     if (data.code !== 200) throw new Error(data.message || "加载技能失败");
     skills.value = data.data;

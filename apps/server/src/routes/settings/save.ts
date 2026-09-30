@@ -16,7 +16,6 @@ export default router.put("/", validateFields({ settings: z.record(z.string(), z
 })).refine(value => value.desktopUpdateSource !== "custom" || !!value.desktopUpdateCustomUrl, {
   path: ["desktopUpdateCustomUrl"], message: "选择自定义更新源前，请先填写有效地址",
 }) }), async (req, res) => {
-  u.mcpControl.assertAppRequest(req);
   const { settings } = req.body;
   u.removeLegacySettings(settings);
   u.conf.set("settings", settings);

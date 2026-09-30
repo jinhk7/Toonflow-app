@@ -11,20 +11,6 @@ let settingsReady = false;
 let saveQueue = Promise.resolve();
 let applyingSettings = false;
 
-export const settingsStorage = {
-  getItem(key: string) {
-    const stores = settings.value.stores as Record<string, unknown> | undefined;
-    if (stores && Object.hasOwn(stores, key)) return JSON.stringify(stores[key]);
-    // ACT: 只迁移当前来源可读取的旧缓存，保留原值；不同端口的 localStorage 不能互读。
-    const value = localStorage.getItem(key);
-    if (value !== null) settingsStorage.setItem(key, value);
-    return value;
-  },
-  setItem(key: string, value: string) {
-    settings.value.stores = { ...(settings.value.stores as Record<string, unknown> | undefined), [key]: JSON.parse(value) };
-  },
-};
-
 export const defaultUiSettings = { theme: "light", primaryColor: "#409eff", fontScale: 100, radius: 8, startupAnimation: true };
 export const uiSettings = computed(() => {
   const raw = settings.value.ui;
@@ -95,7 +81,7 @@ export const modelChoices = computed(() => customProviders.value.flatMap(provide
 
 export async function loadSettings() {
   if (settingsReady) return;
-  const { data } = await axios.get("/api/settings/get", { headers: { "Cache-Control": "no-cache", "x-toonflow-workspace": "1" } });
+  const { data } = await axios.get("/api/settings/get", { headers: { "Cache-Control": "no-cache" } });
   if (settingsReady) return;
   if (data.code !== 200 || !data.data || typeof data.data !== "object" || Array.isArray(data.data)) {
     throw new Error("读取设置失败");
@@ -111,7 +97,7 @@ export function saveSettings(update?: (current: Record<string, unknown>) => Reco
   const saving = saveQueue.then(async () => {
     const patch = update?.(settings.value);
     if (update && !patch) return false;
-    const { data } = await axios.put("/api/settings/save", { settings: { ...settings.value, ...patch } }, { headers: { "x-toonflow-workspace": "1" } });
+    const { data } = await axios.put("/api/settings/save", { settings: { ...settings.value, ...patch } });
     if (data.code !== 200) throw new Error("保存设置失败");
     if (patch && Object.hasOwn(patch, "customProviders")) invalidateNodeModels("language");
     if (patch) {

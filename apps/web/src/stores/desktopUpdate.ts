@@ -36,7 +36,7 @@ export function checkDesktopUpdate(readFirst = false) {
       if (data.data.channel === "dev" || data.data.updating || data.data.updateAvailable || data.data.updateReady) return data.data;
     }
     const { data } = await axios.post<{ data: updateSnapshot }>("/api/desktop/update/check", null, {
-      headers: { "x-toonflow-desktop": "1" }, timeout: 45000,
+      timeout: 45000,
     });
     if (desktopUpdateKey.value !== source) return data.data;
     desktopUpdateSnapshot.value = data.data;

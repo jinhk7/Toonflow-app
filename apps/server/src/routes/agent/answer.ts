@@ -13,6 +13,6 @@ export default Router().post("/", validateFields({
   values: z.record(z.string().max(64), z.union([z.string().max(8000), z.number(), z.boolean(), z.null(), z.array(z.string().max(300)).max(20)])).optional(),
 }), async (req, res) => {
   const { directory, callId, ...response } = req.body;
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
+  const cwd = await u.workspace.resolveWorkspace(directory);
   res.json(success(u.question.answerQuestion(cwd, callId, response)));
 });

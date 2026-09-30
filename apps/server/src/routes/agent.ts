@@ -4,6 +4,7 @@ import type { CanvasInfo } from "@toonflow/tools-scaffold/runtime";
 import type { AgentEvent } from "@/agent/runtime/types";
 import { validateFields } from "@/lib/middleware";
 import u from "@/utils";
+import { startAgentRun, subscribeAgentRun } from "@/agent/runtime/runHost";
 
 const inputSchema = z.object({
   prompt: z.string().trim(), directory: z.string().min(1),
@@ -27,28 +28,38 @@ const inputSchema = z.object({
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
   const { directory, canvas, ...options } = req.body as z.infer<typeof inputSchema>;
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
+  const cwd = await u.workspace.resolveWorkspace(directory);
+  const sessionPath = options.sessionFile ? (await u.workspaceFile.resolveWorkspaceFile(directory, `.agent/sessions/${options.sessionFile}`)).path : undefined;
+  const active = sessionPath ? u.agent.getActiveAgentSession(sessionPath) : undefined;
+  // 正在委派执行的子会话继续走 SDK steering，不另建后台运行争抢会话文件。
+  const steering = active && u.agent.getParentSessionFile(active.history) && !u.agent.hasPendingAgentQuestion(active);
+  const hosted = steering ? undefined : await startAgentRun({ cwd, canvas: canvas as CanvasInfo | undefined, ...options });
   res.set({ "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
   res.flushHeaders();
-  const send = (event: AgentEvent) => {
+  const send = (event: AgentEvent, seq?: number) => {
     if (event.type === "session") options.sessionFile = event.file;
-    u.agent.trackAgentEvent(cwd, options.sessionFile, event);
-    if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`);
+    if (!res.destroyed) res.write(`${JSON.stringify(seq === undefined ? event : { ...event, runSeq: seq })}\n`);
   };
-  const bridge = canvas ? u.canvas.createCanvasContext(cwd, canvas as CanvasInfo, send) : undefined;
-  const controller = new AbortController();
-  const questions = u.question.createQuestionContext(cwd, send, () => controller.abort());
-  const close = () => { bridge?.dispose(); questions.dispose(); controller.abort(); };
-  res.once("close", close);
+  if (!hosted) {
+    try {
+      await u.agent.run({ ...options, cwd }, send);
+      send({ type: "done" });
+    } catch (error) {
+      send({ type: "error", message: error instanceof Error ? error.message : "发送失败" });
+    } finally {
+      if (!res.destroyed) res.end();
+    }
+    return;
+  }
+  const unsubscribe = subscribeAgentRun(hosted.runId, (event, meta) => send(event, meta.seq), 0);
+  res.once("close", unsubscribe);
   try {
-    await u.agent.run({ ...options, cwd, canvas: bridge?.context, question: questions.context, signal: controller.signal, onCancel: close }, send);
-    send({ type: "done" });
-  } catch (error) {
-    send({ type: "error", message: error instanceof Error ? error.message : "Agent 运行失败" });
+    await hosted.done;
+  } catch {
+    // 事件流内已发送 error
   } finally {
-    res.off("close", close);
-    bridge?.dispose();
-    questions.dispose();
-    res.end();
+    res.off("close", unsubscribe);
+    unsubscribe();
+    if (!res.destroyed) res.end();
   }
 });

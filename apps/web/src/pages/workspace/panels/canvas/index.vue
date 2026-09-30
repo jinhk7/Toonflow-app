@@ -60,7 +60,7 @@
           :loading="nodeLoads.has(type) || (nodeListLoading && !nodeTypes[type] && !nodeErrors[type])" />
       </template>
       <background :gap="16" pattern-color="var(--el-border-color)" />
-      <canvasMenu ref="canvasMenuRef" v-model:canvasId="canvasId" :directory="project?.directory" :initialCanvasId="initialCanvasId" :activateCanvas="activateCanvas" :flushSave="flushCanvases ?? flushCanvasSave">
+      <canvasMenu ref="canvasMenuRef" v-model:canvasId="canvasId" :directory="project?.directory" :initialCanvasId="initialCanvasId" :activateCanvas="activateCanvas" :flushSave="flushCanvases ?? flushCanvasSave" :onGraphLoaded="rememberGraph" :onGraphRenamed="renameGraphSnapshot">
         <assetLibrary ref="assetLibraryRef" v-model="assetsVisible" :directory="project?.directory" />
       </canvasMenu>
       <canvasControls
@@ -165,7 +165,7 @@ import { useNodeToolsContext } from "@toonflow/nodes-scaffold/nodeTools";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { generalSettings } from "@/stores/settings";
 import { getShortcutBindings, shortcutLabel, shortcutMatches, shortcutPressed } from "@/lib/canvasShortcuts";
-import useWorkspaceFiles from "@/lib/workspaceFiles";
+import useWorkspaceFiles, { type WorkspaceGraph } from "@/lib/workspaceFiles";
 import anonymousData from "@/lib/anonymousData";
 import { dropCanvasFiles, importCanvasFiles, isCanvasFileDrag } from "./canvasDrop";
 import "@vue-flow/core/dist/style.css";
@@ -267,7 +267,6 @@ const canvasReady = computed(() => !!canvasId.value && !nodeListLoading.value &&
 provide("canvas", getCanvasContext);
 defineExpose({ canvasId, canvasReady, getCanvasContext, readDocumentNode, saveDocumentNode, flushSave: flushCanvasSave, cancelSave: cancelCanvasSave,
   getMentionNodes: () => flow.nodes.value, findMentionNode: flow.findNode,
-  getRetainedNodes: canvasHistory.getRetainedNodes,
   get saveBusy() { return savePaused; }, get loadError() { return canvasMenuRef.value?.loadError ?? ""; },
 });
 
@@ -294,10 +293,10 @@ function documentHandles(node: Node<DocumentNodeData>) {
 async function readDocumentCanvas(directory: string, canvasPath: string, nodeId: string) {
   checkDocumentDirectory(directory);
   const files = useWorkspaceFiles(directory);
-  const canvas = await files.readJson<{ toonflowCanvas?: boolean; nodes?: Node<DocumentNodeData>[] }>(canvasPath);
+  const canvas = await files.readGraph(canvasPath);
   checkDocumentDirectory(directory);
   if (canvas?.toonflowCanvas !== true || !Array.isArray(canvas.nodes)) throw new Error("文件不是有效画布");
-  const node = canvas.nodes.find((item) => item && item.id === nodeId);
+  const node = (canvas.nodes as Node<DocumentNodeData>[]).find((item) => item && item.id === nodeId);
   if (!node) throw new Error("节点已删除，请刷新文件树");
   if (node.data !== undefined && (!node.data || typeof node.data !== "object" || Array.isArray(node.data))) throw new Error("节点数据无效");
   const liveNode = canvasId.value === canvasPath ? findNode(nodeId) : undefined;
@@ -349,11 +348,11 @@ async function saveDocumentNode(directory: string, canvasPath: string, nodeId: s
     if (textPath !== undefined) {
       if (liveNode?.type !== "remote-textNode") await files.write(textPath, text);
     } else {
-      const data = (node.data ??= {});
-      const output = data.outputs?.[handleId];
-      if (output?.dataType === "STRING") output.value = text;
-      else (data.outputs ??= {})[handleId] = { dataType: "STRING", value: text };
-      await files.writeJson(canvasPath, canvas);
+      const output = node.data?.outputs?.[handleId];
+      const updated = await files.modifyGraph(canvasPath, [{ kind: "output", nodeId, slot: handleId,
+        expectedVersion: canvas.toonflowGraph.outputs[JSON.stringify([nodeId, handleId])] ?? 0,
+        value: output?.dataType === "STRING" ? { ...output, value: text } : { dataType: "STRING", value: text } }]);
+      rememberGraph(canvasPath, updated);
     }
     checkDocumentDirectory(directory);
     if (liveNode && canvasId.value === canvasPath && findNode(nodeId) === liveNode) {
@@ -441,12 +440,103 @@ let savePaused = false;
 let saveCancelled = false;
 let changedWhilePaused = false;
 let saveRevision = 0;
+const graphSnapshots = new Map<string, WorkspaceGraph>();
+function rememberGraph(path: string, graph: WorkspaceGraph) {
+  // 保存基线必须与 Vue Flow 的可变节点数据隔离，否则修改 pending 会同时篡改基线而被漏写。
+  graphSnapshots.set(path, JSON.parse(JSON.stringify(graph)) as WorkspaceGraph);
+}
+function renameGraphSnapshot(previous: string, target: string) {
+  const graph = graphSnapshots.get(previous);
+  if (!graph) return;
+  graphSnapshots.delete(previous);
+  graphSnapshots.set(target, graph);
+}
+function mergeSavedGraph(sent: Pick<WorkspaceGraph, "nodes" | "edges" | "viewport">, server: WorkspaceGraph) {
+  const current = toObject();
+  const merge = (kind: "nodes" | "edges") => {
+    const sentItems = new Map(sent[kind].map(item => [item.id, item]));
+    const currentItems = new Map(current[kind].map(item => [item.id, item]));
+    const result = server[kind].map(item => {
+      const live = currentItems.get(item.id);
+      currentItems.delete(item.id);
+      if (!live || JSON.stringify(live) === JSON.stringify(sentItems.get(item.id))) return item;
+      if (kind === "nodes") {
+        const before = sentItems.get(item.id) as Node | undefined;
+        const local = live as Node;
+        const remote = item as Node;
+        const outputs = { ...remote.data?.outputs };
+        for (const slot of new Set([...Object.keys(before?.data?.outputs ?? {}), ...Object.keys(local.data?.outputs ?? {})])) {
+          const value = local.data?.outputs?.[slot];
+          if (JSON.stringify(value) === JSON.stringify(before?.data?.outputs?.[slot])) continue;
+          if (value === undefined) delete outputs[slot];
+          else outputs[slot] = value;
+        }
+        return { ...local, data: { ...local.data, outputs } };
+      }
+      return live;
+    });
+    for (const item of currentItems.values()) {
+      if (JSON.stringify(item) !== JSON.stringify(sentItems.get(item.id))) result.push(item);
+    }
+    return result;
+  };
+  const nodes = merge("nodes");
+  const edges = merge("edges");
+  if (JSON.stringify(nodes) !== JSON.stringify(current.nodes)) flow.setNodes(nodes as Node[]);
+  if (JSON.stringify(edges) !== JSON.stringify(current.edges)) flow.setEdges(edges as Edge[]);
+  if (JSON.stringify(current.viewport) === JSON.stringify(sent.viewport) && JSON.stringify(server.viewport) !== JSON.stringify(current.viewport)) void flow.setViewport(server.viewport);
+}
+let refreshingGraph = false;
+let lastConflictRevision = -1;
+async function refreshGraph() {
+  if (refreshingGraph || document.hidden || savePaused) return;
+  const directory = project.value?.directory;
+  const path = canvasId.value;
+  const baseline = path && graphSnapshots.get(path);
+  if (!directory || !path || !baseline) return;
+  refreshingGraph = true;
+  try {
+    await saving;
+    const remote = await useWorkspaceFiles(directory).readGraph(path);
+    if (canvasId.value !== path || project.value?.directory !== directory || graphSnapshots.get(path) !== baseline || remote.toonflowGraph.revision === baseline.toonflowGraph.revision) return;
+    const current = toObject();
+    const overlapping = (["nodes", "edges"] as const).some(kind => {
+      const oldItems = new Map(baseline[kind].map(item => [item.id, item]));
+      const liveItems = new Map(current[kind].map(item => [item.id, item]));
+      const remoteItems = new Map(remote[kind].map(item => [item.id, item]));
+      return [...new Set([...oldItems.keys(), ...liveItems.keys(), ...remoteItems.keys()])].some(id => {
+        const oldValue = JSON.stringify(oldItems.get(id));
+        const liveValue = JSON.stringify(liveItems.get(id));
+        const remoteValue = JSON.stringify(remoteItems.get(id));
+        return liveValue !== oldValue && remoteValue !== oldValue && liveValue !== remoteValue;
+      });
+    }) || (JSON.stringify(current.viewport) !== JSON.stringify(baseline.viewport)
+      && JSON.stringify(remote.viewport) !== JSON.stringify(baseline.viewport)
+      && JSON.stringify(current.viewport) !== JSON.stringify(remote.viewport));
+    if (overlapping) {
+      if (lastConflictRevision !== remote.toonflowGraph.revision) ElMessage.warning("其他设备修改了同一画布元素，请重新打开画布处理冲突");
+      lastConflictRevision = remote.toonflowGraph.revision;
+      return;
+    }
+    rememberGraph(path, remote);
+    mergeSavedGraph(baseline, remote);
+  } catch (error) {
+    console.error("画布同步失败", error);
+  } finally { refreshingGraph = false; }
+}
 const saveCanvas = debounce((directory: string, fileName: string) => {
-  const flow = toObject();
-  // ACT: 同页保存按顺序完成，防止慢请求覆盖后续修改；不处理多个客户端的并发编辑。
+  const queuedFlow = toObject();
+  const queuedBaseline = graphSnapshots.get(fileName);
+  // 排队完成后一起读取当前图和基线，不能用旧图搭配更新后的输出版本。
   saving = saving.then(async () => {
+    const active = canvasId.value === fileName && project.value?.directory === directory;
+    const flow = active ? toObject() : queuedFlow;
     try {
-      await useWorkspaceFiles(directory).writeJson(fileName, { toonflowCanvas: true, nodes: flow.nodes, edges: flow.edges, viewport: flow.viewport });
+      const baseline = active ? graphSnapshots.get(fileName) : queuedBaseline;
+      if (!baseline) throw new Error("画布快照尚未加载，无法安全保存");
+      const updated = await useWorkspaceFiles(directory).saveGraph(fileName, baseline, { nodes: flow.nodes as WorkspaceGraph["nodes"], edges: flow.edges as WorkspaceGraph["edges"], viewport: flow.viewport });
+      rememberGraph(fileName, updated);
+      if (canvasId.value === fileName && project.value?.directory === directory) mergeSavedGraph(flow, updated);
       saveError = undefined;
     } catch (err) {
       saveError = err;
@@ -765,6 +855,7 @@ function refreshInstalled(event: WindowEventMap["toonflow:plugin-installed"]) {
 }
 
 const refreshNodeConfig = () => { void loadRemoteNodes(); };
+let syncTimer: number | undefined;
 
 onMounted(() => {
   // 在捕获阶段同步修饰键，避免节点编辑器截断 keydown/keyup 后缩放状态丢失或卡住。
@@ -775,8 +866,10 @@ onMounted(() => {
   window.addEventListener("toonflow:node-config-updated", refreshNodeConfig);
   document.addEventListener("paste", pasteNode);
   void loadRemoteNodes();
+  syncTimer = window.setInterval(() => { void refreshGraph(); }, 3000);
 });
 onBeforeUnmount(() => {
+  window.clearInterval(syncTimer);
   window.removeEventListener("keydown", updateCanvasKeys, true);
   window.removeEventListener("keyup", updateCanvasKeys, true);
   window.removeEventListener("blur", resetCanvasKeys);
@@ -799,6 +892,57 @@ provide("workspaceFiles", () => {
   const directory = project.value?.directory;
   if (!directory) throw new Error("请先选择工作目录");
   return useWorkspaceFiles(directory);
+});
+provide("prepareMediaJob", async (nodeId: string, outputSlot: string) => {
+  const directory = project.value?.directory;
+  const path = canvasId.value;
+  if (!directory || !path) throw new Error("请先打开画布");
+  await useNodeEvent(nodeId, flow).emit("save");
+  await saving;
+  if (project.value?.directory !== directory || canvasId.value !== path) throw new Error("画布已切换，请重新提交");
+  const graph = graphSnapshots.get(path);
+  const node = graph?.nodes.find(item => item.id === nodeId);
+  if (!graph || !node || (outputSlot === "image" ? !["imageGenerationNode", "remote-imageGenerationNode"].includes(node.type ?? "") : !["videoGenerationNode", "remote-videoGenerationNode"].includes(node.type ?? "")))
+    throw new Error("生成节点已变化，请重新打开画布");
+  return { canvasPath: path, nodeId, outputSlot, expectedNodeVersion: graph.toonflowGraph.nodes[nodeId] };
+});
+provide("persistNodeGraph", async (nodeId: string, expectedVersion: number) => {
+  const directory = project.value?.directory;
+  const path = canvasId.value;
+  if (!directory || !path || !findNode(nodeId)) throw new Error("画布节点已离开，不能提交任务");
+  // 等待已排队的整画布写入，但不取消其他节点的未保存修改。
+  saveCanvas.flush();
+  const persist = saving.then(async () => {
+    if (project.value?.directory !== directory || canvasId.value !== path || saveCancelled || savePaused)
+      throw new Error("画布已切换，不能继续提交任务");
+    const sent = toObject();
+    const node = sent.nodes.find(item => item.id === nodeId);
+    const baseline = graphSnapshots.get(path);
+    if (!node || !baseline) throw new Error("画布节点已离开，不能提交任务");
+    const sameNode = (item: typeof node | undefined) => JSON.stringify(item, (key, value) => key === "outputs" ? undefined : value)
+      === JSON.stringify(node, (key, value) => key === "outputs" ? undefined : value);
+    const currentVersion = baseline.toonflowGraph.nodes[nodeId] ?? 0;
+    if (currentVersion >= expectedVersion && sameNode(baseline.nodes.find(item => item.id === nodeId))) return currentVersion;
+    if (currentVersion !== expectedVersion) throw new Error("节点版本已变化，不能提交任务");
+    const files = useWorkspaceFiles(directory);
+    let updated: WorkspaceGraph;
+    try {
+      updated = await files.modifyGraph(path, [{ kind: "node", id: nodeId, expectedVersion,
+        dependencies: node.parentNode ? { [node.parentNode]: baseline.toonflowGraph.nodes[node.parentNode] ?? 0 } : {}, value: node }]);
+    } catch (error) {
+      const remote = await files.readGraph(path);
+      if ((remote.toonflowGraph.nodes[nodeId] ?? 0) <= expectedVersion || !sameNode(remote.nodes.find(item => item.id === nodeId))) throw error;
+      updated = remote;
+    }
+    if (project.value?.directory !== directory || canvasId.value !== path) throw new Error("画布已切换，不能继续提交任务");
+    if ((graphSnapshots.get(path)?.toonflowGraph.revision ?? -1) <= updated.toonflowGraph.revision) {
+      rememberGraph(path, updated);
+      mergeSavedGraph(sent, updated);
+    }
+    return updated.toonflowGraph.nodes[nodeId] ?? 0;
+  });
+  saving = persist.then(() => {}, () => {});
+  return persist;
 });
 provide("workspaceDirectory", () => {
   const directory = project.value?.directory;
@@ -856,7 +1000,7 @@ async function loadRemoteNodes(reloadName?: string) {
   try {
     const { data } = await axios.get<{ code: number; data: { name: string; displayName: string; url: string; enabled?: boolean; config?: Record<string, unknown> }[] }>(
       "/api/nodes/get",
-      { headers: { "Cache-Control": "no-cache", "x-toonflow-workspace": "1" } }
+      { headers: { "Cache-Control": "no-cache" } }
     );
     if (requestId !== loadRequest) return;
     if (data.code !== 200 || !Array.isArray(data.data)) throw new Error("节点列表格式错误");

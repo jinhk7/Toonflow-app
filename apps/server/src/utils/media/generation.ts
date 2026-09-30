@@ -1,5 +1,5 @@
-import { mkdir, readFile, realpath, stat, unlink } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { mkdir, readFile, realpath, stat, rm } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { mediaProviders, type Provider } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
@@ -77,6 +77,40 @@ export async function readReference(cwd: string, reference: MediaReference, medi
   if (!mimeType.startsWith(`${mediaType}/`)) invalid(`参考媒体类型须为 ${mediaType}`);
   return { type: "base64", data: bytes.toString("base64"), mimeType };
 }
+export function mediaInputDirectory(jobId: string) {
+  return join(dirname(conf.path), "mediaInputs", jobId);
+}
+
+export async function snapshotMediaRequest(cwd: string, jobId: string, request: MediaGenerationRequest): Promise<MediaGenerationRequest> {
+  const target = mediaInputDirectory(jobId);
+  await mkdir(target, { recursive: true, mode: 0o700 });
+  async function copyReference(reference: MediaReference, type: string, name: string) {
+    const { path } = await resolveWorkspacePath(cwd, reference.path);
+    const info = await stat(path);
+    if (!info.isFile() || !info.size || info.size > maxMediaSize) invalid("参考媒体为空或超过 100 MB");
+    const bytes = await readFile(path);
+    if (!bytes.length || bytes.length > maxMediaSize) invalid("参考媒体为空或超过 100 MB");
+    const mimeType = detectMimeType(bytes, reference.mimeType);
+    if (!mimeType.startsWith(type + "/")) invalid("参考媒体类型须为 " + type);
+    await writeWorkspaceFile(join(target, name), bytes, true);
+    return { ...reference, path: name, mimeType };
+  }
+  try {
+    const copy = async (items: MediaReference[] | undefined, type: string) => {
+      if (!items) return undefined;
+      const result: MediaReference[] = [];
+      for (const [index, item] of items.entries()) result.push(await copyReference(item, type, type + index));
+      return result;
+    };
+    return { ...request, images: await copy(request.images, "image"), videos: await copy(request.videos, "video"),
+      audios: await copy(request.audios, "audio"),
+      firstFrame: request.firstFrame ? await copyReference(request.firstFrame, "image", "firstFrame") : undefined,
+      lastFrame: request.lastFrame ? await copyReference(request.lastFrame, "image", "lastFrame") : undefined };
+  } catch (error) {
+    await rm(target, { recursive: true, force: true });
+    throw error;
+  }
+}
 
 async function downloadAsset(url: string, signal?: AbortSignal) {
   if (!/^https?:\/\//i.test(url)) invalid("生成结果必须使用 HTTP 或 HTTPS 地址");
@@ -126,69 +160,160 @@ async function assetBytes(asset: MediaAsset, mediaType: "image" | "video" | "aud
   return { bytes, mimeType };
 }
 
-export async function generateMedia(
+const loadedMediaProvider = {} as Awaited<ReturnType<typeof loadMediaProviderSource>>;
+export type LoadedMediaProvider = typeof loadedMediaProvider;
+
+export async function loadMediaGenerationProvider(
   cwd: string,
   mediaType: "image" | "video" | "audio",
   request: MediaGenerationRequest,
   signal?: AbortSignal,
-): Promise<GeneratedMedia[]> {
+  expectedRevision?: string,
+): Promise<LoadedMediaProvider> {
   signal?.throwIfAborted();
   if (!request.prompt.trim()) invalid("请输入生成提示词");
-  const directory = await realpath(cwd);
-  const outputDirectory = request.outputDirectory ?? "assets/generated";
-  await resolveWorkspacePath(directory, outputDirectory, true);
   const providerInfo = await getMediaProvider(request.providerId);
-  const model = providerInfo.models.find(model => model.id === request.modelId && model.type === mediaType);
+  if (!expectedRevision || providerInfo.revision !== expectedRevision)
+    throw Object.assign(new Error("媒体供应商版本已变化或历史任务缺少版本，不能自动继续"), { status: 409 });
+  const model = providerInfo.models.find(item => item.id === request.modelId && item.type === mediaType);
   if (!model) invalid("所选媒体模型不存在或类型不匹配，请重新选择");
   const configurations = record(conf.get("settings", {}).mediaProviderConfigs);
+  const directory = await realpath(cwd);
   const provider = await loadMediaProviderSource(providerInfo.source, record(configurations[providerInfo.id]), signal, undefined, directory);
-  const generate = mediaType === "image" ? provider.generateImage : mediaType === "video" ? provider.generateVideo : provider.generateAudio;
-  if (typeof generate !== "function") invalid(`此供应商不支持${{ image: "图片", video: "视频", audio: "音频" }[mediaType]}生成`);
   const rules = Array.isArray(provider.rules) ? provider.rules : [];
-  if (rules.some(rule => rule.field === "apiKey") && (typeof provider.config.apiKey !== "string" || !provider.config.apiKey.trim())) invalid("请先在媒体模型设置中配置供应商 API Key");
-  const references = async (items: MediaReference[] | undefined, type: string) => items ? Promise.all(items.map(item => readReference(directory, item, type, signal))) : undefined;
+  if (rules.some(rule => rule.field === "apiKey") && (typeof provider.config.apiKey !== "string" || !provider.config.apiKey.trim())) {
+    invalid("请先在媒体模型设置中配置供应商 API Key");
+  }
+  return provider;
+}
+
+export async function buildProviderMediaRequest(
+  cwd: string,
+  mediaType: "image" | "video" | "audio",
+  request: MediaGenerationRequest,
+  provider: LoadedMediaProvider,
+  signal?: AbortSignal,
+  snapshotDirectory?: string,
+) {
+  signal?.throwIfAborted();
+  const directory = await realpath(cwd);
+  const references = async (items: MediaReference[] | undefined, type: string) => items
+    ? Promise.all(items.map(item => readReference(snapshotDirectory ?? directory, item, type, signal)))
+    : undefined;
   const images = await references(request.images, "image");
   signal?.throwIfAborted();
-  const assets = mediaType === "audio"
-    ? await provider.generateAudio!({
-      model: request.modelId, text: request.prompt, audios: await references(request.audios, "audio"),
-      voice: request.voice, speed: request.speed, volume: request.volume, format: request.format, sampleRate: request.sampleRate,
-    })
-    : mediaType === "image"
-    ? await provider.generateImage!({ model: request.modelId, prompt: request.prompt, images, ratio: request.ratio, size: request.size })
-    : await provider.generateVideo!({
-      model: request.modelId, prompt: request.prompt, images,
-      videos: await references(request.videos, "video"), audios: await references(request.audios, "audio"),
-      firstFrame: request.firstFrame ? await readReference(directory, request.firstFrame, "image", signal) : undefined,
-      lastFrame: request.lastFrame ? await readReference(directory, request.lastFrame, "image", signal) : undefined,
-      ratio: request.ratio, resolution: request.resolution, duration: request.duration,
-      generateAudio: request.generateAudio, mode: request.mode,
-    });
-  if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
-  const written: string[] = [];
-  const result: GeneratedMedia[] = [];
-  try {
-    for (const asset of assets) {
-      signal?.throwIfAborted();
-      const { bytes, mimeType } = await assetBytes(asset, mediaType, signal);
-      signal?.throwIfAborted();
-      const output = await resolveWorkspacePath(directory, outputDirectory, true);
-      const release = lockWorkspaceFiles([output.path]);
-      try {
-        await mkdir(output.path, { recursive: true });
-        const file = join(outputDirectory, `${mediaType}${crypto.randomUUID()}.${mediaExtensions[mimeType]}`);
-        const { path } = await resolveWorkspacePath(directory, file);
-        signal?.throwIfAborted();
-        await writeWorkspaceFile(path, bytes, true);
-        written.push(path);
-        result.push({ path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType });
-      } finally { release(); }
-    }
-    signal?.throwIfAborted();
-    return result;
-  } catch (err) {
-    // ACT: 只回滚本次创建的文件，保留目录中已有的节点资源。
-    await Promise.all(written.map(path => unlink(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; })));
-    throw err;
+  if (mediaType === "audio") {
+    return {
+      model: request.modelId,
+      text: request.prompt,
+      audios: await references(request.audios, "audio"),
+      voice: request.voice,
+      speed: request.speed,
+      volume: request.volume,
+      format: request.format,
+      sampleRate: request.sampleRate,
+    };
   }
+  if (mediaType === "image") {
+    return { model: request.modelId, prompt: request.prompt, images, ratio: request.ratio, size: request.size };
+  }
+  return {
+    model: request.modelId,
+    prompt: request.prompt,
+    images,
+    videos: await references(request.videos, "video"),
+    audios: await references(request.audios, "audio"),
+    firstFrame: request.firstFrame ? await readReference(snapshotDirectory ?? directory, request.firstFrame, "image", signal) : undefined,
+    lastFrame: request.lastFrame ? await readReference(snapshotDirectory ?? directory, request.lastFrame, "image", signal) : undefined,
+    ratio: request.ratio,
+    resolution: request.resolution,
+    duration: request.duration,
+    generateAudio: request.generateAudio,
+    mode: request.mode,
+  };
+}
+
+export async function generateProviderAssets(
+  cwd: string,
+  mediaType: "image" | "video" | "audio",
+  request: MediaGenerationRequest,
+  provider: LoadedMediaProvider,
+  signal?: AbortSignal,
+  preparedRequest?: Awaited<ReturnType<typeof buildProviderMediaRequest>>,
+): Promise<MediaAsset[]> {
+  const providerRequest = preparedRequest ?? await buildProviderMediaRequest(cwd, mediaType, request, provider, signal);
+  if (mediaType === "audio") {
+    if (typeof provider.generateAudio !== "function") invalid("此供应商不支持音频生成");
+    const assets = await provider.generateAudio(providerRequest as never);
+    if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
+    return assets;
+  }
+  if (mediaType === "image") {
+    if (typeof provider.generateImage !== "function") invalid("此供应商不支持图片生成");
+    const assets = await provider.generateImage(providerRequest as never);
+    if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
+    return assets;
+  }
+  if (typeof provider.generateVideo !== "function") invalid("此供应商不支持视频生成");
+  const assets = await provider.generateVideo(providerRequest as never);
+  if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
+  return assets;
+}
+
+function jobOutputDirectory(request: MediaGenerationRequest, jobId: string) {
+  const base = request.outputDirectory ?? "assets/generated";
+  return `${base.replace(/\\/g, "/").replace(/\/+$/, "")}/jobs/${jobId}`;
+}
+
+export async function persistProviderAssets(
+  cwd: string,
+  mediaType: "image" | "video" | "audio",
+  jobId: string,
+  request: MediaGenerationRequest,
+  assets: MediaAsset[],
+  signal?: AbortSignal,
+): Promise<GeneratedMedia[]> {
+  signal?.throwIfAborted();
+  const directory = await realpath(cwd);
+  const outputDirectory = jobOutputDirectory(request, jobId);
+  await resolveWorkspacePath(directory, outputDirectory, true);
+  const result: GeneratedMedia[] = [];
+  for (const [index, asset] of assets.entries()) {
+    signal?.throwIfAborted();
+    const { bytes, mimeType } = await assetBytes(asset, mediaType, signal);
+    const output = await resolveWorkspacePath(directory, outputDirectory, true);
+    const release = lockWorkspaceFiles([output.path]);
+    try {
+      await mkdir(output.path, { recursive: true });
+      const file = join(outputDirectory, mediaType + index + "." + mediaExtensions[mimeType]);
+      const { path } = await resolveWorkspacePath(directory, file);
+      signal?.throwIfAborted();
+      try { await writeWorkspaceFile(path, bytes, true); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const saved = await readFile(path);
+        if (!Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).equals(saved)) throw new Error("已保存的任务成果内容不一致，拒绝覆盖");
+      }
+      result.push({ path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType });
+    } finally { release(); }
+  }
+  return result;
+}
+
+export type GenerateMediaOptions = {
+  signal?: AbortSignal;
+  idempotencyKey?: string;
+};
+
+export async function generateMedia(
+  cwd: string,
+  mediaType: "image" | "video" | "audio",
+  request: MediaGenerationRequest,
+  signalOrOptions?: AbortSignal | GenerateMediaOptions,
+): Promise<GeneratedMedia[]> {
+  const options: GenerateMediaOptions = signalOrOptions instanceof AbortSignal
+    ? { signal: signalOrOptions }
+    : signalOrOptions ?? {};
+  const { submitAndWaitMediaJob } = await import("@/utils/media/mediaJobs");
+  return submitAndWaitMediaJob(cwd, mediaType, request, options);
 }

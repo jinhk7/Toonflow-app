@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
-import { copyFile, link, lstat, rename, unlink, writeFile, realpath } from "node:fs/promises";
+import { copyFile, link, lstat, rename, unlink, writeFile, realpath, readFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import type { Request } from "express";
 import { resolveWorkspace } from "@/utils/workspace";
 
 export async function writeWorkspaceFile(path: string, content: string | Uint8Array, exclusive = false) {
@@ -38,8 +37,8 @@ export function isWithin(root: string, path: string) {
   return offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset);
 }
 
-export async function resolveWorkspaceFile(req: Request, directory: string, path: string) {
-  const root = await resolveWorkspace(req, directory);
+export async function resolveWorkspaceFile(directory: string, path: string) {
+  const root = await resolveWorkspace(directory);
   return resolveWorkspacePath(root, path);
 }
 
@@ -73,4 +72,19 @@ export function lockWorkspaceFiles(paths: string[]) {
 
 export function protectWorkspaceRoot(directory: string, path: string) {
   if (directory === path) throw Object.assign(new Error("不能修改工作区根目录"), { status: 400 });
+}
+
+export async function assertNoManagedGraph(path: string): Promise<void> {
+  const info = await lstat(path).catch((err: NodeJS.ErrnoException) => { if (err.code === "ENOENT") return null; throw err; });
+  if (!info) return;
+  if (info.isDirectory()) {
+    for (const entry of await readdir(path)) await assertNoManagedGraph(resolve(path, entry));
+    return;
+  }
+  if (!info.isFile() || !path.toLowerCase().endsWith(".json")) return;
+  let data: unknown;
+  try { data = JSON.parse(await readFile(path, "utf8")); }
+  catch (err) { if (err instanceof SyntaxError) return; throw err; }
+  if (data && typeof data === "object" && (data as { toonflowCanvas?: unknown }).toonflowCanvas === true)
+    throw Object.assign(new Error("画布必须使用版本化修改接口，请升级客户端"), { status: 428 });
 }

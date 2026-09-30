@@ -11,7 +11,6 @@ export default router.put("/", validateFields({
   content: z.string().max(u.personalization.maxDocumentLength),
   revision: z.string().regex(/^[a-f0-9]{64}$/),
 }), async (req, res) => {
-  u.mcpControl.assertAppRequest(req);
   const { document, content, revision } = req.body as { document: "memory" | "agents"; content: string; revision: string };
   res.set("Cache-Control", "no-store");
   res.json(success(await u.personalization.saveDocument(document, content, revision), "已保存"));

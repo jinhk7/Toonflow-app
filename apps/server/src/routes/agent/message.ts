@@ -13,6 +13,6 @@ export default Router().delete("/", validateFields({
   const { directory, sessionFile, entryIds, replyTo } = req.body as {
     directory: string; sessionFile: string; entryIds?: string[]; replyTo?: string;
   };
-  const { directory: cwd, path } = await u.workspaceFile.resolveWorkspaceFile(req, directory, `.agent/sessions/${sessionFile}`);
+  const { directory: cwd, path } = await u.workspaceFile.resolveWorkspaceFile(directory, `.agent/sessions/${sessionFile}`);
   res.set("Cache-Control", "no-store").json(success(await u.agent.deleteAgentMessage(cwd, path, { entryIds, replyTo })));
 });

@@ -13,7 +13,7 @@ const inputSchema = z.object({
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
   const { directory, callId, ...response } = req.body as z.infer<typeof inputSchema>;
-  const cwd = await u.workspace.resolveWorkspace(req, directory);
+  const cwd = await u.workspace.resolveWorkspace(directory);
   u.canvas.finishCanvasCall(cwd, callId, response);
   res.json(success());
 });

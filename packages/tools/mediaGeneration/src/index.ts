@@ -40,7 +40,8 @@ const plugin: ToolPlugin = {
       executionMode: "sequential",
       async execute(_id, params, signal) {
         signal?.throwIfAborted();
-        const result = await media[operation.name](operation.parameters.parse(params), signal);
+        const request = { ...operation.parameters.parse(params), idempotencyKey: _id };
+        const result = await media[operation.name](request, signal);
         const text = result.map(asset => {
           const url = asset.path.replaceAll("\\", "/").split("/").map(encodeURIComponent).join("/");
           const preview = asset.mediaType === "image" ? `![生成图片](<${url}>)` : `[${asset.mediaType === "audio" ? "播放生成音频" : "查看生成视频"}](<${url}>)`;

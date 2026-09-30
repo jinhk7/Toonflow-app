@@ -339,17 +339,22 @@ export async function loadMediaProviderSource(source: string, config: Record<str
   signal?.throwIfAborted();
   const definition = (module.namespace as { default: Provider }).default;
   const rules = Array.isArray(definition.rules) ? definition.rules : [];
+  let requestStarted = false;
   const providerConfig = { ...Object.fromEntries(rules.map(rule => [rule.field, rule.value])), ...structuredClone(config) };
   const provider = {
     ...definition,
+    get requestStarted() { return requestStarted; },
     config: providerConfig,
     signal,
     tool: {
-      fetch: signal ? Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-        signal.throwIfAborted();
+      fetch: Object.assign((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        signal?.throwIfAborted();
         const requestSignal = init?.signal === null ? undefined : init?.signal ?? (input instanceof Request ? input.signal : undefined);
-        return fetchRequest(input, { ...init, signal: requestSignal ? AbortSignal.any([signal, requestSignal]) : signal });
-      }, { preconnect: fetchRequest.preconnect }) as typeof fetch : fetchRequest,
+        requestSignal?.throwIfAborted();
+        // 未调用网络的供应商参数错误是确定失败；发出请求后的异常仍须保留结果未知。
+        requestStarted = true;
+        return fetchRequest(input, { ...init, signal: signal && requestSignal ? AbortSignal.any([signal, requestSignal]) : signal ?? requestSignal });
+      }, { preconnect: fetchRequest.preconnect }) as typeof fetch,
       hash: Bun.hash,
       errorMessage: (value: unknown) => mediaErrorMessage(value, providerConfig),
       image: Bun.Image,

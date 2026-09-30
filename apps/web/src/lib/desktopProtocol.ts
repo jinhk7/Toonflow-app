@@ -47,7 +47,6 @@ export function registerDesktopProtocol() {
     const loading = ElMessage({ message: "正在安装插件…", duration: 0 });
     try {
       const { data } = await axios.post("/api/desktop/plugins/install", { type: request.type, url: request.url }, {
-        headers: { "x-toonflow-desktop": "1" },
         timeout: 60000,
       });
       if (data?.code !== 200) throw new Error(typeof data?.message === "string" && data.message.trim() ? data.message : "安装接口返回了无效响应，请重启或更新 Toonflow 后重试");
