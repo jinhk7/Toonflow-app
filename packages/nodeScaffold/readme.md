@@ -477,3 +477,5 @@ const apiKey = computed(() => String(config.value.apiKey ?? ""));
 - 其它依赖随各节点独立打包；不同节点可以使用不同 UI 框架和第三方库版本，同一个库也可能重复出现在不同 UMD 中。
 - 其它 UI 库的组件优先局部 import，所需 CSS 也在节点源码中 import。Vite 的 UMD 模式配合 `cssCodeSplit: true` 将 CSS 注入同一个 JS。需要 provider 的组件库，在节点根组件内包裹它自己的 provider。
 - 独立子包提供依赖管理边界，不提供页面样式隔离；全局 CSS、reset 或依赖 `app.use()` 全局安装的库需要单独适配。节点自有样式优先使用 `<style scoped>`。
+
+收取失败的已有媒体任务可通过 `ai.retryMediaCollection(directory, jobId)` 重试归档，再使用 `ai.pollMediaJob` 等待原任务；该操作不会重新提交生成。生成节点再次点击生成时也会先处理此状态。服务重启恢复与供应商升级边界见开发指南的“后台媒体任务与进程重启”。

@@ -38,6 +38,10 @@
       <el-button :loading="listLoading" :disabled="!directory" @click="listMediaJobs">列出工作区媒体任务</el-button>
     </el-form>
 
+    <el-button v-if="pendingStatus === 'collectionFailed' && queriedJobId" :loading="retryLoading" :disabled="mediaLoading" @click="retryCollection">
+      重试收取原结果（不重新生成）
+    </el-button>
+
     <mobileAgentPanel :directory="directory" />
 
     <el-alert v-if="mediaResult" class="result" type="info" :closable="false" :title="mediaTitle">
@@ -54,7 +58,7 @@ import type { WorkspaceGraph, GraphChange } from "@/lib/workspaceFiles";
 import mobileAgentPanel from "./mobileAgentPanel.vue";
 import type { CanvasNode } from "../lib/mobileGraphModel";
 import { changeForNode } from "../lib/mobileGraphOps";
-import type { PendingMediaJobState } from "@toonflow/nodes-scaffold/nodeAi";
+import { retryMediaCollection, type PendingMediaJobState } from "@toonflow/nodes-scaffold/nodeAi";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
 import type { NodeMediaModel } from "@toonflow/nodes-scaffold/nodeAi";
 
@@ -75,6 +79,8 @@ const mediaTitle = ref("");
 const pendingStatus = ref("");
 const pendingError = ref("");
 const abandonLoading = ref(false);
+const retryLoading = ref(false);
+const queriedJobId = ref("");
 let queryRevision = 0;
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let disposed = false;
@@ -96,7 +102,7 @@ const pendingJob = computed(() => {
   return state as PendingMediaJobState;
 });
 
-type MediaJobSummary = { status?: string; linkStatus?: string; idempotencyKey: string; canvasId: string | null; nodeId: string | null; outputSlot: string | null; errorMessage?: string | null };
+type MediaJobSummary = { jobId: string; status?: string; linkStatus?: string; idempotencyKey: string; canvasId: string | null; nodeId: string | null; outputSlot: string | null; errorMessage?: string | null };
 
 const queryKey = computed(() => idempotencyKey.value || pendingJob.value?.idempotencyKey || "");
 
@@ -105,6 +111,7 @@ watch([() => props.directory, () => props.canvasPath, () => props.node?.id, () =
   queryRevision++;
   mediaLoading.value = false;
   pendingStatus.value = "";
+  queriedJobId.value = "";
   pendingError.value = "";
   idempotencyKey.value = pendingJob.value?.idempotencyKey ?? "";
   if (idempotencyKey.value) void queryMediaJob();
@@ -302,6 +309,7 @@ async function queryMediaJob(rejection?: string) {
     const job = data.data;
     continueQuery = !!job && (["prepared", "submitting", "tracking", "collecting"].includes(job.status ?? "") || (job.status === "completed" && job.linkStatus === "pending"));
     pendingStatus.value = job?.status ?? "missing";
+    queriedJobId.value = job?.jobId ?? "";
     pendingError.value = job?.errorMessage ?? "";
     mediaTitle.value = "媒体任务";
     mediaResult.value = job ? JSON.stringify(job, null, 2) : rejection ?? "未找到媒体任务";
@@ -326,6 +334,20 @@ async function queryMediaJob(rejection?: string) {
       }
     }
   }
+}
+
+async function retryCollection() {
+  const directory = props.directory;
+  const key = queryKey.value;
+  const jobId = queriedJobId.value;
+  if (!directory || !jobId || retryLoading.value) return;
+  retryLoading.value = true;
+  try {
+    await retryMediaCollection(directory, jobId);
+    if (!disposed && props.directory === directory && queryKey.value === key) await queryMediaJob();
+  } catch (error) {
+    if (!disposed && props.directory === directory && queryKey.value === key) ElMessage.error(error instanceof Error ? error.message : "重试收取失败");
+  } finally { retryLoading.value = false; }
 }
 
 async function clearPendingMarker(key: string) {

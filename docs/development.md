@@ -304,3 +304,20 @@ data/                  本机运行数据，不提交到仓库
 ```
 
 ---
+
+### 后台媒体任务与进程重启
+
+浏览器关闭、断网或节点停止等待不会取消服务端媒体任务。服务进程重启则按 `mediaJobs.sqlite` 中的持久状态恢复：
+
+- `prepared`：尚未开始供应商提交，可执行一次提交。
+- `submitting` 且没有远端任务 ID：保留 `unknown`，不自动重提。即使供应商已受理，也无法仅凭断线判断是否计费；先到供应商控制台核对，确认后再使用节点的放弃操作。放弃后重新生成是新的请求，可能再次计费。
+- 已持久化远端任务 ID 的 `tracking`：只恢复查询，不重新提交。Provider 文件版本必须与提交时一致；请等现有任务结束再更新供应商代码。
+- `collecting`：从结果快照继续归档。二进制结果以 base64 落账；逐个文件保存路径和 SHA-256，重启后验证已保存文件并跳过下载。文件被修改时拒绝覆盖，进入 `collectionFailed`。单文件写入完成但进度尚未落账的极短窗口仍需重新取回该文件核对内容；若原 URL 已过期，需要人工处理，不会重发生成。
+- `collectionFailed`：画布节点再次点击生成只重试收取已有结果；移动端任务面板有“重试收取原结果”按钮。接口为 `POST /api/ai/media/retryCollection`，传入该任务的 `directory` 与 `jobId`，不会发起新生成。
+- `completed` 且尚未关联：只重试结果关联；原节点已删除、变更了待接收任务或输出冲突时保留成果，不覆盖新的输出。
+
+当前内置 TF-Router、APIMart、秘塔适配文件从 2.0.1 起，分别为图片/视频、图片/视频、视频提供拆分的 `submit*` / `query*Task`。TF-Router 沿用已有内置适配的提交/状态接口；APIMart 与秘塔使用原有任务 ID 协议。APIMart 的参考素材上传/审核位于最终视频提交之前，该阶段没有最终视频任务 ID 时不保证自动恢复。秘塔遵循 MiniMax 查询协议，仅在供应商保留期内可续查（官方当前说明为最近 7 天）。只实现 `generate*` 的其他供应商仍使用同步兼容路径，重启时提交中的任务需要人工核对。`generate*` 接口保留，供原有调用方使用。
+
+供应商文件仍按首次安装规则初始化，不自动覆盖已有自定义文件。本次宿主更新不会把已安装的旧 Provider 自动转换为异步版本；需要在媒体供应商设置中核对并更新对应适配文件，保留自己的配置和定制。旧的 `unknown` 记录不会因更新而自动补出远端任务 ID。Agent 的 `paused` / `needsReview`、工具授权及人工确认流程不变。
+
+协议依据：[APIMart 任务查询](https://docs.apimart.ai/en/api-reference/tasks/status)、[秘塔 API 入口](https://metaso.cn/minimax-h3)及其链接的 [MiniMax V2 任务查询](https://platform.minimax.cn/docs/api-reference/video-generation-v2-query)。TF-Router 本次仅拆分现有内置实现的同一协议，未增加端点、请求字段或成功状态，也未进行真实平台调用验证。

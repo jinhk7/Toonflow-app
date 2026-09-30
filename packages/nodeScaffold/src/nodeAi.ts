@@ -164,6 +164,14 @@ export async function fetchMediaJob(directory: string, idempotencyKey: string, s
   return readMediaJobPayload(response);
 }
 
+export async function retryMediaCollection(directory: string, jobId: string, signal?: AbortSignal) {
+  const response = await fetch("/api/ai/media/retryCollection", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ directory, jobId }), signal,
+  });
+  return readMediaJobPayload(response);
+}
+
 export async function listMediaJobs(directory: string, signal?: AbortSignal) {
   const query = new URLSearchParams({ directory });
   const response = await fetch(`/api/ai/media/list?${query}`, {
@@ -390,6 +398,7 @@ export function useNodeAi() {
     generateVideo,
     generate,
     fetchMediaJob: (directory: string, jobKey: string, pollSignal?: AbortSignal) => fetchMediaJob(directory, jobKey, requestSignal(pollSignal)),
+    retryMediaCollection: (directory: string, jobId: string, signal?: AbortSignal) => retryMediaCollection(directory, jobId, requestSignal(signal)),
     listMediaJobs: (directory: string, pollSignal?: AbortSignal) => listMediaJobs(directory, requestSignal(pollSignal)),
     pollMediaJob: (directory: string, jobKey: string, pollSignal: AbortSignal) => pollMediaJobUntilDone(directory, jobKey, requestSignal(pollSignal)),
   };

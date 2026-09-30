@@ -1,5 +1,6 @@
 import { mkdir, readFile, realpath, stat, rm } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { createHash } from "node:crypto";
 import { mediaProviders, type Provider } from "@toonflow/providers";
 import type { GeneratedMedia, MediaGenerationRequest, MediaModel, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
@@ -265,6 +266,8 @@ function jobOutputDirectory(request: MediaGenerationRequest, jobId: string) {
   return `${base.replace(/\\/g, "/").replace(/\/+$/, "")}/jobs/${jobId}`;
 }
 
+export type CollectedMedia = GeneratedMedia & { index: number; sha256: string };
+
 export async function persistProviderAssets(
   cwd: string,
   mediaType: "image" | "video" | "audio",
@@ -272,6 +275,7 @@ export async function persistProviderAssets(
   request: MediaGenerationRequest,
   assets: MediaAsset[],
   signal?: AbortSignal,
+  progress?: { files: CollectedMedia[]; save: (files: CollectedMedia[]) => void },
 ): Promise<GeneratedMedia[]> {
   signal?.throwIfAborted();
   const directory = await realpath(cwd);
@@ -280,6 +284,16 @@ export async function persistProviderAssets(
   const result: GeneratedMedia[] = [];
   for (const [index, asset] of assets.entries()) {
     signal?.throwIfAborted();
+    const saved = progress?.files.find(file => file.index === index);
+    if (saved) {
+      const expected = `${outputDirectory}/${mediaType}${index}.${mediaExtensions[saved.mimeType]}`;
+      if (saved.path !== expected || saved.mediaType !== mediaType) throw new Error("已收取文件记录与任务不匹配，拒绝覆盖");
+      const { path } = await resolveWorkspacePath(directory, saved.path);
+      const bytes = await readFile(path);
+      if (createHash("sha256").update(bytes).digest("hex") !== saved.sha256) throw new Error("已收取的任务成果已变化，拒绝覆盖");
+      result.push({ path: saved.path, mimeType: saved.mimeType, mediaType });
+      continue;
+    }
     const { bytes, mimeType } = await assetBytes(asset, mediaType, signal);
     const output = await resolveWorkspacePath(directory, outputDirectory, true);
     const release = lockWorkspaceFiles([output.path]);
@@ -294,7 +308,12 @@ export async function persistProviderAssets(
         const saved = await readFile(path);
         if (!Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).equals(saved)) throw new Error("已保存的任务成果内容不一致，拒绝覆盖");
       }
-      result.push({ path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType });
+      const collected = { path: relative(directory, path).replace(/\\/g, "/"), mimeType, mediaType };
+      result.push(collected);
+      if (progress) {
+        progress.files.push({ ...collected, index, sha256: createHash("sha256").update(bytes).digest("hex") });
+        progress.save(progress.files);
+      }
     } finally { release(); }
   }
   return result;

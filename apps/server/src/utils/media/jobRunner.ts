@@ -1,5 +1,5 @@
 import type { MediaGenerationRequest } from "@toonflow/tools-scaffold/runtime";
-import type { LoadedMediaProvider } from "@/utils/media/generation";
+import type { CollectedMedia, LoadedMediaProvider } from "@/utils/media/generation";
 import {
   findMediaJobById,
   updateMediaJob,
@@ -16,7 +16,7 @@ import {
 import { readGraph, modifyGraph } from "@/utils/workspace/graph";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
 
-const activeRuns = new Set<string>();
+const activeRuns = new Map<string, Promise<void>>();
 
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -66,6 +66,10 @@ async function linkCompletedMedia(job: MediaJobRow) {
 }
 
 async function collectAssets(job: MediaJobRow, assets: MediaAsset[]) {
+  // Uint8Array 的 JSON 结果不是二进制；落账前转成可重启恢复的 base64 快照。
+  assets = assets.map(asset => asset.type === "binary"
+    ? { type: "base64", mediaType: asset.mediaType, mimeType: asset.mimeType, data: Buffer.from(asset.data).toString("base64") }
+    : asset);
   updateMediaJob(job.jobId, {
     status: "collecting",
     pendingAssetsJson: JSON.stringify(assets),
@@ -73,7 +77,10 @@ async function collectAssets(job: MediaJobRow, assets: MediaAsset[]) {
   });
   const request = JSON.parse(job.requestJson) as MediaGenerationRequest;
   try {
-    const files = await persistProviderAssets(job.workspaceDirectory, job.mediaType, job.jobId, request, assets);
+    const files = await persistProviderAssets(job.workspaceDirectory, job.mediaType, job.jobId, request, assets, undefined, {
+      files: job.collectedFilesJson ? JSON.parse(job.collectedFilesJson) as CollectedMedia[] : [],
+      save: files => updateMediaJob(job.jobId, { collectedFilesJson: JSON.stringify(files) }),
+    });
     updateMediaJob(job.jobId, {
       status: "completed",
       resultJson: JSON.stringify(files),
@@ -159,6 +166,7 @@ async function runAsyncProvider(job: MediaJobRow, provider: LoadedMediaProvider,
         : job.mediaType === "video"
         ? await provider.submitVideo!(providerRequest as never)
         : await provider.submitAudio!(providerRequest as never);
+      if (typeof submitted.taskId !== "string" || !submitted.taskId.trim()) throw new Error("供应商未返回有效任务 ID；需人工核对原提交");
       taskId = submitted.taskId;
       updateMediaJob(job.jobId, { remoteTaskId: taskId, status: "tracking" });
     } catch (err) {
@@ -184,7 +192,7 @@ async function runSyncProvider(job: MediaJobRow, provider: LoadedMediaProvider, 
   }
 }
 
-export async function runMediaJob(jobId: string, options: { collectionOnly?: boolean } = {}) {
+async function executeMediaJob(jobId: string, options: { collectionOnly?: boolean } = {}) {
   let job = findMediaJobById(jobId);
   if (!job) return;
   if (job.status === "completed") {
@@ -246,8 +254,23 @@ export async function runMediaJob(jobId: string, options: { collectionOnly?: boo
   else await runSyncProvider(job, provider, request);
 }
 
+export function runMediaJob(jobId: string, options: { collectionOnly?: boolean } = {}) {
+  const active = activeRuns.get(jobId);
+  if (active) return active;
+  const task = executeMediaJob(jobId, options).catch(error => {
+    const job = findMediaJobById(jobId);
+    if (job) updateMediaJob(jobId, {
+      ...(job.status === "submitting" && !job.remoteTaskId ? { status: "unknown" as const } : {}),
+      ...(job.status === "collecting" ? { status: "collectionFailed" as const } : {}),
+      errorMessage: Error.isError(error) ? error.message : String(error),
+    });
+    throw error;
+  }).finally(() => { activeRuns.delete(jobId); });
+  activeRuns.set(jobId, task);
+  return task;
+}
+
 export function scheduleMediaJobRun(jobId: string, options: { collectionOnly?: boolean } = {}) {
-  if (activeRuns.has(jobId)) return;
-  activeRuns.add(jobId);
-  void runMediaJob(jobId, options).finally(() => activeRuns.delete(jobId));
+  // 后台错误已落账；不能因无人 await 的拒绝导致整个服务退出。
+  void runMediaJob(jobId, options).catch(error => console.error("媒体任务执行失败", jobId, error));
 }

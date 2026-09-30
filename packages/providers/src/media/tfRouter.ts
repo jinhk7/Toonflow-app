@@ -9,7 +9,7 @@ const rules = [
 ];
 
 const apiUrl = "https://api.toonflow.net/v1";
-const version = "2.0.0";
+const version = "2.0.1";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("TF-router 响应格式错误");
@@ -69,21 +69,128 @@ function wait(signal: AbortSignal) {
   });
 }
 
-async function generateTask(context: ProviderContext, mediaType: "image" | "video", body: unknown) {
-  // ACT: 单次生成最多等待 30 分钟；供应商开放任务恢复能力后再单独保存任务 ID。
-  const signal = AbortSignal.any([AbortSignal.timeout(30 * 60_000), ...(context.signal ? [context.signal] : [])]);
-  const task = await fetchJson(context, `${mediaType}/generate${mediaType === "image" ? "Image" : "Video"}`, body, signal);
+async function submitTask(context: ProviderContext, mediaType: "image" | "video", body: unknown): Promise<MediaTaskSubmitResult> {
+  const task = await fetchJson(context, `${mediaType}/generate${mediaType === "image" ? "Image" : "Video"}`, body);
   if (typeof task.data !== "string" || !task.data.trim()) throw new Error("TF-router 未返回任务 ID");
+  return { taskId: task.data };
+}
+
+async function queryTask(context: ProviderContext, mediaType: "image" | "video", taskId: string): Promise<MediaTaskQueryResult> {
+  const result = await fetchJson(context, `${mediaType}/get${mediaType === "image" ? "Image" : "Video"}Status`, { taskICode: taskId });
+  const data = result.data == null ? {} : object(result.data);
+  const status = String(result.status ?? data.status ?? "").toLowerCase();
+  if (status === "success" || status === "completed") return { status: "completed", assets: mediaAsset(data.data, mediaType) };
+  if (status === "failed" || status === "failure") return {
+    status: "failed", errorMessage: context.tool.errorMessage?.(result)
+      || (typeof data.failReason === "string" ? data.failReason : `${mediaType === "image" ? "图片" : "视频"}生成失败`),
+  };
+  return { status: "pending" };
+}
+
+async function generateTask(context: ProviderContext, mediaType: "image" | "video", submit: (context: ProviderContext) => Promise<MediaTaskSubmitResult>) {
+  const signal = AbortSignal.any([AbortSignal.timeout(30 * 60_000), ...(context.signal ? [context.signal] : [])]);
+  context = { ...context, signal };
+  const { taskId } = await submit(context);
   while (true) {
-    const result = await fetchJson(context, `${mediaType}/get${mediaType === "image" ? "Image" : "Video"}Status`, { taskICode: task.data }, signal);
-    const data = result.data == null ? {} : object(result.data);
-    const status = String(result.status ?? data.status ?? "").toLowerCase();
-    if (status === "success" || status === "completed") return mediaAsset(data.data, mediaType);
-    if (status === "failed" || status === "failure") {
-      throw new Error(context.tool.errorMessage?.(result) || (typeof data.failReason === "string" ? data.failReason : `${mediaType === "image" ? "图片" : "视频"}生成失败`));
-    }
+    const result = await queryTask(context, mediaType, taskId);
+    if (result.status === "completed") return result.assets!;
+    if (result.status === "failed") throw new Error(result.errorMessage);
     await wait(signal);
   }
+}
+
+async function submitImage(context: ProviderContext, request: ImageRequest): Promise<MediaTaskSubmitResult> {
+  const model = request.model.toLowerCase();
+  const images = (request.images ?? []).map(mediaUrl);
+  const size = (request.size ?? "2K").toUpperCase();
+  const ratio = request.ratio ?? "16:9";
+  // if (!["1K", "2K", "4K"].includes(size)) throw new Error("TF-router 图片尺寸仅支持 1K、2K、4K");
+
+  let metadata: Record<string, unknown>;
+  let resolvedSize: string;
+  if (model.includes("doubao") || model.includes("seedream")) {
+    resolvedSize = size.toLowerCase();
+    if (!resolvedSize) throw new Error("TF-router Seedream 适配仅支持 16:9、9:16");
+    metadata = { response_format: "url", aspectRatio: ratio, sequential_image_generation: "disabled", stream: false, watermark: false };
+  } else if (model.includes("gpt") || model.includes("全能图片")) {
+    resolvedSize = size.toLowerCase();
+    metadata = { aspectRatio: ratio };
+  } else {
+    resolvedSize = size.toLowerCase();
+    metadata = { aspectRatio: ratio };
+  }
+  return submitTask(context, "image", {
+    model: request.model,
+    prompt: request.prompt,
+    size: resolvedSize,
+    ...(images.length ? { images } : {}),
+    metadata,
+  });
+}
+
+async function submitVideo(context: ProviderContext, request: VideoRequest): Promise<MediaTaskSubmitResult> {
+  const model = request.model.toLowerCase();
+  const images = (request.images ?? []).map(mediaUrl);
+  const videos = (request.videos ?? []).map(mediaUrl);
+  const audios = (request.audios ?? []).map(mediaUrl);
+  const frames = [
+    ...(request.firstFrame ? [{ url: mediaUrl(request.firstFrame), role: "first_frame" }] : []),
+    ...(request.lastFrame ? [{ url: mediaUrl(request.lastFrame), role: "last_frame" }] : []),
+  ];
+  const mode = request.mode ?? (frames.length ? "endFrameOptional" : videos.length || audios.length ? [] : images.length ? "singleImage" : "text");
+  const isFrames = mode === "startEndRequired" || mode === "endFrameOptional" || mode === "startFrameOptional";
+  const frameImages = frames.length ? frames : images.map((url, index) => ({ url, role: index === 0 ? "first_frame" : "last_frame" }));
+  const imageRefs = isFrames ? frameImages.map((item) => item.url) : images;
+  const ratio = request.ratio ?? "16:9";
+  let metadata: Record<string, unknown>;
+
+  if (model.includes("kling")) {
+    metadata = {
+      aspect_ratio: ratio,
+      sound: request.generateAudio ? "on" : "off",
+      video_list: videos.map((url) => ({ video_url: url })),
+      image_list: [],
+    };
+
+    if (model.includes("omni") || model.includes("o1")) {
+      metadata.image_list = isFrames
+        ? frameImages.map(({ url, role }) => ({ image_url: url, type: role === "first_frame" ? "first_frame" : "end_frame" }))
+        : images.map((url) => ({ image_url: url }));
+    } else {
+      if (imageRefs[0]) metadata.image = imageRefs[0];
+      if (isFrames && imageRefs[1]) metadata.image_tail = imageRefs[1];
+    }
+  } else if (model.includes("grok")) {
+    metadata = { aspectRatio: ratio };
+  } else {
+    const references: Record<string, unknown>[] = [];
+    if (Array.isArray(mode)) {
+      for (const [type, urls] of [
+        ["image", images],
+        ["video", videos],
+        ["audio", audios],
+      ] as const) {
+        references.push(...urls.map((url) => ({ role: `reference_${type}`, type: `${type}_url`, [`${type}_url`]: { url } })));
+      }
+    } else if (isFrames) {
+      references.push(...frameImages.map(({ url, role }) => ({ role, type: "image_url", image_url: { url } })));
+    } else if (mode === "singleImage") {
+      references.push(...images.map((url) => ({ role: "reference_image", type: "image_url", image_url: { url } })));
+    }
+    metadata = {
+      ...(typeof request.generateAudio === "boolean" ? { generate_audio: request.generateAudio } : {}),
+      ratio,
+      references,
+      resolution: request.resolution,
+    };
+  }
+  return submitTask(context, "video", {
+    model: request.model,
+    prompt: request.prompt,
+    duration: request.duration,
+    resolution: request.resolution,
+    metadata,
+  });
 }
 
 export default {
@@ -187,96 +294,10 @@ export default {
       imageRatios: ["1:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "21:9"],
     },
   ] satisfies ProviderModel[],
-  async generateImage(request: ImageRequest): Promise<MediaAsset[]> {
-    const model = request.model.toLowerCase();
-    const images = (request.images ?? []).map(mediaUrl);
-    const size = (request.size ?? "2K").toUpperCase();
-    const ratio = request.ratio ?? "16:9";
-    // if (!["1K", "2K", "4K"].includes(size)) throw new Error("TF-router 图片尺寸仅支持 1K、2K、4K");
-
-    let metadata: Record<string, unknown>;
-    let resolvedSize: string;
-    if (model.includes("doubao") || model.includes("seedream")) {
-      resolvedSize = size.toLowerCase();
-      if (!resolvedSize) throw new Error("TF-router Seedream 适配仅支持 16:9、9:16");
-      metadata = { response_format: "url", aspectRatio: ratio, sequential_image_generation: "disabled", stream: false, watermark: false };
-    } else if (model.includes("gpt") || model.includes("全能图片")) {
-      resolvedSize = size.toLowerCase();
-      metadata = { aspectRatio: ratio };
-    } else {
-      resolvedSize = size.toLowerCase();
-      metadata = { aspectRatio: ratio };
-    }
-    return generateTask(this, "image", {
-      model: request.model,
-      prompt: request.prompt,
-      size: resolvedSize,
-      ...(images.length ? { images } : {}),
-      metadata,
-    });
-  },
-  async generateVideo(request: VideoRequest): Promise<MediaAsset[]> {
-    const model = request.model.toLowerCase();
-    const images = (request.images ?? []).map(mediaUrl);
-    const videos = (request.videos ?? []).map(mediaUrl);
-    const audios = (request.audios ?? []).map(mediaUrl);
-    const frames = [
-      ...(request.firstFrame ? [{ url: mediaUrl(request.firstFrame), role: "first_frame" }] : []),
-      ...(request.lastFrame ? [{ url: mediaUrl(request.lastFrame), role: "last_frame" }] : []),
-    ];
-    const mode = request.mode ?? (frames.length ? "endFrameOptional" : videos.length || audios.length ? [] : images.length ? "singleImage" : "text");
-    const isFrames = mode === "startEndRequired" || mode === "endFrameOptional" || mode === "startFrameOptional";
-    const frameImages = frames.length ? frames : images.map((url, index) => ({ url, role: index === 0 ? "first_frame" : "last_frame" }));
-    const imageRefs = isFrames ? frameImages.map((item) => item.url) : images;
-    const ratio = request.ratio ?? "16:9";
-    let metadata: Record<string, unknown>;
-
-    if (model.includes("kling")) {
-      metadata = {
-        aspect_ratio: ratio,
-        sound: request.generateAudio ? "on" : "off",
-        video_list: videos.map((url) => ({ video_url: url })),
-        image_list: [],
-      };
-
-      if (model.includes("omni") || model.includes("o1")) {
-        metadata.image_list = isFrames
-          ? frameImages.map(({ url, role }) => ({ image_url: url, type: role === "first_frame" ? "first_frame" : "end_frame" }))
-          : images.map((url) => ({ image_url: url }));
-      } else {
-        if (imageRefs[0]) metadata.image = imageRefs[0];
-        if (isFrames && imageRefs[1]) metadata.image_tail = imageRefs[1];
-      }
-    } else if (model.includes("grok")) {
-      metadata = { aspectRatio: ratio };
-    } else {
-      const references: Record<string, unknown>[] = [];
-      if (Array.isArray(mode)) {
-        for (const [type, urls] of [
-          ["image", images],
-          ["video", videos],
-          ["audio", audios],
-        ] as const) {
-          references.push(...urls.map((url) => ({ role: `reference_${type}`, type: `${type}_url`, [`${type}_url`]: { url } })));
-        }
-      } else if (isFrames) {
-        references.push(...frameImages.map(({ url, role }) => ({ role, type: "image_url", image_url: { url } })));
-      } else if (mode === "singleImage") {
-        references.push(...images.map((url) => ({ role: "reference_image", type: "image_url", image_url: { url } })));
-      }
-      metadata = {
-        ...(typeof request.generateAudio === "boolean" ? { generate_audio: request.generateAudio } : {}),
-        ratio,
-        references,
-        resolution: request.resolution,
-      };
-    }
-    return generateTask(this, "video", {
-      model: request.model,
-      prompt: request.prompt,
-      duration: request.duration,
-      resolution: request.resolution,
-      metadata,
-    });
-  },
+  submitImage(request: ImageRequest) { return submitImage(this, request); },
+  queryImageTask(taskId: string) { return queryTask(this, "image", taskId); },
+  generateImage(request: ImageRequest) { return generateTask(this, "image", context => submitImage(context, request)); },
+  submitVideo(request: VideoRequest) { return submitVideo(this, request); },
+  queryVideoTask(taskId: string) { return queryTask(this, "video", taskId); },
+  generateVideo(request: VideoRequest) { return generateTask(this, "video", context => submitVideo(context, request)); },
 } satisfies ProviderDefinition<typeof rules>;
