@@ -1,0 +1,69 @@
+name: Non-desktop checks
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nonDesktop-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and build (non-desktop)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - name: Install locked dependencies
+        run: |
+          # ACT: CI uses npm directly; keep locked versions and integrity hashes.
+          # Restore the original lockfile even when installation fails.
+          cp bun.lock "$RUNNER_TEMP/bun.lock"
+          trap 'cp "$RUNNER_TEMP/bun.lock" bun.lock' EXIT
+          bun -e '
+            const file = Bun.file("bun.lock");
+            const lock = (await file.text()).replaceAll(/https?:\/\/registry\.(npmmirror\.com|npm\.taobao\.org)\//g, "https://registry.npmjs.org/");
+            await Bun.write(file, lock);
+          '
+          bun install --frozen-lockfile
+      - name: Typecheck non-desktop workspaces
+        run: |
+          # ACT: Bun 1.3.14 --filter mishandles camelCase paths on Linux.
+          bun --eval '
+            import { $ } from "bun";
+            const { workspaces } = await Bun.file("package.json").json();
+            for (const pattern of workspaces) {
+              for await (const file of new Bun.Glob(`${pattern}/package.json`).scan(".")) {
+                const directory = file.slice(0, -"/package.json".length);
+                if (directory === "apps/desktop") continue;
+                const { scripts } = await Bun.file(file).json();
+                if (!scripts?.typecheck) continue;
+                console.log(`::group::Typecheck ${directory}`);
+                await $`${process.execPath} run typecheck`.cwd(directory);
+                console.log("::endgroup::");
+              }
+            }
+          '
+      - name: Build nodes, tools, web, server and MCP
+        run: bun run build:server
+      - name: Build update server
+        run: bun run --cwd apps/updateServer build
+      - name: Build teams
+        env:
+          NODE_ENV: production
+        run: |
+          for directory in packages/teams/*; do
+            bun run --cwd "$directory" build
+          done
