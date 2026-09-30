@@ -106,6 +106,9 @@
       <mentionContent ref="draftMentionPreview" :mentions="draftMentions" :directory="directory" removable @remove="removeDraftMention" />
       <div class="senderActions">
         <modelPopover v-model="selectedModel" v-model:reasoningEffort="reasoningEffort" :active="active" :disabled="disabled" />
+        <el-button v-if="currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="pauseRun">暂停后续</el-button>
+        <el-button v-if="currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="terminateRun">终止流程</el-button>
+        <el-button v-if="currentRunId && resumableRun" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="resumeRun">继续运行</el-button>
         <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="createCanvasContext?.()?.id" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
         <skillMenu ref="skillMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="skillQuery" :editor="senderElement" @select="selectSkill" @dismiss="skillQuery = undefined" />
         <el-popover
@@ -146,6 +149,15 @@
         </el-button>
       </div>
     </div>
+    <authorizationPrompt :runId="currentRunId" :errorMessage="authorizationError" />
+    <el-dialog v-model="reviewOpen" title="核对未知副作用" width="min(560px, 92vw)">
+      <p>以下调用的外部结果未知；核对后只允许跳过，不会重新执行。</p>
+      <div v-for="item in reviewCalls" :key="item.toolCallId" class="reviewCall">
+        <strong>{{ item.toolName }} · {{ item.toolCallId }}</strong>
+        <pre>{{ JSON.stringify(item.args, null, 2) }}</pre>
+        <el-button type="warning" :loading="reviewingId === item.toolCallId" @click="confirmReview(item.toolCallId)">确认已核对，跳过此调用</el-button>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -176,6 +188,8 @@ import { useWorkspaceStore } from "@/stores/workspace";
 import type { AgentAttachment, AgentConversation, AgentMessage } from "./types";
 import type { AgentEvent, AgentMention } from "@toonflow/server/agent/types";
 import { createConversationStream, readAgentEvents } from "./replyStream";
+import { controlAgentRun, fetchAgentRunSnapshot, reviewAgentRun, subscribeAgentRunEvents, type AgentRunSnapshot } from "./runClient";
+import authorizationPrompt from "./authorizationPrompt.vue";
 import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
 import chatItem from "@tdesign-vue-next/chat/es/chat-item";
 import chatReasoning from "@tdesign-vue-next/chat/es/chat-reasoning";
@@ -194,12 +208,23 @@ const createCanvasContext = inject<(() => CanvasContext | undefined) | undefined
 const messages = ref<AgentMessage[]>((props.initialSession?.messages ?? []).map(message => ({ ...message })));
 const stream = createConversationStream(messages);
 const remoteRunning = ref(props.initialSession?.running ?? false);
+const currentRunId = ref(props.initialSession?.activeRun?.runId);
+const runStatus = ref(props.initialSession?.activeRun?.status);
+const authorizationError = ref<string>();
+const reviewOpen = ref(false);
+const reviewCalls = ref<NonNullable<AgentRunSnapshot["reviewCalls"]>>([]);
+const reviewingId = ref<string>();
+let eventCursor = props.initialSession?.activeRun?.lastEventSeq ?? 0;
+let reconnectController: AbortController | undefined;
 const stats = ref(props.initialSession?.stats);
 const contextUsage = ref(props.initialSession?.contextUsage);
 const busy = ref(false);
 const compacting = ref(false);
 const deletingId = ref<string>();
 const locked = computed(() => props.disabled || busy.value || deletingId.value !== undefined);
+const resumableRun = computed(() => {
+  return Boolean(currentRunId.value && runStatus.value && ["paused", "needsReview", "error"].includes(runStatus.value));
+});
 const editingId = ref<string>();
 const draftMentions = ref<AgentMention[]>([]);
 const draftMentionTargets = shallowRef<{ key: symbol; element: HTMLElement; mention: AgentMention }[]>([]);
@@ -280,9 +305,54 @@ watch([locked, () => props.active], ([locked, active]) => {
   if (!active || locked) sender?.disable();
   else sender?.enable();
 });
-watch(() => props.active, active => {
+watch([() => props.active, () => props.initialSession?.activeRun?.runId], ([active, runId]) => {
   if (!active) contextMenuVisible.value = false;
-});
+  else if (runId && !controller && !reconnectController) void reconnectActiveRun();
+}, { immediate: true });
+
+async function refreshRunStatus(runId: string) {
+  const snapshot = await fetchAgentRunSnapshot(runId);
+  if (currentRunId.value !== runId) return snapshot;
+  runStatus.value = snapshot.status;
+  remoteRunning.value = snapshot.live;
+  return snapshot;
+}
+
+async function reconnectActiveRun() {
+  const runId = currentRunId.value ?? props.initialSession?.activeRun?.runId;
+  if (!runId || !directory || controller || reconnectController) return;
+  currentRunId.value = runId;
+  const connection = new AbortController();
+  reconnectController = connection;
+  const canvasContext = createCanvasContext?.();
+  const handledCanvasCalls = new Set<string>();
+  try {
+    const snapshot = await refreshRunStatus(runId);
+    if (connection.signal.aborted || (!snapshot.live && snapshot.lastEventSeq <= eventCursor)) return;
+    busy.value = snapshot.live;
+    await subscribeAgentRunEvents(runId, eventCursor, async (event, meta) => {
+      let toolEvent = event;
+      while (toolEvent.type === "subAgentEvent") toolEvent = toolEvent.event;
+      if (toolEvent.type === "canvasCall") {
+        if (!handledCanvasCalls.has(toolEvent.callId)) {
+          await sendCanvasResult(toolEvent, canvasContext, connection.signal);
+          handledCanvasCalls.add(toolEvent.callId);
+        }
+      } else applyEvent(event);
+      if (meta?.seq) eventCursor = meta.seq;
+    }, connection.signal);
+  } catch (error) {
+    if (!connection.signal.aborted) ElMessage.error(error instanceof Error ? error.message : "重连运行事件失败");
+  } finally {
+    if (reconnectController === connection) {
+      reconnectController = undefined;
+      stream.finish();
+      compacting.value = false;
+      busy.value = false;
+      await refreshRunStatus(runId).catch(() => {});
+    }
+  }
+}
 
 function applyEvent(event: AgentEvent) {
   switch (event.type) {
@@ -296,8 +366,26 @@ function applyEvent(event: AgentEvent) {
       });
       break;
     case "compaction": compacting.value = event.active; break;
+    case "run":
+      if (currentRunId.value !== event.runId) eventCursor = 0;
+      currentRunId.value = event.runId;
+      runStatus.value = "running";
+      remoteRunning.value = true;
+      authorizationError.value = undefined;
+      break;
     case "session": emit("session", event.file); break;
     case "stats": stats.value = event.stats; contextUsage.value = event.contextUsage; break;
+    case "done":
+      remoteRunning.value = false;
+      runStatus.value = "completed";
+      stream.receive(event);
+      break;
+    case "error":
+      remoteRunning.value = false;
+      runStatus.value = "error";
+      if (event.message.includes("尚未授权")) authorizationError.value = event.message;
+      stream.receive(event);
+      break;
     default: stream.receive(event);
   }
 }
@@ -448,7 +536,6 @@ async function deleteMessage(item: AgentMessage) {
           directory, sessionFile: props.sessionFile,
           ...(item.replyTo ? { replyTo: item.replyTo } : { entryIds: [item.entryId!] }),
         },
-        headers: { "x-toonflow-workspace": "1" },
       });
       if (data.code !== 200) throw new Error(data.message || "删除消息失败");
       stats.value = data.data.stats;
@@ -487,8 +574,62 @@ function stopSenderResize(event: PointerEvent) {
   if (senderResize?.pointerId === event.pointerId) senderResize = undefined;
 }
 
-function stopMessage() {
+async function pauseRun() {
+  if (!currentRunId.value) return;
+  try {
+    await controlAgentRun(currentRunId.value, "pause");
+    runStatus.value = "paused";
+    ElMessage.success("已暂停后续步骤");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "暂停失败");
+  }
+}
+
+async function resumeRun() {
+  if (!currentRunId.value) return;
+  const canvasContext = createCanvasContext?.();
+  try {
+    const snapshot = await fetchAgentRunSnapshot(currentRunId.value);
+    reviewCalls.value = snapshot.reviewCalls ?? [];
+    if (reviewCalls.value.length) { reviewOpen.value = true; return; }
+    await controlAgentRun(currentRunId.value, "resume", canvasContext ? { id: canvasContext.id, tools: canvasContext.tools } : undefined);
+    runStatus.value = "running";
+    remoteRunning.value = true;
+    ElMessage.success("已继续运行");
+    void reconnectActiveRun();
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "继续运行失败");
+  }
+}
+async function confirmReview(toolCallId: string) {
+  if (!currentRunId.value) return;
+  reviewingId.value = toolCallId;
+  try {
+    const snapshot = await reviewAgentRun(currentRunId.value, toolCallId);
+    reviewCalls.value = snapshot.reviewCalls ?? [];
+    if (!reviewCalls.value.length) reviewOpen.value = false;
+  } catch (error) { ElMessage.error(error instanceof Error ? error.message : "核对失败"); }
+  finally { reviewingId.value = undefined; }
+}
+
+async function terminateRun() {
+  if (!currentRunId.value) return;
+  try {
+    await controlAgentRun(currentRunId.value, "terminate");
+    await refreshRunStatus(currentRunId.value);
+    ElMessage.success("已终止本次流程");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "终止失败");
+  }
+}
+
+async function stopMessage() {
+  if (currentRunId.value && remoteRunning.value) {
+    try { await controlAgentRun(currentRunId.value, "stopGeneration"); }
+    catch (error) { ElMessage.error(error instanceof Error ? error.message : "停止生成失败"); return; }
+  }
   controller?.abort();
+  reconnectController?.abort();
 }
 
 async function uploadAttachments(attachments: AgentAttachment[], directory: string, signal: AbortSignal) {
@@ -564,6 +705,7 @@ async function sendMessage(source?: AgentMessage) {
   const userMessage = reactive<AgentMessage>({ id: crypto.randomUUID(), role: "user", content: prompt, attachments, mentions });
   let ownsStream = !remoteRunning.value;
   let forwarded = false;
+  let reconnect = false;
   if (!source) {
     messages.value.push(userMessage);
     if (ownsStream) messages.value.push(reply);
@@ -587,6 +729,7 @@ async function sendMessage(source?: AgentMessage) {
       signal: requestController.signal,
     });
     for await (const event of readAgentEvents(response, requestController.signal)) {
+      const seq = (event as AgentEvent & { runSeq?: number }).runSeq;
       // 子任务复用发起委派时的画布与取消通道，界面切换不改变工具执行目标。
       let toolEvent: AgentEvent = event;
       let scope = "";
@@ -602,6 +745,7 @@ async function sendMessage(source?: AgentMessage) {
         if (handledCanvasCalls.has(toolEvent.callId)) throw new Error("收到重复的画布调用");
         handledCanvasCalls.add(toolEvent.callId);
         await sendCanvasResult(toolEvent, canvasContext, requestController.signal);
+        if (seq !== undefined) eventCursor = seq;
         continue;
       }
       switch (event.type) {
@@ -633,34 +777,41 @@ async function sendMessage(source?: AgentMessage) {
           if (source && !accepted) break;
           applyEvent(event);
           break;
-        default: applyEvent(event);
+        default:
+          if ((event.type !== "done" && event.type !== "error") || (ownsStream && !forwarded)) applyEvent(event);
       }
+      if (seq !== undefined) eventCursor = seq;
     }
     if (source && !accepted) throw new Error("服务端未确认重发，请重新打开对话后重试");
     finishStats("success");
     emit("sent", mentionPlainText(prompt, mentions) || attachments[0]?.name || "新对话");
   } catch (error) {
     finishStats(requestController.signal.aborted ? "cancelled" : "failed");
+    reconnect = !requestController.signal.aborted && Boolean(currentRunId.value && remoteRunning.value);
     const responseMessage = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
     const message = requestController.signal.aborted ? "已停止生成" : responseMessage || (error instanceof Error ? error.message : "发送失败，请重试");
     if ((source && !accepted) || !ownsStream) { userMessage.error = message; ElMessage.error(message); }
-    else reply.error = message;
+    else if (!reconnect) reply.error = message;
     if (ownsStream && props.initialSession?.parentFile && props.sessionFile) {
       emit("event", { type: "subAgentEvent", file: props.sessionFile, event: { type: "error", message } });
     }
   } finally {
     for (const file of activeChildFiles) emit("event", { type: "subAgentEvent", file, event: { type: "error", message: "委派连接已结束，请重新打开子会话查看结果" } });
     // ACT: Bun 的流断开事件可能不触发；主动结束仍在等待的提问，不依赖断开通知。
-    for (const callId of pendingQuestions.values()) {
-      void fetch("/api/agent/answer", {
-        method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
-        body: JSON.stringify({ directory, callId, cancelled: true }), keepalive: true,
-      }).catch(() => {});
+    if (!currentRunId.value) {
+      for (const callId of pendingQuestions.values()) {
+        void fetch("/api/agent/answer", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ directory, callId, cancelled: true }), keepalive: true,
+        }).catch(() => {});
+      }
     }
-    if (ownsStream && !forwarded) stream.finish();
+    if (ownsStream && !forwarded && !reconnect) stream.finish();
     compacting.value = false;
     busy.value = false;
     controller = undefined;
+    if (reconnect) void reconnectActiveRun();
+    else if (currentRunId.value) void refreshRunStatus(currentRunId.value).catch(() => {});
   }
 }
 
@@ -739,6 +890,7 @@ watch(senderElement, (element, _previous, onCleanup) => {
   editor.addEventListener("compositionend", updateCursor);
   onCleanup(() => {
     controller?.abort();
+    reconnectController?.abort();
     draftMentionTargets.value = [];
     sender = undefined;
     senderResize = undefined;

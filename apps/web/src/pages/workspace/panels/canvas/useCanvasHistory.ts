@@ -175,6 +175,5 @@ export function useCanvasHistory(flow: ReturnType<typeof useVueFlow>, binding: (
   }, { immediate: true, flush: "sync" });
   onScopeDispose(() => { revision++; record.cancel(); });
 
-  const getRetainedNodes = () => [...nodeReferences.values(), ...flow.getNodes.value];
-  return { canUndo, canRedo, record, commit, undo, redo, batch, getRetainedNodes };
+  return { canUndo, canRedo, record, commit, undo, redo, batch };
 }

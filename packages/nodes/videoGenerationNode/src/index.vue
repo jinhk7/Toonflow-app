@@ -72,7 +72,7 @@
             :disabled="deleting || uploading || (!generating && (!generationPrompt || !selectedModel))"
             :title="generating ? '停止生成' : '生成视频'"
             :aria-label="generating ? '停止生成' : '生成视频'"
-            @click="generating ? generationController?.abort() : startGeneration().catch((error) => showNodeError(error, '视频生成失败'))" />
+            @click="generating ? generationController?.abort() : startFromButton().catch((error) => showNodeError(error, '视频生成失败'))" />
         </div>
       </el-card>
     </template>
@@ -81,9 +81,9 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
-import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading } from "element-plus";
+import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessageBox, ElLoading } from "element-plus";
 import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeMediaPersistence, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle, type PrepareMediaJobResult } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import videoPlayer from "@toonflow/nodes-scaffold/videoPlayer";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
@@ -112,6 +112,8 @@ data.value.mode ??= "";
 data.value.generateAudio ??= true;
 data.value.ratio ??= "9:16";
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
+const mediaPersistence = useNodeMediaPersistence(id, () => data.value as Record<string, unknown>);
+const outputSlot = "video";
 const models = ref<NodeMediaModel[]>([]);
 const modelsLoading = ref(false);
 const uploading = ref(false);
@@ -194,7 +196,9 @@ const previewUrl = files.useFileUrl(
   (error) => showNodeError(error, "视频读取失败")
 );
 
-onMounted(() => loadModels().catch((error) => showNodeError(error, "模型读取失败")));
+onMounted(() => loadModels()
+  .then(() => resumePendingGeneration())
+  .catch((error) => showNodeError(error, "模型读取失败")));
 onScopeDispose(() => {
   disposed = true;
   generationController?.abort();
@@ -242,19 +246,18 @@ function loadModels() {
   return modelsRequest;
 }
 
-async function startGeneration() {
-  const choice = selectedModel.value;
-  if (generating.value) throw new Error("视频正在生成，请等待完成");
-  if (uploading.value) throw new Error("视频正在替换，请等待完成");
-  if (deleting.value) throw new Error("节点正在删除");
-  if (!choice) throw new Error("请先选择视频模型");
-  if (!generationPrompt.value) throw new Error("请输入生成提示词");
-  if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
+function mediaBindingFields(binding?: PrepareMediaJobResult) {
+  return binding ? {
+    canvasPath: binding.canvasPath,
+    nodeId: binding.nodeId,
+    outputSlot: binding.outputSlot,
+    expectedNodeVersion: binding.expectedNodeVersion,
+  } : {};
+}
+
+function buildVideoInput(choice: NodeMediaModel): Omit<NodeVideoRequest, "directory"> {
   const images = refList.value.flatMap((item) => item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []);
-  if (choice.mode?.length && !matchingModes.value.length) throw new Error("当前模型没有适合这些参考素材的生成模式，请更换模型或调整引用");
-  const workspace = files.getWorkspaceFiles();
-  const controller = new AbortController();
-  const input: Omit<NodeVideoRequest, "directory"> = {
+  return {
     providerId: choice.providerId,
     modelId: choice.modelId,
     prompt: generationPrompt.value,
@@ -270,20 +273,113 @@ async function startGeneration() {
     videos: refList.value.flatMap((item) => item.dataType === "VIDEO" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []),
     audios: refList.value.flatMap((item) => item.dataType === "AUDIO" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []),
   };
+}
+
+async function waitForVideoResult(directory: string, idempotencyKey: string, binding?: PrepareMediaJobResult, signal?: AbortSignal) {
+  const choice = selectedModel.value;
+  if (!choice) throw new Error("请先选择视频模型");
+  const [result] = await ai.generateVideo({
+    directory,
+    idempotencyKey,
+    ...buildVideoInput(choice),
+    ...mediaBindingFields(binding),
+  }, signal);
+  if (!result) throw new Error("供应商未返回视频");
+  outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
+  await mediaPersistence.clearPending(outputSlot);
+}
+
+async function resumePendingGeneration() {
+  const pending = mediaPersistence.readPending();
+  if (!pending || pending.outputSlot !== outputSlot || generating.value || uploading.value || deleting.value) return;
+  const workspace = files.getWorkspaceFiles();
+  const controller = new AbortController();
   generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消。
+  generation = generationState.run(async () => {
+    const { directory } = await workspace.list();
+    controller.signal.throwIfAborted();
+    const job = await ai.fetchMediaJob(directory, pending.idempotencyKey, controller.signal);
+    if (!job) throw new Error("未找到任务记录，点击生成可核对并确认放弃原任务");
+    if (job.status === "completed" && job.linkStatus !== "pending" && job.files?.length) {
+      const result = job.files.find(file => file.mediaType === "video") ?? job.files[0];
+      outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
+      await mediaPersistence.clearPending(outputSlot);
+      return;
+    }
+    if (job.status === "failed") throw Object.assign(new Error(job.errorMessage || "媒体生成失败"), { definitive: true });
+    if (job.status === "unknown") throw new Error(`${job.errorMessage || "提交结果未知"}；结果未知，点击生成可确认放弃后重新提交`);
+    if (job.status === "collectionFailed") {
+      throw new Error(job.errorMessage || "媒体生成失败");
+    }
+    const [result] = await ai.pollMediaJob(directory, pending.idempotencyKey, controller.signal);
+    if (!result) throw new Error("供应商未返回视频");
+    outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
+    await mediaPersistence.clearPending(outputSlot);
+  })
+    .catch(async (error) => {
+      showNodeError(error, "视频生成失败");
+      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showNodeError(releaseError, "解除任务占用失败"));
+    })
+    .finally(() => {
+      generationController = undefined;
+    });
+}
+
+// 结果未知的任务不会再写回节点；只有按钮操作经用户确认后才解除占用，Agent 调用仍被 prepare 拒绝。
+async function releaseUnknownPending() {
+  const pending = mediaPersistence.readPending();
+  if (!pending || pending.outputSlot !== outputSlot || generating.value) return true;
+  const { directory } = await files.getWorkspaceFiles().list();
+  const job = await ai.fetchMediaJob(directory, pending.idempotencyKey);
+  if (job && job.status !== "unknown") {
+    await resumePendingGeneration();
+    return false;
+  }
+  try {
+    await ElMessageBox.confirm(
+      "上次任务结果未知，服务可能仍在生成或已计费。请先在服务端核对；放弃后原任务的结果不会写回节点，本次会产生新的生成请求。",
+      "放弃上次任务？",
+      { type: "warning", confirmButtonText: "放弃并重新生成", cancelButtonText: "取消" },
+    );
+  } catch { return false; }
+  if (disposed || mediaPersistence.readPending()?.idempotencyKey !== pending.idempotencyKey) return false;
+  const current = await ai.fetchMediaJob(directory, pending.idempotencyKey);
+  if (current && current.status !== "unknown") {
+    await resumePendingGeneration();
+    return false;
+  }
+  await mediaPersistence.clearPending(outputSlot);
+  return true;
+}
+
+async function startFromButton() {
+  if (await releaseUnknownPending()) await startGeneration();
+}
+
+async function startGeneration() {
+  const choice = selectedModel.value;
+  if (generating.value) throw new Error("视频正在生成，请等待完成");
+  if (uploading.value) throw new Error("视频正在替换，请等待完成");
+  if (deleting.value) throw new Error("节点正在删除");
+  if (!choice) throw new Error("请先选择视频模型");
+  if (!generationPrompt.value) throw new Error("请输入生成提示词");
+  if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
+  if (choice.mode?.length && !matchingModes.value.length) throw new Error("当前模型没有适合这些参考素材的生成模式，请更换模型或调整引用");
+  const workspace = files.getWorkspaceFiles();
+  const controller = new AbortController();
+  const { idempotencyKey, binding } = await mediaPersistence.prepare(outputSlot);
+  generationController = controller;
+  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消本地等待。
   generation = generationState.run(() => workspace
     .list()
     .then(({ directory }) => {
       controller.signal.throwIfAborted();
-      return ai.generateVideo({ ...input, directory }, controller.signal);
-    })
-    .then(([result]) => {
-      controller.signal.throwIfAborted();
-      if (!result) throw new Error("供应商未返回视频");
-      outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
+      return waitForVideoResult(directory, idempotencyKey, binding, controller.signal);
     }))
-    .catch((error) => showNodeError(error, "视频生成失败"))
+    .catch(async (error) => {
+      showNodeError(error, "视频生成失败");
+      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showNodeError(releaseError, "解除任务占用失败"));
+    })
     .finally(() => {
       generationController = undefined;
     });

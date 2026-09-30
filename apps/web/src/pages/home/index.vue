@@ -70,7 +70,7 @@
             </button>
             <div class="projectActions">
               <el-button text :icon="IconEdit" :disabled="creating || opening" :aria-label="`重命名项目 ${project.name}`" title="重命名" @click="renameProject(project)" />
-              <el-button text type="danger" :icon="IconTrash" :disabled="creating || opening" :aria-label="`移除项目 ${project.name}`" title="从列表移除，不删除文件" @click="workspaceStore.removeProject(project.directory)" />
+              <el-button text type="danger" :icon="IconTrash" :disabled="creating || opening" :aria-label="`移除项目 ${project.name}`" title="从列表移除，不删除文件" @click="removeProjectFromList(project)" />
             </div>
           </el-card>
         </div>
@@ -128,6 +128,9 @@ const placeholderPhrases = [
 const promptPlaceholder = ref(placeholderPhrases[0]!);
 
 onMounted(() => {
+  void workspaceStore.ensureProjectList().catch(err => {
+    ElMessage.error(axios.isAxiosError<{ message?: string }>(err) ? err.response?.data.message || "读取项目列表失败" : err instanceof Error ? err.message : "读取项目列表失败");
+  });
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   let phraseIndex = 0;
   watch(() => !!prompt.value, (hasInput, _previous, onCleanup) => {
@@ -196,7 +199,20 @@ async function renameProject(project: Project) {
     inputValue: project.name, confirmButtonText: "保存", cancelButtonText: "取消",
     inputValidator: value => !!value?.trim() || "项目名称不能为空",
   }).catch(() => null);
-  if (result) workspaceStore.renameProject(project.directory, result.value);
+  if (!result) return;
+  try {
+    await workspaceStore.renameProject(project.directory, result.value);
+  } catch (err) {
+    ElMessage.error(axios.isAxiosError<{ message?: string }>(err) ? err.response?.data.message || "重命名失败" : err instanceof Error ? err.message : "重命名失败");
+  }
+}
+
+async function removeProjectFromList(project: Project) {
+  try {
+    await workspaceStore.removeProject(project.directory);
+  } catch (err) {
+    ElMessage.error(axios.isAxiosError<{ message?: string }>(err) ? err.response?.data.message || "移除项目失败" : err instanceof Error ? err.message : "移除项目失败");
+  }
 }
 
 async function createProject(fromPrompt = true) {

@@ -40,6 +40,8 @@ export async function createApp({
   if (dataDirectory && skillsRoot) await initializePlugins(resolve(dataDirectory, "skills"), skillsRoot);
   if (dataDirectory && agentsRoot) await initializePlugins(resolve(dataDirectory, "agents"), agentsRoot);
   const app = express();
+  // 仅信任本机反向代理提供的 HTTPS 协议，用于生成 A2A、MCP 等对外地址。
+  app.set("trust proxy", "loopback");
 
   if (process.env.NODE_ENV === "dev") {
     await buildRoute();
@@ -54,6 +56,11 @@ export async function createApp({
 
   const { default: initializeProviderModels } = await import("@/utils/ai/initialize");
   await initializeProviderModels();
+  const [{ ensureMediaJobsReady }, { ensureAgentRuntimeReady }] = await Promise.all([
+    import("@/utils/media/mediaJobs"), import("@/agent/runtime/runHost"),
+  ]);
+  ensureMediaJobsReady();
+  await ensureAgentRuntimeReady();
   const router = await import("@/router");
   router.default(app);
   const [{ createMcpRouter }, { getMcpTools }, { authorizeMcp }, { skillResources }] = await Promise.all([

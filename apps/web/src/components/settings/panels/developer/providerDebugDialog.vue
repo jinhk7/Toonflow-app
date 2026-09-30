@@ -162,7 +162,6 @@ const activeTab = ref("preview");
 const status = ref("");
 const elapsed = ref(0);
 const isDesktop = new URLSearchParams(window.location.search).get("desktop") === "1";
-const desktopHeaders = { "x-toonflow-desktop": "1" };
 let controller: AbortController | undefined;
 
 function showError(error: unknown) {
@@ -172,7 +171,7 @@ function showError(error: unknown) {
 
 async function readSource(): Promise<SourceFile> {
   if (isDesktop) {
-    const { data } = await axios.post<{ data: SourceFile }>("/api/desktop/providerFile/read", { token: desktopToken.value }, { headers: desktopHeaders, signal: controller?.signal });
+    const { data } = await axios.post<{ data: SourceFile }>("/api/desktop/providerFile/read", { token: desktopToken.value }, { signal: controller?.signal });
     return data.data;
   }
   if (!handle.value) throw new Error("请先选择供应商文件");
@@ -207,7 +206,7 @@ async function selectFile() {
   controller = new AbortController();
   try {
     if (isDesktop) {
-      const { data } = await axios.post<{ data: { token: string; name: string } | null }>("/api/desktop/providerFile/select", {}, { headers: desktopHeaders, signal: controller.signal });
+      const { data } = await axios.post<{ data: { token: string; name: string } | null }>("/api/desktop/providerFile/select", {}, { signal: controller.signal });
       if (!data.data) return;
       desktopToken.value = data.data.token;
       fileName.value = data.data.name;

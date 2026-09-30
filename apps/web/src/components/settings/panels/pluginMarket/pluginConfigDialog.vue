@@ -4,7 +4,7 @@
     <el-alert v-if="configError" :title="configError" type="error" :closable="false" showIcon />
     <template #footer>
       <el-button :disabled="saving" @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="saving" :disabled="!canManage || !formApi" @click="saveConfig">保存</el-button>
+      <el-button type="primary" :loading="saving" :disabled="!formApi" @click="saveConfig">保存</el-button>
     </template>
   </el-dialog>
 </template>
@@ -16,7 +16,7 @@ import formCreate, { type Api, type Options } from "../../formCreate";
 import { ElMessage } from "element-plus";
 import type { Plugin } from "./types";
 
-const { plugin, canManage } = defineProps<{ plugin: Plugin; canManage: boolean }>();
+const { plugin } = defineProps<{ plugin: Plugin }>();
 const visible = defineModel<boolean>({ default: false });
 const formApi = shallowRef<Api>();
 const formRules = shallowRef<ReturnType<typeof formCreate.copyRules>>([]);
@@ -34,13 +34,13 @@ watch(() => [visible.value, plugin], () => {
 }, { immediate: true });
 
 async function saveConfig() {
-  if (!canManage || saving.value || !formApi.value) return;
+  if (saving.value || !formApi.value) return;
   saving.value = true;
   configError.value = "";
   try {
     if (!(await formApi.value.validate().catch(() => false))) return;
     const path = plugin.type === "node" ? "nodes" : "tools";
-    const { data } = await axios.put(`/api/${path}/save`, { name: plugin.name, config: formApi.value.formData() }, { headers: { "x-toonflow-workspace": "1" } });
+    const { data } = await axios.put(`/api/${path}/save`, { name: plugin.name, config: formApi.value.formData() });
     if (data.code !== 200) throw new Error(data.message || "保存插件配置失败");
     plugin.config = data.data;
     if (plugin.type === "node") window.dispatchEvent(new Event("toonflow:node-config-updated"));

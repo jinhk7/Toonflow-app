@@ -95,7 +95,6 @@ const moving = ref(false);
 const confirming = ref(false);
 const drafts = new Map<string, string>();
 const dirtyPaths = ref(new Set<string>());
-const headers = { "x-toonflow-workspace": "1" };
 let controller = new AbortController();
 
 // 单文件技能只有主文件本身，没有可管理的附属文件目录。
@@ -127,7 +126,7 @@ async function loadFiles() {
   filesLoading.value = true;
   filesError.value = "";
   try {
-    const { data } = await axios.get("/api/skills/list", { params: { name: skill.name }, headers, signal: controller.signal });
+    const { data } = await axios.get("/api/skills/list", { params: { name: skill.name }, signal: controller.signal });
     if (data.code !== 200 || typeof data.data?.mainPath !== "string" || !Array.isArray(data.data.files) || !data.data.files.every((path: unknown) => typeof path === "string")) {
       throw new Error(data.message || "技能文件列表格式错误");
     }
@@ -171,7 +170,6 @@ async function selectFile(path: string) {
   try {
     const { data } = await axios.get("/api/skills/read", {
       params: path === mainPath.value ? { name: skill.name } : { name: skill.name, path },
-      headers,
       signal: requestController.signal,
     });
     if (requestController.signal.aborted || selectedPath.value !== path) return;
@@ -218,7 +216,7 @@ async function handleNodeDrop(draggingNode: { data: Record<string, unknown> }, d
     if (targetPath === sourcePath) { treeVersion.value++; return; }
     moving.value = true;
     try {
-      const { data } = await axios.put("/api/skills/move", { name: skill.name, path: sourcePath, target: targetPath }, { headers });
+      const { data } = await axios.put("/api/skills/move", { name: skill.name, path: sourcePath, target: targetPath });
       if (data.code !== 200) throw new Error(data.message || "移动文件失败");
       if (drafts.has(sourcePath)) { drafts.set(targetPath, drafts.get(sourcePath)!); drafts.delete(sourcePath); }
       if (dirtyPaths.value.has(sourcePath)) { dirtyPaths.value.add(targetPath); dirtyPaths.value.delete(sourcePath); }
@@ -239,7 +237,7 @@ async function handleNodeDrop(draggingNode: { data: Record<string, unknown> }, d
   siblings.splice(insertIndex, 0, sourcePath);
   moving.value = true;
   try {
-    const { data } = await axios.put("/api/skills/order", { name: skill.name, order: siblings }, { headers });
+    const { data } = await axios.put("/api/skills/order", { name: skill.name, order: siblings });
     if (data.code !== 200) throw new Error(data.message || "保存顺序失败");
     await loadFiles();
   } catch (error) {
@@ -267,7 +265,7 @@ async function createFile() {
   const path = directory ? `${directory}/${fileName}` : fileName;
   creating.value = true;
   try {
-    const { data } = await axios.post("/api/skills/create", { name: skill.name, path }, { headers });
+    const { data } = await axios.post("/api/skills/create", { name: skill.name, path });
     if (data.code !== 200) throw new Error(data.message || "创建文件失败");
     await loadFiles();
     await selectFile(path);
@@ -297,7 +295,7 @@ async function save() {
   const path = selectedPath.value;
   const content = draft.value;
   try {
-    const { data } = await axios.put("/api/skills/save", { name: skill.name, ...(path === mainPath.value ? {} : { path }), content }, { headers });
+    const { data } = await axios.put("/api/skills/save", { name: skill.name, ...(path === mainPath.value ? {} : { path }), content });
     if (data.code !== 200) throw new Error(data.message || "保存文件失败");
     if (selectedPath.value === path) original.value = content;
     drafts.delete(path);

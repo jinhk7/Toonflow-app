@@ -1,19 +1,19 @@
 <template>
-  <el-popover trigger="click" placement="top-start" width="min(340px, calc(100vw - 24px))" :disabled="disabled" :showArrow="false" :popperStyle="{ padding: '14px' }">
+  <el-popover v-if="sizes.length || ratios.length" trigger="click" placement="top-start" width="min(340px, calc(100vw - 24px))" :disabled="disabled" :showArrow="false" :popperStyle="{ padding: '14px' }">
     <template #reference>
       <el-button class="settingsButton" text size="small" :disabled="disabled" aria-label="图片生成设置">
-        <span class="ratioShape" :style="ratioStyle(ratio)" aria-hidden="true" />
-        <span>{{ ratio }} · {{ size }} · 1张</span>
+        <span v-if="ratio" class="ratioShape" :style="ratioStyle(ratio)" aria-hidden="true" />
+        <span>{{ [ratio, size, "1张"].filter(Boolean).join(" · ") }}</span>
         <icon-chevron-up :size="14" aria-hidden="true" />
       </el-button>
     </template>
     <div class="generationSettings nodrag nopan nowheel" @pointerdown.stop @mousedown.stop @dblclick.stop @keydown.stop @wheel.stop>
-      <div class="sectionLabel">分辨率</div>
-      <el-radio-group v-model="size" class="sizeOptions" :disabled="disabled" aria-label="图片分辨率">
+      <div v-if="sizes.length" class="sectionLabel">分辨率</div>
+      <el-radio-group v-if="sizes.length" v-model="size" class="sizeOptions" :disabled="disabled" aria-label="图片分辨率">
         <el-radio-button v-for="item in sizes" :key="item" :value="item">{{ item }}</el-radio-button>
       </el-radio-group>
-      <div class="sectionLabel">比例</div>
-      <div class="ratioOptions" role="group" aria-label="图片比例">
+      <div v-if="ratios.length" class="sectionLabel">比例</div>
+      <div v-if="ratios.length" class="ratioOptions" role="group" aria-label="图片比例">
         <el-button
           v-for="item in ratios"
           :key="item"

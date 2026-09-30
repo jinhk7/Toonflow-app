@@ -24,6 +24,16 @@ const router = createRouter({
       path: "/workspace",
       component: () => import("@/pages/workspace/index.vue"),
     },
+    {
+      path: "/mobile",
+      component: () => import("@/pages/workspace/mobile/mobileLayout.vue"),
+      children: [
+        { path: "", component: () => import("@/pages/workspace/mobile/mobileProjects.vue") },
+        { path: "workspace", component: () => import("@/pages/workspace/mobile/mobileWorkspace.vue") },
+        { path: "node/:nodeId", component: () => import("@/pages/workspace/mobile/mobileNodeDetail.vue") },
+        { path: "tasks", component: () => import("@/pages/workspace/mobile/mobileTasks.vue") },
+      ],
+    },
   ],
 });
 export default router;

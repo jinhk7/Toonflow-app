@@ -110,7 +110,7 @@ async function start() {
       // agentsRoot: resolve(PATHS.VIEWS_FOLDER, "../agents"),
       pluginRevision: hash,
     });
-    const server = app.listen(0, "127.0.0.1");
+    const server = app.listen(0, "0.0.0.0");
 
     await once(server, "listening");
     if (isClosing) return;

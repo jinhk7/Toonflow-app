@@ -1,4 +1,5 @@
-import { listMediaModels, generateMedia } from "@/utils/media/generation";
+import { listMediaModels } from "@/utils/media/generation";
+import { submitAndWaitMediaJob } from "@/utils/media/mediaJobs";
 import { createWorkspaceFfmpeg } from "@/utils/ffmpeg";
 import { dirname, join, relative, resolve } from "node:path";
 import {
@@ -7,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { CanvasContext, QuestionContext, ToolContext } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
-import { isWithin, resolveWorkspacePath, writeWorkspaceFile, lockWorkspaceFiles } from "@/utils/workspace/files";
+import { isWithin, resolveWorkspacePath, writeWorkspaceFile, lockWorkspaceFiles, assertNoManagedGraph } from "@/utils/workspace/files";
 import { listTools, loadTool, validateToolConfig } from "@/utils/plugins/tools";
 import { createSkillContext } from "@/agent/skills";
 
@@ -21,17 +22,21 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
   const writeFile = async (path: string, content: string) => {
     const target = await resolvePath(path);
     const release = lockWorkspaceFiles([target]);
-    try { await writeWorkspaceFile(target, content); }
+    try { await assertNoManagedGraph(target); await writeWorkspaceFile(target, content); }
     finally { release(); }
+  };
+  const submitMedia = (type: "image" | "video" | "audio", request: Parameters<typeof submitAndWaitMediaJob>[2] & { idempotencyKey?: string }, signal?: AbortSignal) => {
+    const { idempotencyKey, ...payload } = request;
+    return submitAndWaitMediaJob(cwd, type, payload, { signal, idempotencyKey });
   };
   return {
     cwd, config, resolvePath, writeFile, canvas, question, skills: createSkillContext(cwd),
     ffmpeg: signal => createWorkspaceFfmpeg(cwd, signal),
     media: {
       listModels: listMediaModels,
-      generateImage: (request, signal) => generateMedia(cwd, "image", request, signal),
-      generateVideo: (request, signal) => generateMedia(cwd, "video", request, signal),
-      generateAudio: (request, signal) => generateMedia(cwd, "audio", request, signal),
+      generateImage: (request, signal) => submitMedia("image", request, signal),
+      generateVideo: (request, signal) => submitMedia("video", request, signal),
+      generateAudio: (request, signal) => submitMedia("audio", request, signal),
     },
     sdk: { defineTool, createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, createLsToolDefinition, detectSupportedImageMimeTypeFromFile },
   };

@@ -41,7 +41,7 @@ async function connect() {
   try {
     const { data } = await axios.post("/api/agents/connect", {
       name: name.value.trim(), cardUrl: cardUrl.value.trim(), ...(token.value.trim() ? { token: token.value.trim() } : {}),
-    }, { headers: { "x-toonflow-workspace": "1" } });
+    });
     if (data.code !== 200) throw new Error(data.message || "连接失败");
     emit("saved");
     ElMessage.success("远程 Agent 已连接");

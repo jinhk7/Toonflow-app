@@ -49,7 +49,7 @@ async function loadPrompt() {
   loadError.value = "";
   try {
     const { data } = await axios.get<{ code: number; data: { defaultSystemPrompt: string; maxLength: number }; message?: string }>("/api/settings/systemPrompt", {
-      headers: { "x-toonflow-workspace": "1", "Cache-Control": "no-cache" }, signal: controller.signal,
+      headers: { "Cache-Control": "no-cache" }, signal: controller.signal,
     });
     if (data.code !== 200) throw new Error(data.message || "读取系统提示词失败");
     if (typeof data.data?.defaultSystemPrompt !== "string" || !Number.isSafeInteger(data.data.maxLength) || data.data.maxLength <= 0) {

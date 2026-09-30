@@ -147,7 +147,7 @@ export async function runAppOperation(name: string, parameters: Record<string, u
   const origin = getMcpRuntime().appOrigin;
   if (!origin) throw new Error("Toonflow 服务尚未就绪");
   const url = new URL(operation.path, origin);
-  const headers: Record<string, string> = { "x-toonflow-workspace": "1", Origin: origin, Referer: `${origin}/` };
+  const headers: Record<string, string> = {};
   let body: string | ArrayBuffer | undefined;
   if (operation.name === "saveAsset") {
     url.searchParams.set("path", args.path as string);

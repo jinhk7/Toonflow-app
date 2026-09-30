@@ -68,7 +68,7 @@
             :disabled="deleting || uploading || (!generating && (!generationPrompt || !selectedModel))"
             :title="generating ? '停止生成' : '生成图片'"
             :aria-label="generating ? '停止生成' : '生成图片'"
-            @click="generating ? generationController?.abort() : startGeneration().catch((error) => showNodeError(error, '图片生成失败'))" />
+            @click="generating ? generationController?.abort() : startFromButton().catch((error) => showNodeError(error, '图片生成失败'))" />
         </div>
       </el-card>
     </template>
@@ -82,9 +82,9 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
-import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElImageViewer } from "element-plus";
+import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessageBox, ElLoading, ElImageViewer } from "element-plus";
 import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeMediaPersistence, useNodeReferences, z, type NodeMediaModel, type NodeHandle, type PrepareMediaJobResult } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
@@ -108,8 +108,10 @@ data.value.prompt ??= "";
 data.value.promptModel ??= [];
 data.value.model ??= "";
 data.value.size ??= "";
-data.value.ratio ??= "16:9";
+data.value.ratio ??= "";
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
+const mediaPersistence = useNodeMediaPersistence(id, () => data.value as Record<string, unknown>);
+const outputSlot = "image";
 const models = ref<NodeMediaModel[]>([]);
 const modelsLoading = ref(false);
 const uploading = ref(false);
@@ -124,8 +126,8 @@ const { generating } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
 const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
-const sizeOptions = computed(() => (selectedModel.value?.imageSizes?.length ? selectedModel.value.imageSizes : ["2K"]));
-const ratioOptions = computed(() => (selectedModel.value?.imageRatios?.length ? selectedModel.value.imageRatios : ["16:9"]));
+const sizeOptions = computed(() => selectedModel.value?.imageSizes ?? []);
+const ratioOptions = computed(() => selectedModel.value?.imageRatios ?? []);
 watch(
   selectedModel,
   (choice) => {
@@ -133,8 +135,8 @@ watch(
     // ACT: 现有分辨率使用 K 单位；出现其他单位时再统一换算，未知名称排在数值选项之后。
     if (!sizeOptions.value.includes(data.value.size)) data.value.size = sizeOptions.value.toSorted((left, right) =>
       (Number.parseFloat(left) || Infinity) - (Number.parseFloat(right) || Infinity)
-    )[0]!;
-    if (!ratioOptions.value.includes(data.value.ratio)) data.value.ratio = ratioOptions.value.includes("16:9") ? "16:9" : ratioOptions.value[0]!;
+    )[0] ?? "";
+    if (!ratioOptions.value.includes(data.value.ratio)) data.value.ratio = ratioOptions.value.includes("16:9") ? "16:9" : ratioOptions.value[0] ?? "";
   },
   { flush: "sync" }
 );
@@ -153,7 +155,9 @@ const previewUrl = files.useFileUrl(
   (error) => showNodeError(error, "图片读取失败")
 );
 
-onMounted(() => loadModels().catch((error) => showNodeError(error, "模型读取失败")));
+onMounted(() => loadModels()
+  .then(() => resumePendingGeneration())
+  .catch((error) => showNodeError(error, "模型读取失败")));
 onScopeDispose(() => {
   disposed = true;
   generationController?.abort();
@@ -201,6 +205,108 @@ function loadModels() {
   return modelsRequest;
 }
 
+function mediaBindingFields(binding?: PrepareMediaJobResult) {
+  return binding ? {
+    canvasPath: binding.canvasPath,
+    nodeId: binding.nodeId,
+    outputSlot: binding.outputSlot,
+    expectedNodeVersion: binding.expectedNodeVersion,
+  } : {};
+}
+
+function buildImageInput(choice: NodeMediaModel) {
+  return {
+    providerId: choice.providerId,
+    modelId: choice.modelId,
+    prompt: generationPrompt.value,
+    size: choice.imageSizes?.includes(data.value.size) ? data.value.size : undefined,
+    ratio: choice.imageRatios?.includes(data.value.ratio) ? data.value.ratio : undefined,
+    outputDirectory: `assets/${id}`,
+    images: refList.value.flatMap((item) => (item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : [])),
+  };
+}
+
+async function waitForImageResult(directory: string, idempotencyKey: string, binding?: PrepareMediaJobResult, signal?: AbortSignal) {
+  const choice = selectedModel.value;
+  if (!choice) throw new Error("请先选择图片模型");
+  const [result] = await ai.generateImage({
+    directory,
+    idempotencyKey,
+    ...buildImageInput(choice),
+    ...mediaBindingFields(binding),
+  }, signal);
+  if (!result) throw new Error("供应商未返回图片");
+  outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+  await mediaPersistence.clearPending(outputSlot);
+}
+
+async function resumePendingGeneration() {
+  const pending = mediaPersistence.readPending();
+  if (!pending || pending.outputSlot !== outputSlot || generating.value || uploading.value || deleting.value) return;
+  const workspace = files.getWorkspaceFiles();
+  const controller = new AbortController();
+  generationController = controller;
+  generation = generationState.run(async () => {
+    const { directory } = await workspace.list();
+    controller.signal.throwIfAborted();
+    const job = await ai.fetchMediaJob(directory, pending.idempotencyKey, controller.signal);
+    if (!job) throw new Error("未找到任务记录，点击生成可核对并确认放弃原任务");
+    if (job.status === "completed" && job.linkStatus !== "pending" && job.files?.length) {
+      const result = job.files.find(file => file.mediaType === "image") ?? job.files[0];
+      outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+      await mediaPersistence.clearPending(outputSlot);
+      return;
+    }
+    if (job.status === "failed") throw Object.assign(new Error(job.errorMessage || "媒体生成失败"), { definitive: true });
+    if (job.status === "unknown") throw new Error(`${job.errorMessage || "提交结果未知"}；结果未知，点击生成可确认放弃后重新提交`);
+    if (job.status === "collectionFailed") {
+      throw new Error(job.errorMessage || "媒体生成失败");
+    }
+    const [result] = await ai.pollMediaJob(directory, pending.idempotencyKey, controller.signal);
+    if (!result) throw new Error("供应商未返回图片");
+    outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+    await mediaPersistence.clearPending(outputSlot);
+  })
+    .catch(async (error) => {
+      showNodeError(error, "图片生成失败");
+      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showNodeError(releaseError, "解除任务占用失败"));
+    })
+    .finally(() => {
+      generationController = undefined;
+    });
+}
+
+// 结果未知的任务不会再写回节点；只有按钮操作经用户确认后才解除占用，Agent 调用仍被 prepare 拒绝。
+async function releaseUnknownPending() {
+  const pending = mediaPersistence.readPending();
+  if (!pending || pending.outputSlot !== outputSlot || generating.value) return true;
+  const { directory } = await files.getWorkspaceFiles().list();
+  const job = await ai.fetchMediaJob(directory, pending.idempotencyKey);
+  if (job && job.status !== "unknown") {
+    await resumePendingGeneration();
+    return false;
+  }
+  try {
+    await ElMessageBox.confirm(
+      "上次任务结果未知，服务可能仍在生成或已计费。请先在服务端核对；放弃后原任务的结果不会写回节点，本次会产生新的生成请求。",
+      "放弃上次任务？",
+      { type: "warning", confirmButtonText: "放弃并重新生成", cancelButtonText: "取消" },
+    );
+  } catch { return false; }
+  if (disposed || mediaPersistence.readPending()?.idempotencyKey !== pending.idempotencyKey) return false;
+  const current = await ai.fetchMediaJob(directory, pending.idempotencyKey);
+  if (current && current.status !== "unknown") {
+    await resumePendingGeneration();
+    return false;
+  }
+  await mediaPersistence.clearPending(outputSlot);
+  return true;
+}
+
+async function startFromButton() {
+  if (await releaseUnknownPending()) await startGeneration();
+}
+
 async function startGeneration() {
   const choice = selectedModel.value;
   if (generating.value) throw new Error("图片正在生成，请等待完成");
@@ -211,29 +317,19 @@ async function startGeneration() {
   if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
   const workspace = files.getWorkspaceFiles();
   const controller = new AbortController();
-  const input = {
-    providerId: choice.providerId,
-    modelId: choice.modelId,
-    prompt: generationPrompt.value,
-    size: data.value.size,
-    ratio: data.value.ratio,
-    outputDirectory: `assets/${id}`,
-    images: refList.value.flatMap((item) => (item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : [])),
-  };
+  const { idempotencyKey, binding } = await mediaPersistence.prepare(outputSlot);
   generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消。
+  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消本地等待。
   generation = generationState.run(() => workspace
     .list()
     .then(({ directory }) => {
       controller.signal.throwIfAborted();
-      return ai.generateImage({ ...input, directory }, controller.signal);
-    })
-    .then(([result]) => {
-      controller.signal.throwIfAborted();
-      if (!result) throw new Error("供应商未返回图片");
-      outputs.value.image = { dataType: "IMAGE", value: { url: result.path, mimeType: result.mimeType } };
+      return waitForImageResult(directory, idempotencyKey, binding, controller.signal);
     }))
-    .catch((error) => showNodeError(error, "图片生成失败"))
+    .catch(async (error) => {
+      showNodeError(error, "图片生成失败");
+      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showNodeError(releaseError, "解除任务占用失败"));
+    })
     .finally(() => {
       generationController = undefined;
     });
@@ -277,7 +373,7 @@ function getConfig() {
 
 nodeTools.register({
   name: "getConfig",
-  description: "读取此图片生成节点的当前模型、分辨率、比例及可选图片模型能力，不含密钥；未声明分辨率或比例时分别使用 2K、16:9",
+  description: "读取此图片生成节点的当前模型、分辨率、比例及可选图片模型能力，不含密钥；未声明的分辨率或比例不会发送给供应商",
   parameters: z.strictObject({}),
   async execute(_args, { signal }) {
     signal?.throwIfAborted();
@@ -305,8 +401,8 @@ nodeTools.register({
     const choice = args.modelId === undefined ? selectedModel.value
       : models.value.find((item) => item.providerId === args.providerId && item.modelId === args.modelId);
     if (!choice) throw new Error("请选择 getConfig 返回的有效图片模型");
-    const sizes = choice.imageSizes?.length ? choice.imageSizes : ["2K"];
-    const ratios = choice.imageRatios?.length ? choice.imageRatios : ["16:9"];
+    const sizes = choice.imageSizes ?? [];
+    const ratios = choice.imageRatios ?? [];
     if (args.size !== undefined && !sizes.includes(args.size)) throw new Error(`当前模型不支持分辨率 ${args.size}，可选：${sizes.join("、")}`);
     if (args.ratio !== undefined && !ratios.includes(args.ratio)) throw new Error(`当前模型不支持比例 ${args.ratio}，可选：${ratios.join("、")}`);
     data.value.model = JSON.stringify([choice.providerId, choice.modelId]);

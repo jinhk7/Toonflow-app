@@ -35,4 +35,18 @@ export type AgentConversation = {
   parentFile?: string;
   subAgents?: AgentSubAgent[];
   running?: boolean;
+  activeRun?: {
+    runId: string;
+    status: string;
+    intent: string;
+    lastEventSeq: number;
+    waitingQuestions: {
+      callId: string;
+      toolCallId: string;
+      title: string;
+      question: string;
+      options?: string[];
+      fields?: unknown;
+    }[];
+  };
 };

@@ -3,27 +3,19 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import components from "unplugin-vue-components/vite";
 import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
-import desktopConfig from "../../electrobun.config.ts";
+import appConfig from "../../appConfig.ts";
 import postcssConfig from "../../postcss.config.ts";
 
 export default defineConfig({
   css: { postcss: postcssConfig },
   define: {
-    "import.meta.env.appVersion": JSON.stringify(desktopConfig.app.version),
+    "import.meta.env.appVersion": JSON.stringify(appConfig.version),
   },
   server: {
     proxy: {
       "/mcp": { target: "http://127.0.0.1:3000", changeOrigin: false },
       "/a2a": { target: "http://127.0.0.1:3000", changeOrigin: false },
-      "/api": {
-        target: "http://127.0.0.1:3000",
-        changeOrigin: false,
-        configure(proxy) {
-          proxy.on("proxyReq", (request, incoming) => {
-            request.setHeader("x-toonflow-local-client", ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(incoming.socket.remoteAddress ?? "") ? "1" : "0");
-          });
-        },
-      },
+      "/api": { target: "http://127.0.0.1:3000", changeOrigin: false },
     },
   },
   resolve: {

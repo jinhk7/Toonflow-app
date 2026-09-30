@@ -15,7 +15,7 @@ const shape = {
 
 export default router.get("/", validateFields(shape, "query"), async (req, res) => {
   const args = z.object(shape).parse(req.query);
-  const directory = await u.workspace.resolveWorkspace(req, args.directory);
+  const directory = await u.workspace.resolveWorkspace(args.directory);
   const controller = new AbortController();
   const cancel = () => { if (!res.writableEnded) controller.abort(new Error("查询已取消")); };
   res.on("close", cancel);

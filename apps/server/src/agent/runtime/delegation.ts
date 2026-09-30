@@ -12,9 +12,9 @@ import { resolveWorkspacePath } from "@/utils/workspace/files";
 export async function runDelegatedAgent(options: {
   cwd: string; parentFile: string; name: string; task: string;
   providerId: string; modelId: string; thinkingLevel: "off" | "low" | "medium" | "high";
-  canvas?: CanvasContext; signal?: AbortSignal; send: (event: AgentEvent) => void; onProgress?: (text: string) => void;
+  canvas?: CanvasContext; signal?: AbortSignal; send: (event: AgentEvent) => void; onProgress?: (text: string) => void; parentRunId?: string;
 }) {
-  const { cwd, parentFile, name, task, providerId, modelId, thinkingLevel, canvas, signal, onProgress } = options;
+  const { cwd, parentFile, name, task, providerId, modelId, thinkingLevel, canvas, signal, onProgress, parentRunId } = options;
   const child = await createAgentConversation(cwd, { parentFile, name, task, providerId, modelId, thinkingLevel });
   const agent = { file: child.file, parentFile, name, task, providerId, modelId, thinkingLevel, status: "running" as const };
   await updateSubAgent(cwd, parentFile, agent);
@@ -25,11 +25,17 @@ export async function runDelegatedAgent(options: {
   };
   const controller = new AbortController();
   const childSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-  const bridge = canvas ? createCanvasContext(cwd, canvas, send) : undefined;
-  const questions = createQuestionContext(cwd, send, () => controller.abort());
+  // ACT: 子 Agent 不单独登记 runId，随父运行存活；重启后仅能从子会话 JSONL 查看，不能自动续跑委派任务。
+  const bridge = canvas ? createCanvasContext(cwd, canvas, send, parentRunId ? { runId: parentRunId } : undefined) : undefined;
+  const questions = createQuestionContext(cwd, send, () => controller.abort(), parentRunId ? { runId: parentRunId } : undefined);
   const result: SubAgentResult = { name, status: "running", result: "准备执行" };
   try {
-    await run({ prompt: task, cwd, sessionFile: child.file, providerId, modelId, thinkingLevel, canvas: bridge?.context, question: questions.context, signal: childSignal, onCancel: () => controller.abort() }, send);
+    await run({
+      prompt: task, cwd, sessionFile: child.file, providerId, modelId, thinkingLevel,
+      canvas: bridge?.context, question: questions.context, signal: childSignal,
+      onCancel: () => { controller.abort(); bridge?.dispose(); questions.dispose(); },
+      runId: parentRunId, canvasAttached: Boolean(canvas),
+    }, send);
     result.status = childSignal.aborted ? "cancelled" : "completed";
   } catch (error) {
     result.status = childSignal.aborted ? "cancelled" : (error as { code?: string })?.code === "AGENT_LENGTH" ? "limited" : "error";

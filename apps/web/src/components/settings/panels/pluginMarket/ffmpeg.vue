@@ -107,7 +107,6 @@ type FfmpegStatus = {
 };
 
 const props = withDefaults(defineProps<{ visible?: boolean; downloadOnOpen?: boolean }>(), { visible: true, downloadOnOpen: false });
-const headers = { "x-toonflow-workspace": "1" };
 const toolNames = ["ffmpeg", "ffprobe"] as const;
 const modeDescriptions = {
   auto: "优先使用已下载的版本；未下载时，从当前 Toonflow 服务的系统 PATH 查找。",
@@ -167,7 +166,7 @@ function pollProgress() {
   const signal = readController.signal;
   timer = setTimeout(async () => {
     try {
-      const { data } = await axios.get<{ code: number; data: DownloadState; message?: string }>("/api/ffmpeg/progress", { headers, signal });
+      const { data } = await axios.get<{ code: number; data: DownloadState; message?: string }>("/api/ffmpeg/progress", { signal });
       if (signal.aborted) return;
       if (data.code !== 200) throw new Error(data.message || "读取下载进度失败");
       download.value = data.data;
@@ -187,7 +186,7 @@ async function refreshStatus() {
   statusError.value = "";
   operationError.value = "";
   try {
-    const { data } = await axios.get<{ code: number; data: FfmpegStatus; message?: string }>("/api/ffmpeg/status", { headers, signal });
+    const { data } = await axios.get<{ code: number; data: FfmpegStatus; message?: string }>("/api/ffmpeg/status", { signal });
     if (signal.aborted) return;
     if (data.code !== 200) throw new Error(data.message || "读取 FFmpeg 状态失败");
     status.value = data.data;
@@ -225,7 +224,7 @@ async function submitDownload(action: "download" | "cancel") {
   submitting.value = true;
   operationError.value = "";
   try {
-    const { data } = await axios.post<{ code: number; data: DownloadState; message?: string }>(`/api/ffmpeg/${action}`, action === "download" ? { source: config.value.source } : {}, { headers });
+    const { data } = await axios.post<{ code: number; data: DownloadState; message?: string }>(`/api/ffmpeg/${action}`, action === "download" ? { source: config.value.source } : {});
     if (data.code !== 200) throw new Error(data.message || "操作失败");
     download.value = data.data;
     if (props.visible && !readController.signal.aborted) {

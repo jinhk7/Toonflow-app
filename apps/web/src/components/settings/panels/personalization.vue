@@ -146,7 +146,6 @@ type DocumentResponse = { code: number; data: DocumentContent; message?: string 
 
 const props = defineProps<{ visible: boolean }>();
 const maxLength = 20000;
-const headers = { "x-toonflow-workspace": "1" };
 const document = reactive<DocumentState>({
   content: "",
   revision: "",
@@ -187,7 +186,7 @@ async function loadDocument(document: DocumentState, name: "agents" | "memory", 
   document.loading = true;
   document.error = "";
   try {
-    const { data } = await axios.get<DocumentResponse>("/api/settings/personalization/get", { params: { document: name }, headers });
+    const { data } = await axios.get<DocumentResponse>("/api/settings/personalization/get", { params: { document: name } });
     if (data.code !== 200) throw new Error(data.message || "读取失败，请重试");
     if (document.content !== content) return;
     document.content = data.data.content;
@@ -229,8 +228,7 @@ async function saveDocument(document: DocumentState, name: "agents" | "memory") 
   try {
     const { data } = await axios.put<DocumentResponse>(
       "/api/settings/personalization/save",
-      { document: name, content, revision: document.revision },
-      { headers }
+      { document: name, content, revision: document.revision }
     );
     if (data.code === 409) {
       document.conflict = true;
@@ -267,7 +265,7 @@ async function setMemoryEnabled(memoryEnabled: boolean) {
 }
 
 async function readMemory() {
-  const { data } = await axios.get<DocumentResponse>("/api/settings/personalization/get", { params: { document: "memory" }, headers });
+  const { data } = await axios.get<DocumentResponse>("/api/settings/personalization/get", { params: { document: "memory" } });
   if (data.code !== 200) throw new Error(data.message || "读取本地记忆失败，请重试");
   return data.data;
 }
@@ -310,8 +308,7 @@ async function deleteMemory() {
     }
     const { data } = await axios.put<DocumentResponse>(
       "/api/settings/personalization/save",
-      { document: "memory", content: "", revision: memory.revision },
-      { headers }
+      { document: "memory", content: "", revision: memory.revision }
     );
     if (data.code === 409) throw new Error("本地记忆已更新，未删除任何内容。请重新查看后重试。");
     if (data.code !== 200) throw new Error(data.message || "删除本地记忆失败，请重试");

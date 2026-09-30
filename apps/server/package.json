@@ -27,6 +27,7 @@
     "@toonflow/teams-scaffold": "workspace:*",
     "@toonflow/tool-canvas": "workspace:*",
     "@toonflow/tool-media-generation": "workspace:*",
+    "@toonflow/nodes-scaffold": "workspace:*",
     "@toonflow/tools-scaffold": "workspace:*",
     "conf": "^15.1.0",
     "cors": "^2.8.6",

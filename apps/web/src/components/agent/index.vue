@@ -149,7 +149,7 @@ async function newConversation() {
   try {
     const { data } = await axios.post<{ code: number; data: AgentConversation; message?: string }>("/api/agent/create", {
       directory,
-    }, { headers: { "x-toonflow-workspace": "1" } });
+    });
     if (data.code !== 200) throw new Error(data.message || "新建对话失败");
     if (currentRequest !== requestId) return;
     const session = data.data;
@@ -167,7 +167,7 @@ async function newConversation() {
 
 async function readConversation(directory: string, file: string) {
   const { data } = await axios.get<{ code: number; data: AgentConversation; message?: string }>("/api/agent/get", {
-    params: { directory, sessionFile: file }, headers: { "x-toonflow-workspace": "1" },
+    params: { directory, sessionFile: file },
   });
   if (data.code !== 200) throw new Error(data.message || "读取对话失败");
   return data.data;
@@ -181,7 +181,7 @@ async function loadHistory(openLatest = false) {
   loading.value = openLatest;
   try {
     const { data } = await axios.get<{ code: number; data: AgentHistory[]; message?: string }>("/api/agent/list", {
-      params: { directory }, headers: { "x-toonflow-workspace": "1" },
+      params: { directory },
     });
     if (data.code !== 200) throw new Error(data.message || "读取历史对话失败");
     if (currentRequest !== requestId) return;
@@ -238,7 +238,7 @@ async function renameConversation(file: string, value: string) {
   try {
     const { data } = await axios.patch<{ code: number; data: { name: string }; message?: string }>("/api/agent/rename", {
       directory, sessionFile: file, name: nextName,
-    }, { headers: { "x-toonflow-workspace": "1" } });
+    });
     if (data.code !== 200) throw new Error(data.message || "重命名对话失败");
     if (currentRequest !== requestId) return;
     if (item) item.name = data.data.name;
