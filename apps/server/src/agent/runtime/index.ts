@@ -323,7 +323,7 @@ export async function run(
           } catch (error) {
             const message = error instanceof Error ? error.message : "工具无法在后台执行";
             if (runId) {
-              recordToolCallStart(runId, event.toolCallId, event.toolName, event.args, isSideEffectTool(event.toolName, event.args));
+              recordToolCallStart(runId, event.toolCallId, event.toolName, event.args, isSideEffectTool(event.toolName, event.args, { cwd, canvasPath: canvas?.id }));
               recordToolCallFinish(event.toolCallId, "error", message);
             }
             send({ type: "error", message });

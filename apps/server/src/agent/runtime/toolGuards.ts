@@ -36,8 +36,8 @@ function parseStoredResult(resultJson: string | null): AgentToolResult<unknown> 
     return { content: [{ type: "text", text: resultJson }], details: undefined };
   }
 }
-async function scopedInput(toolName: string, args: unknown, context: ToolGuardContext) {
-  if (classifyToolExecutionMode(toolName) !== "canvas" || !isSideEffectTool(toolName, args)) return args;
+async function scopedInput(toolName: string, args: unknown, context: ToolGuardContext, sideEffect: boolean) {
+  if (classifyToolExecutionMode(toolName) !== "canvas" || !sideEffect) return args;
   if (!context.cwd || !context.canvasPath) throw Object.assign(new Error("缺少画布版本上下文，不能授权操作"), { status: 409 });
   const { path } = await resolveWorkspacePath(context.cwd, context.canvasPath);
   const graph = await readGraph(path);
@@ -90,7 +90,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       if (ctx.runControl?.shouldPauseBeforeStep()) {
         throw Object.assign(new Error("运行已暂停"), { code: "AGENT_PAUSED", status: 409 });
       }
-      const sideEffect = isSideEffectTool(tool.name, params);
+      const sideEffect = isSideEffectTool(tool.name, params, ctx);
       const key = ctx.runId + ":" + toolCallId;
       if (activeToolCalls.has(key)) throw Object.assign(new Error("工具调用仍在执行，不能重入"), { status: 409 });
 
@@ -112,9 +112,9 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       activeToolCalls.add(key);
       let started = false;
       try {
-        const authorizationInput = await scopedInput(tool.name, params, ctx);
+        const authorizationInput = await scopedInput(tool.name, params, ctx, sideEffect);
         recordToolCallStart(ctx.runId, toolCallId, tool.name, authorizationInput, sideEffect, sideEffect ? "pendingAuthorization" : "started");
-        if (sideEffect) requireSideEffectAuthorization(ctx.runId, tool.name, authorizationInput, toolCallId);
+        if (sideEffect) requireSideEffectAuthorization(ctx.runId, tool.name, authorizationInput, toolCallId, ctx);
         started = true;
         const result = await execute(toolCallId, params, signal, onUpdate, extensionCtx);
         recordToolCallFinish(toolCallId, "completed", result);
