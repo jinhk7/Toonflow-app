@@ -34,7 +34,12 @@ export function createCanvasContext(
             clearTimeout(timer);
             signal?.removeEventListener("abort", abort);
             if (error !== undefined) reject(new Error(error || "画布调用失败"));
-            else resolve(result);
+            else {
+              if (["addCanvas", "switchCanvas", "renameCanvas"].includes(operation.name)) {
+                context.id = result && typeof result === "object" && "id" in result && typeof result.id === "string" ? result.id : "";
+              }
+              resolve(result);
+            }
           };
           const abort = () => finish({ error: "画布调用已取消" });
           const timer = setTimeout(() => finish({ error: "画布调用超时，请确认画布仍然打开" }), 120000);
