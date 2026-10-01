@@ -156,7 +156,7 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
             if (expectedNodeRevision !== undefined && (!source || source.nodeId !== nodeId || source.name !== name || source.execute !== execute
               || entryNodeId !== nodeId || entryName !== name || resolveNodeRevision?.(source.component) !== expectedNodeRevision))
               throw new Error("节点脚本版本已变化或无法确认，请重新查询节点函数");
-            return execute.call(entry, args, { signal: callSignal });
+            return Reflect.apply(execute, entry, [args, { signal: callSignal }]);
           }),
           new Promise<never>((_resolve, reject) => {
             cancel = () => reject(callSignal.reason);
