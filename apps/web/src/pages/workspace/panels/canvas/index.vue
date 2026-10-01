@@ -145,7 +145,7 @@ import {
 import { Background } from "@vue-flow/background";
 import { useCanvasTools } from "./useCanvasTools";
 import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
-import { loadNodeComponent } from "./loadNodeComponent";
+import { getLoadedNodeRevision, loadNodeComponent } from "./loadNodeComponent";
 import { useCanvasHistory } from "./useCanvasHistory";
 import { copyNodeToClipboard, nodeClipboardCommand, readClipboardNode } from "./nodeClipboard";
 import { readClipboardText } from "@/lib/clipboard";
@@ -955,30 +955,33 @@ provide("reloadRemoteNode", (type: string) => {
   return loadNode(name, `/api/nodes/files?name=${name}`, true);
 });
 
-async function loadNode(name: string, url: string, force = false): Promise<void> {
+async function loadNode(name: string, url: string, force = false, revision?: string): Promise<void> {
+  if (!revision) {
+    const { data } = await axios.get<{ code: number; data: { name: string; url: string; revision?: string }[] }>("/api/nodes/get", { headers: { "Cache-Control": "no-cache" } });
+    revision = data.code === 200 && Array.isArray(data.data) ? data.data.find(node => node.name === name && node.url === url)?.revision : undefined;
+  }
+  if (!revision || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("节点脚本版本无效");
   const nodeType = `remote-${name}`;
   const signal = canvasController.signal;
   const pending = nodeLoads.get(nodeType);
-  if (pending) {
-    if (!force) return pending;
-    await pending.catch(() => {});
-  }
-  if (!force && nodeTypes.value[nodeType] && !nodeErrors.value[nodeType]) return;
-  if (force) {
+  if (pending) await pending.catch(() => {});
+  if (!force && nodeTypes.value[nodeType] && !nodeErrors.value[nodeType] && getLoadedNodeRevision(nodeTypes.value[nodeType]) === revision) return;
+  if (force || (nodeTypes.value[nodeType] && getLoadedNodeRevision(nodeTypes.value[nodeType]) !== revision)) {
     signal.throwIfAborted();
     // ACT: 复用画布修订号收敛等待期间的编辑；持续修改画布时延后刷新，不额外维护节点修订状态。
-    let revision: number;
+    let savedRevision: number;
     do {
-      revision = saveRevision;
+      savedRevision = saveRevision;
       await Promise.all(flow.getNodes.value.filter(node => node.type === nodeType).map(node => useNodeEvent(node.id, flow).emit("save", "reload")));
       await nextTick();
       signal.throwIfAborted();
-    } while (revision !== saveRevision);
+    } while (savedRevision !== saveRevision);
     const loading = nodeLoads.get(nodeType);
     if (loading) return loading;
   }
   delete nodeErrors.value[nodeType];
-  const nodeLoad = loadNodeComponent(name, url, force)
+  const expectedRevision = revision;
+  const nodeLoad = loadNodeComponent(name, url, expectedRevision, force)
     .then((remoteNode) => {
       // 同类型节点共享组件，运行错误由每个节点自己的边界显示。
       nodeTypes.value = { ...nodeTypes.value, [nodeType]: markRaw(remoteNode) };
@@ -998,14 +1001,14 @@ async function loadRemoteNodes(reloadName?: string) {
   const signal = canvasController.signal;
   nodeListLoading.value = true;
   try {
-    const { data } = await axios.get<{ code: number; data: { name: string; displayName: string; url: string; enabled?: boolean; config?: Record<string, unknown> }[] }>(
+    const { data } = await axios.get<{ code: number; data: { name: string; displayName: string; url: string; revision: string; enabled?: boolean; config?: Record<string, unknown> }[] }>(
       "/api/nodes/get",
       { headers: { "Cache-Control": "no-cache" } }
     );
     if (requestId !== loadRequest) return;
     if (data.code !== 200 || !Array.isArray(data.data)) throw new Error("节点列表格式错误");
     const nodes = data.data.filter(node => {
-      if (!node || typeof node.name !== "string" || !/^[a-z][a-zA-Z0-9]*$/.test(node.name) || node.url !== `/api/nodes/files?name=${node.name}`) {
+      if (!node || typeof node.name !== "string" || !/^[a-z][a-zA-Z0-9]*$/.test(node.name) || node.url !== `/api/nodes/files?name=${node.name}` || !/^[a-f0-9]{64}$/.test(node.revision)) {
         console.error("节点地址无效", node);
         return false;
       }
@@ -1023,8 +1026,8 @@ async function loadRemoteNodes(reloadName?: string) {
       enabledNodes.map(async (node) => {
         const nodeType = `remote-${node.name}`;
         try {
-          if (nodeTypes.value[nodeType] && !nodeErrors.value[nodeType] && !reloadNames.has(node.name)) return;
-          await loadNode(node.name, node.url, reloadNames.has(node.name));
+          if (nodeTypes.value[nodeType] && !nodeErrors.value[nodeType] && !reloadNames.has(node.name) && getLoadedNodeRevision(nodeTypes.value[nodeType]) === node.revision) return;
+          await loadNode(node.name, node.url, reloadNames.has(node.name), node.revision);
         } catch (error) {
           console.error("加载远端节点失败", node, error);
           // 保存拒绝时旧组件仍可用，不从节点菜单中移除；脚本加载错误仍排除。

@@ -1,4 +1,4 @@
-import { getCurrentScope, onScopeDispose } from "vue";
+import { getCurrentInstance, getCurrentScope, onScopeDispose } from "vue";
 import { z } from "zod";
 import { useNodeId, useVueFlow } from "@vue-flow/core";
 import type { NodeToolInfo, NodeToolsContext } from "@toonflow/tools-scaffold/runtime";
@@ -13,7 +13,7 @@ export interface NodeToolDefinition<Schema extends z.ZodType = z.ZodType> {
   execute(args: z.output<Schema>, context: { signal?: AbortSignal }): unknown | Promise<unknown>;
 }
 
-type RegisteredNodeTool = NodeToolInfo & Pick<NodeToolDefinition, "execute">;
+type RegisteredNodeTool = NodeToolInfo & Pick<NodeToolDefinition, "execute"> & { component?: object };
 type NodeToolsIndex = { nodes: Map<string, Map<string, RegisteredNodeTool>>; version: number };
 
 // 共享 Vue Flow 实例上的注册表供各 UMD 访问，不进入画布 JSON。
@@ -91,6 +91,7 @@ export const nodeTools = {
     const key = `${nodeId}:${name}`;
     const entry: RegisteredNodeTool = {
       nodeId, name, description: definition.description.trim(),
+      component: getCurrentInstance()?.type,
       parameters,
       async execute(args, context) {
         const parsed = await definition.parameters.parseAsync(args);
@@ -106,7 +107,7 @@ export const nodeTools = {
 };
 
 // 在画布 setup 中创建，按需读取当前节点函数，不复制全量注册表。
-export function useNodeToolsContext() {
+export function useNodeToolsContext(resolveNodeRevision?: (component?: object) => string | undefined) {
   const flow = useVueFlow();
   const { registry, index } = getRegistry(flow);
   function* list(nodeIds: string[], names?: string[]): IterableIterator<NodeToolInfo> {
@@ -116,8 +117,8 @@ export function useNodeToolsContext() {
       if (!node) continue;
       for (const entry of index.nodes.get(nodeId)?.values() ?? []) {
         if (nameSet && !nameSet.has(entry.name)) continue;
-        const { execute: _execute, ...info } = entry;
-        yield { ...info, nodeLabel: String(node.data.label ?? node.label ?? nodeId) };
+        const { execute: _execute, component, ...info } = entry;
+        yield { ...info, nodeLabel: String(node.data.label ?? node.label ?? nodeId), nodeRevision: resolveNodeRevision?.(component) };
       }
     }
   }
@@ -125,7 +126,7 @@ export function useNodeToolsContext() {
     get tools() { return [...list([...index.nodes.keys()])]; },
     get version() { return index.version; },
     list,
-    async call({ nodeId, name, args }, signal) {
+    async call({ nodeId, name, args, expectedNodeRevision }, signal) {
       const timeout = AbortSignal.timeout(120000);
       const callSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
       callSignal.throwIfAborted();
@@ -139,6 +140,8 @@ export function useNodeToolsContext() {
           Promise.resolve().then(() => {
             callSignal.throwIfAborted();
             if (registry.get(key) !== entry || !flow.findNode(nodeId)) throw new Error("节点函数已卸载或不属于本轮画布");
+            if (expectedNodeRevision !== undefined && resolveNodeRevision?.(entry.component) !== expectedNodeRevision)
+              throw new Error("节点脚本版本已变化或无法确认，请重新查询节点函数");
             return entry.execute(args, { signal: callSignal });
           }),
           new Promise<never>((_resolve, reject) => {

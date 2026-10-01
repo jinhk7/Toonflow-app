@@ -22,7 +22,7 @@ const builtinNodeTools = new Map([
 const builtinNodeHashes = new Map<string, string>();
 const nodePackageLimit = 8 * 1024 * 1024;
 const canvasTrustLimit = 16 * 1024 * 1024;
-export type NodeToolContext = { cwd?: string; canvasPath?: string };
+export type NodeToolContext = { cwd?: string; canvasPath?: string; nodeRevision?: string };
 
 function readTrustFile(root: string, path: string, limit: number) {
   if (isAbsolute(path) || !isWithin(root, resolve(root, path))) return;
@@ -75,7 +75,7 @@ export function isBuiltinNodeTool(nodeId: unknown, name: string, context?: NodeT
     const type = graphType.slice("remote-".length);
     if (!builtinNodeTools.get(type)?.has(name)) return false;
     const expected = builtinNodeHashes.get(type);
-    if (!expected) return false;
+    if (!expected || context.nodeRevision !== expected) return false;
     const installed = readTrustFile(realpathSync(nodesDirectory), `${type}.umd.js`, nodePackageLimit);
     return !!installed && createHash("sha256").update(installed).digest("hex") === expected;
   } catch {
@@ -91,8 +91,9 @@ export async function readNode(name: string) {
     throw error;
   });
   if (!file.isFile()) throw Object.assign(new Error("节点文件无效"), { status: 400 });
-  // ACT: 当前整包读取，内存开销随节点总体积增长；节点变多或包变大时改为只读首行。
-  const source = await readFile(path, "utf8");
+  // ACT: 当前整包读取元数据和计算版本，内存开销随节点总体积增长；包变大时改为流式计算版本并只读首行元数据。
+  const content = await readFile(path);
+  const source = content.toString("utf8");
   let metadata: Record<string, unknown> = {};
   try {
     const header = source.match(/^\/\*! toonflowNode:([^\r\n]*) \*\/(?:\r?\n|$)/)?.[1];
@@ -110,6 +111,7 @@ export async function readNode(name: string) {
   if (!rules.success) throw Object.assign(new Error("节点配置表单规则无效，请重新构建节点"), { status: 400 });
   return {
     name,
+    revision: createHash("sha256").update(content).digest("hex"),
     displayName: typeof metadata.displayName === "string" && metadata.displayName.trim() ? metadata.displayName : name,
     version: typeof metadata.version === "string" ? metadata.version.trim() : "",
     author: typeof metadata.author === "string" ? metadata.author : "",

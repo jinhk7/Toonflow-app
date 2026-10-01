@@ -64,7 +64,7 @@ export const canvasSchemas = {
   selectNodes: z.strictObject({ nodeIds: z.array(nodeId) }),
   arrangeCanvas: z.strictObject({}),
   fitCanvas: z.strictObject({ nodeIds: z.array(nodeId).optional() }),
-  nodeTools: z.strictObject({ nodeId, name: z.templateLiteral(["node:", z.string().regex(/^[a-z][a-zA-Z0-9]{0,63}$/)]), args: z.record(z.string(), z.json()) }),
+  nodeTools: z.strictObject({ nodeId, name: z.templateLiteral(["node:", z.string().regex(/^[a-z][a-zA-Z0-9]{0,63}$/)]), args: z.record(z.string(), z.json()), expectedNodeRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() }),
 };
 
 export type CanvasOperationName = keyof typeof canvasSchemas;

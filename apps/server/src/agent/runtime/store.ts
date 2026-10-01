@@ -279,14 +279,14 @@ export function recordToolCallStart(runId: string, toolCallId: string, name: str
   db.prepare(`
     INSERT INTO agent_tool_calls (toolCallId, runId, name, status, argsJson, resultJson, sideEffect, createdAt, updatedAt)
     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
-    ON CONFLICT(toolCallId) DO UPDATE SET status = excluded.status, argsJson = excluded.argsJson, sideEffect = excluded.sideEffect, updatedAt = excluded.updatedAt
+    ON CONFLICT(toolCallId) DO UPDATE SET status = excluded.status, argsJson = excluded.argsJson, sideEffect = MAX(agent_tool_calls.sideEffect, excluded.sideEffect), updatedAt = excluded.updatedAt
   `).run(toolCallId, runId, name, status, JSON.stringify(args ?? null), sideEffect ? 1 : 0, createdAt, createdAt);
 }
 
 export function recordToolCallFinish(toolCallId: string, status: "completed" | "error" | "needsReview" | "skipped", result?: unknown) {
   getAgentRunDatabase().prepare(`
-    UPDATE agent_tool_calls SET status = ?, resultJson = ?, updatedAt = ? WHERE toolCallId = ?
-  `).run(status, JSON.stringify(result ?? null), nowIso(), toolCallId);
+    UPDATE agent_tool_calls SET status = ?, resultJson = ?, updatedAt = ?, sideEffect = CASE WHEN ? = 'needsReview' THEN 1 ELSE sideEffect END WHERE toolCallId = ?
+  `).run(status, JSON.stringify(result ?? null), nowIso(), status, toolCallId);
 }
 
 export function getToolCallRecord(toolCallId: string) {
@@ -295,16 +295,20 @@ export function getToolCallRecord(toolCallId: string) {
   } | undefined;
 }
 
-const readOnlyTools = new Set(["read", "ls", "report", "skill", "question", "getCanvas", "selectNodes", "fitCanvas"]);
+const readOnlyTools = new Set(["read", "ls", "report", "skill", "question", "getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "getNodeTools", "selectNodes", "fitCanvas"]);
 export function getToolCallInput(value: unknown): unknown {
   if (value && typeof value === "object" && "args" in value && "canvasId" in value && "canvasPath" in value) return value.args;
   return value;
 }
 
-export function isSideEffectTool(name: string, args?: unknown, context?: NodeToolContext) {
+export function isSideEffectTool(name: string) {
+  return !readOnlyTools.has(name);
+}
+
+export function requiresToolAuthorization(name: string, args?: unknown, context?: NodeToolContext) {
   if (readOnlyTools.has(name)) return false;
   if (classifyToolExecutionMode(name) !== "canvas") return true;
-  // ACT: 此标记控制逐次审批和未知结果核对；仅当前内置实现的本地节点编辑免审批。
+  // 审批与防重播分别判断：本地修改免逐次审批，执行结果未知时仍需核对。
   if (name !== "nodeTools" && !name.startsWith("node:")) return false;
   const input = getToolCallInput(args);
   if (!input || typeof input !== "object" || Array.isArray(input) || !("nodeId" in input)) return true;
@@ -319,7 +323,8 @@ function storedToolContext(run: AgentRunRecord | undefined, args: unknown): Node
     || !("nodes" in args) || !args.nodes || typeof args.nodes !== "object" || Array.isArray(args.nodes)
     || !("edges" in args) || !args.edges || typeof args.edges !== "object" || Array.isArray(args.edges)
     || !("outputs" in args) || !args.outputs || typeof args.outputs !== "object" || Array.isArray(args.outputs)) return;
-  return { cwd: run.cwd, canvasPath: args.canvasPath };
+  return { cwd: run.cwd, canvasPath: args.canvasPath,
+    nodeRevision: "nodeRevision" in args && typeof args.nodeRevision === "string" ? args.nodeRevision : undefined };
 }
 
 function stableValue(value: unknown): unknown {
@@ -342,7 +347,7 @@ export function listPendingAuthorizations(runId: string) {
   return rows.map(row => {
     const args = JSON.parse(row.argsJson) as unknown;
     return { toolCallId: row.toolCallId, toolName: row.name, args, modelId: run.modelId, scopeKey: authorizationScopeKey(row.name, args, run.modelId) };
-  }).filter(call => isSideEffectTool(call.toolName, call.args, storedToolContext(run, call.args)) && (grants.get(call.scopeKey) ?? 0) < 1);
+  }).filter(call => requiresToolAuthorization(call.toolName, call.args, storedToolContext(run, call.args)) && (grants.get(call.scopeKey) ?? 0) < 1);
 }
 
 export function grantAuthorization(runId: string, toolCallId: string, remaining = 1) {
@@ -351,7 +356,7 @@ export function grantAuthorization(runId: string, toolCallId: string, remaining 
   if (!run || !call || call.runId !== runId || call.status !== "pendingAuthorization" || !call.argsJson)
     throw Object.assign(new Error("没有可授权的待执行工具调用"), { status: 409 });
   const args = JSON.parse(call.argsJson) as unknown;
-  if (!isSideEffectTool(call.name, args, storedToolContext(run, args)))
+  if (!requiresToolAuthorization(call.name, args, storedToolContext(run, args)))
     throw Object.assign(new Error("没有可授权的待执行工具调用"), { status: 409 });
   if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 1000) throw Object.assign(new Error("授权次数无效"), { status: 400 });
   const scopeKey = authorizationScopeKey(call.name, args, run.modelId);
@@ -366,7 +371,7 @@ export function grantAuthorization(runId: string, toolCallId: string, remaining 
 
 export function requireSideEffectAuthorization(runId: string, toolName: string, args: unknown, toolCallId: string, context?: NodeToolContext) {
   const run = getAgentRun(runId);
-  if (!isSideEffectTool(toolName, args, context ?? storedToolContext(run, args))) return;
+  if (!requiresToolAuthorization(toolName, args, context ?? storedToolContext(run, args))) return;
   if (!run) throw Object.assign(new Error("运行不存在"), { status: 404 });
   const scopeKey = authorizationScopeKey(toolName, args, run.modelId);
   getAgentRunDatabase().transaction(() => {
@@ -380,14 +385,12 @@ export function requireSideEffectAuthorization(runId: string, toolName: string, 
 }
 
 export function hasPendingSideEffectReview(runId: string) {
-  return listPendingSideEffectReviews(runId).length > 0;
+  return Boolean(getAgentRunDatabase().prepare("SELECT 1 FROM agent_tool_calls WHERE runId = ? AND sideEffect = 1 AND status IN ('started', 'needsReview') LIMIT 1").get(runId));
 }
 
 export function listPendingSideEffectReviews(runId: string) {
-  const run = getAgentRun(runId);
   const rows = getAgentRunDatabase().prepare("SELECT toolCallId, name, argsJson, status FROM agent_tool_calls WHERE runId = ? AND sideEffect = 1 AND status IN ('started', 'needsReview') ORDER BY createdAt").all(runId) as { toolCallId: string; name: string; argsJson: string; status: string }[];
-  return rows.map(row => ({ toolCallId: row.toolCallId, toolName: row.name, args: JSON.parse(row.argsJson), status: row.status }))
-    .filter(call => isSideEffectTool(call.toolName, call.args, storedToolContext(run, call.args)));
+  return rows.map(row => ({ toolCallId: row.toolCallId, toolName: row.name, args: JSON.parse(row.argsJson), status: row.status }));
 }
 
 export function acknowledgeRunReview(runId: string, toolCallId: string) {

@@ -153,7 +153,7 @@ export async function run(
         cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress, parentRunId: runId,
       }),
     }));
-    if (runId) tools = guardAgentTools(tools, { runId, runControl, canvasAttached, cwd, canvasPath: canvas?.id });
+    if (runId) tools = guardAgentTools(tools, { runId, runControl, canvasAttached, cwd, canvasPath: canvas?.id, canvas });
     const resources = await createAgentResources(cwd, tools, undefined, child
       ? `## 子 Agent 职责\n你正在执行委派任务：${JSON.stringify({ name: child.name, task: child.task })}。遵守当前工作区规则与授权，用户可以进入此子会话补充要求。重要进展与最终结论使用 report 上报父 Agent。`
       : "");
@@ -323,7 +323,7 @@ export async function run(
           } catch (error) {
             const message = error instanceof Error ? error.message : "工具无法在后台执行";
             if (runId) {
-              recordToolCallStart(runId, event.toolCallId, event.toolName, event.args, isSideEffectTool(event.toolName, event.args, { cwd, canvasPath: canvas?.id }));
+              recordToolCallStart(runId, event.toolCallId, event.toolName, event.args, isSideEffectTool(event.toolName));
               recordToolCallFinish(event.toolCallId, "error", message);
             }
             send({ type: "error", message });
