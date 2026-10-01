@@ -9,7 +9,7 @@ import {
 import type { CanvasContext, QuestionContext, ToolContext } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { isWithin, resolveWorkspacePath, writeWorkspaceFile, lockWorkspaceFiles, assertNoManagedGraph } from "@/utils/workspace/files";
-import { listTools, loadTool, validateToolConfig } from "@/utils/plugins/tools";
+import { createPluginTools, listTools } from "@/utils/plugins/tools";
 import { createSkillContext } from "@/agent/skills";
 
 export function createAgentToolContext(cwd: string, config: Record<string, unknown> = {}, canvas?: CanvasContext, question?: QuestionContext): ToolContext {
@@ -49,9 +49,7 @@ export async function createAgentTools(cwd: string, canvas?: CanvasContext, ques
   for (const item of await listTools()) {
     if (!item.enabled) continue;
     if (item.loadError) throw new Error(`${item.displayName}：${item.loadError}`);
-    const { plugin, metadata } = await loadTool(item.name);
-    const config = validateToolConfig(plugin, item.config);
-    const definitions = await plugin.createTools({ ...context, config });
+    const { definitions, metadata } = await createPluginTools(item.name, { ...context, config: item.config });
     for (const tool of definitions) {
       if (!tool.name || typeof tool.execute !== "function") throw new Error(`${item.displayName} 返回了无效的工具`);
       if (names.has(tool.name)) throw new Error(`工具名称重复：${tool.name}`);

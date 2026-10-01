@@ -13,6 +13,7 @@ import {
 import { assertBackgroundToolAllowed, classifyToolExecutionMode } from "@/agent/runtime/toolExecution";
 import { readGraph } from "@/utils/workspace/graph";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
+import { isBuiltinCanvasTool } from "@/utils/plugins/tools";
 
 export type ToolGuardContext = {
   runId: string;
@@ -21,6 +22,7 @@ export type ToolGuardContext = {
   cwd?: string;
   canvasPath?: string;
   canvas?: CanvasContext;
+  builtinCanvasTool?: boolean;
 };
 
 function parseStoredResult(resultJson: string | null): AgentToolResult<unknown> {
@@ -126,7 +128,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       activeToolCalls.add(key);
       let started = false;
       try {
-        const context = await nodeToolContext(tool.name, params, ctx, signal);
+        const context = await nodeToolContext(tool.name, params, { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ execute }) }, signal);
         const needsAuthorization = requiresToolAuthorization(tool.name, params, context);
         const authorizationInput = await scopedInput(tool.name, params, ctx, needsAuthorization, context.nodeRevision);
         recordToolCallStart(ctx.runId, toolCallId, tool.name, authorizationInput, sideEffect, needsAuthorization ? "pendingAuthorization" : "started");

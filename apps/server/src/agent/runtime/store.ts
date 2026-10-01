@@ -308,6 +308,7 @@ export function isSideEffectTool(name: string) {
 export function requiresToolAuthorization(name: string, args?: unknown, context?: NodeToolContext) {
   if (readOnlyTools.has(name)) return false;
   if (classifyToolExecutionMode(name) !== "canvas") return true;
+  if (!context?.builtinCanvasTool) return true;
   // 审批与防重播分别判断：本地修改免逐次审批，执行结果未知时仍需核对。
   if (name.startsWith("node:")) return true;
   if (name !== "nodeTools") return false;

@@ -22,7 +22,7 @@ const builtinNodeTools = new Map([
 const builtinNodeHashes = new Map<string, string>();
 const nodePackageLimit = 8 * 1024 * 1024;
 const canvasTrustLimit = 16 * 1024 * 1024;
-export type NodeToolContext = { cwd?: string; canvasPath?: string; nodeRevision?: string };
+export type NodeToolContext = { cwd?: string; canvasPath?: string; nodeRevision?: string; builtinCanvasTool?: boolean };
 
 function readTrustFile(root: string, path: string, limit: number) {
   if (isAbsolute(path) || !isWithin(root, resolve(root, path))) return;
