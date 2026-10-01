@@ -145,7 +145,7 @@ import {
 import { Background } from "@vue-flow/background";
 import { useCanvasTools } from "./useCanvasTools";
 import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
-import { getLoadedNodeRevision, loadNodeComponent } from "./loadNodeComponent";
+import { getLoadedNodeRevision, initializeNodeHost, loadNodeComponent } from "./loadNodeComponent";
 import { useCanvasHistory } from "./useCanvasHistory";
 import { copyNodeToClipboard, nodeClipboardCommand, readClipboardNode } from "./nodeClipboard";
 import { readClipboardText } from "@/lib/clipboard";
@@ -882,11 +882,7 @@ onBeforeUnmount(() => {
   loadRequest++;
 });
 
-const nodeWindow = window as typeof window & {
-  toonflowNodeHost?: { vue: typeof vueRuntime; vueFlow: typeof vueFlowRuntime; elementPlus: typeof elementPlusRuntime; ai: { runAgentLoop: typeof runAgentLoop; createAssistantMessageEventStream: typeof createAssistantMessageEventStream } };
-  toonflowNodes?: NodeTypesObject;
-};
-nodeWindow.toonflowNodeHost = { vue: vueRuntime, vueFlow: vueFlowRuntime, elementPlus: elementPlusRuntime, ai: { runAgentLoop, createAssistantMessageEventStream } };
+initializeNodeHost({ vue: vueRuntime, vueFlow: vueFlowRuntime, elementPlus: elementPlusRuntime, ai: { runAgentLoop, createAssistantMessageEventStream } });
 provide("nodeConfig", (nodeType: string) => nodeConfigs.value[nodeType] ?? {});
 provide("workspaceFiles", () => {
   const directory = project.value?.directory;

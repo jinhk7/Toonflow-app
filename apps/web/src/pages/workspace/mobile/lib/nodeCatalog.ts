@@ -4,7 +4,7 @@ import * as vueFlowRuntime from "@vue-flow/core";
 import * as elementPlusRuntime from "element-plus";
 import { runAgentLoop } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { loadNodeComponent } from "../../panels/canvas/loadNodeComponent";
+import { initializeNodeHost, loadNodeComponent } from "../../panels/canvas/loadNodeComponent";
 
 export type MobileNodeType = { type: string; label: string; name: string; url: string; revision: string };
 
@@ -20,8 +20,7 @@ export async function fetchEnabledNodeTypes(): Promise<MobileNodeType[]> {
     .sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
 }
 export async function loadNodeHandles(node: MobileNodeType) {
-  const nodeWindow = window as typeof window & { toonflowNodeHost?: unknown };
-  nodeWindow.toonflowNodeHost ??= { vue: vueRuntime, vueFlow: vueFlowRuntime, elementPlus: elementPlusRuntime, ai: { runAgentLoop, createAssistantMessageEventStream } };
+  initializeNodeHost({ vue: vueRuntime, vueFlow: vueFlowRuntime, elementPlus: elementPlusRuntime, ai: { runAgentLoop, createAssistantMessageEventStream } });
   const component = await loadNodeComponent(node.name, node.url, node.revision);
   const handles = (component as { handles?: unknown }).handles;
   if (!Array.isArray(handles)) return [];

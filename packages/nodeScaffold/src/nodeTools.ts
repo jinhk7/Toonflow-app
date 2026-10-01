@@ -17,6 +17,28 @@ type RegisteredNodeTool = NodeToolInfo & Pick<NodeToolDefinition, "execute"> & {
 type NodeToolsIndex = { nodes: Map<string, Map<string, RegisteredNodeTool>>; version: number };
 // 来源只存宿主闭包；复制共享条目不能复制注册证明。
 const nodeToolSources = new WeakMap<RegisteredNodeTool, { nodeId: string; name: RegisteredNodeTool["name"]; execute: RegisteredNodeTool["execute"]; component: object }>();
+// ACT: 在插件执行前固定证明存取与调用能力，后续原型覆写不能读取或伪造宿主私有来源。
+const getNodeToolSource = nodeToolSources.get.bind(nodeToolSources);
+const setNodeToolSource = nodeToolSources.set.bind(nodeToolSources);
+const deleteNodeToolSource = nodeToolSources.delete.bind(nodeToolSources);
+const apply = Reflect.apply;
+const defineProperty = Object.defineProperty;
+const defineProperties = Object.defineProperties;
+const freeze = Object.freeze;
+const regExpExec = RegExp.prototype.exec;
+const stringTrim = String.prototype.trim;
+const toJSONSchema = z.toJSONSchema;
+const mapConstructor = Map;
+const mapGet = Map.prototype.get;
+const mapSet = Map.prototype.set;
+const mapDelete = Map.prototype.delete;
+const mapClear = Map.prototype.clear;
+const mapValues = Map.prototype.values;
+const mapKeys = Map.prototype.keys;
+const mapSize = Object.getOwnPropertyDescriptor(Map.prototype, "size")!.get!;
+const setConstructor = Set;
+const setHas = Set.prototype.has;
+const promiseConstructor = Promise;
 
 // 共享 Vue Flow 实例上的注册表供各 UMD 访问，不进入画布 JSON。
 const nodeToolsKey = Symbol.for("toonflow.nodeTools");
@@ -27,34 +49,34 @@ function getRegistry(flow: ReturnType<typeof useVueFlow>) {
     [nodeToolsKey]?: Map<string, RegisteredNodeTool>;
     [nodeToolsIndexKey]?: NodeToolsIndex;
   };
-  if (!host[nodeToolsKey]) Object.defineProperty(host, nodeToolsKey, { value: new Map<string, RegisteredNodeTool>() });
+  if (!host[nodeToolsKey]) defineProperty(host, nodeToolsKey, { value: new mapConstructor<string, RegisteredNodeTool>() });
   const registry = host[nodeToolsKey]!;
   if (!host[nodeToolsIndexKey]) {
-    const index: NodeToolsIndex = { nodes: new Map(), version: 0 };
+    const index: NodeToolsIndex = { nodes: new mapConstructor(), version: 0 };
     const add = (entry: RegisteredNodeTool) => {
-      let node = index.nodes.get(entry.nodeId);
-      if (!node) index.nodes.set(entry.nodeId, node = new Map());
-      node.set(entry.name, entry);
+      let node = apply(mapGet, index.nodes, [entry.nodeId]);
+      if (!node) apply(mapSet, index.nodes, [entry.nodeId, node = new mapConstructor()]);
+      apply(mapSet, node, [entry.name, entry]);
     };
     const remove = (entry: RegisteredNodeTool) => {
-      const node = index.nodes.get(entry.nodeId);
-      if (node?.get(entry.name) !== entry) return;
-      node.delete(entry.name);
-      if (!node.size) index.nodes.delete(entry.nodeId);
+      const node = apply(mapGet, index.nodes, [entry.nodeId]);
+      if (!node || apply(mapGet, node, [entry.name]) !== entry) return;
+      apply(mapDelete, node, [entry.name]);
+      if (!apply(mapSize, node, [])) apply(mapDelete, index.nodes, [entry.nodeId]);
     };
-    for (const entry of registry.values()) add(entry);
+    for (const entry of apply(mapValues, registry, [])) add(entry);
     // ACT: 旧 UMD 仍写原 Map；在共享 Map 上同步索引，避免每次读取扫描全部节点函数。
-    Object.defineProperties(registry, {
+    defineProperties(registry, {
       set: { value(this: Map<string, RegisteredNodeTool>, key: string, entry: RegisteredNodeTool) {
-        const previous = this.get(key);
+        const previous = apply(mapGet, this, [key]);
         if (this === registry) {
           const component = getCurrentInstance()?.type;
           const { nodeId, name, execute } = entry;
           if (component && key === `${nodeId}:${name}` && typeof execute === "function")
-            nodeToolSources.set(entry, { nodeId, name, execute, component });
-          else nodeToolSources.delete(entry);
+            setNodeToolSource(entry, { nodeId, name, execute, component });
+          else deleteNodeToolSource(entry);
         }
-        Map.prototype.set.call(this, key, entry);
+        apply(mapSet, this, [key, entry]);
         if (this === registry && previous !== entry) {
           if (previous) remove(previous);
           add(entry);
@@ -63,8 +85,8 @@ function getRegistry(flow: ReturnType<typeof useVueFlow>) {
         return this;
       } },
       delete: { value(this: Map<string, RegisteredNodeTool>, key: string) {
-        const entry = this.get(key);
-        const deleted = Map.prototype.delete.call(this, key);
+        const entry = apply(mapGet, this, [key]);
+        const deleted = apply(mapDelete, this, [key]);
         if (this === registry && deleted) {
           remove(entry!);
           index.version++;
@@ -72,34 +94,35 @@ function getRegistry(flow: ReturnType<typeof useVueFlow>) {
         return deleted;
       } },
       clear: { value(this: Map<string, RegisteredNodeTool>) {
-        const size = this.size;
-        Map.prototype.clear.call(this);
+        const size = apply(mapSize, this, []);
+        apply(mapClear, this, []);
         if (this === registry && size) {
-          index.nodes.clear();
+          apply(mapClear, index.nodes, []);
           index.version++;
         }
       } },
     });
-    Object.defineProperty(host, nodeToolsIndexKey, { value: index });
+    defineProperty(host, nodeToolsIndexKey, { value: index });
   }
   return { registry, index: host[nodeToolsIndexKey]! };
 }
 
-export const nodeTools = {
+export const nodeTools = freeze({
   register<Schema extends z.ZodType>(definition: NodeToolDefinition<Schema>) {
     if (!getCurrentScope()) throw new Error("请在节点 setup 中注册 nodeTools");
     const nodeId = useNodeId();
     if (!nodeId) throw new Error("当前组件不属于画布节点");
-    if (!/^[a-z][a-zA-Z0-9]{0,63}$/.test(definition.name)) throw new Error("节点函数名必须使用小驼峰，最多 64 个字符");
-    const parameters = z.toJSONSchema(definition.parameters, { io: "input", target: "draft-07" });
-    if (!definition.description.trim() || parameters.type !== "object" || typeof definition.execute !== "function") {
+    if (!apply(regExpExec, /^[a-z][a-zA-Z0-9]{0,63}$/, [definition.name])) throw new Error("节点函数名必须使用小驼峰，最多 64 个字符");
+    const parameters = toJSONSchema(definition.parameters, { io: "input", target: "draft-07" });
+    const description = apply(stringTrim, definition.description, []);
+    if (!description || parameters.type !== "object" || typeof definition.execute !== "function") {
       throw new Error("节点函数需要描述、Zod 对象参数和 execute 方法");
     }
     const { registry } = getRegistry(useVueFlow());
     const name = `node:${definition.name}` as const;
     const key = `${nodeId}:${name}`;
     const entry: RegisteredNodeTool = {
-      nodeId, name, description: definition.description.trim(),
+      nodeId, name, description,
       parameters,
       async execute(args, context) {
         const parsed = await definition.parameters.parseAsync(args);
@@ -108,25 +131,26 @@ export const nodeTools = {
       },
     };
     registry.set(key, entry);
-    const unregister = () => { if (registry.get(key) === entry) registry.delete(key); };
+    const unregister = () => { if (apply(mapGet, registry, [key]) === entry) registry.delete(key); };
     onScopeDispose(unregister);
     return unregister;
   },
-};
+});
 
 // 在画布 setup 中创建，按需读取当前节点函数，不复制全量注册表。
 export function useNodeToolsContext(resolveNodeRevision?: (component?: object) => string | undefined) {
   const flow = useVueFlow();
   const { registry, index } = getRegistry(flow);
   function* list(nodeIds: string[], names?: string[]): IterableIterator<NodeToolInfo> {
-    const nameSet = names ? new Set(names) : undefined;
-    for (const nodeId of new Set(nodeIds)) {
+    const nameSet = names ? new setConstructor(names) : undefined;
+    for (const nodeId of new setConstructor(nodeIds)) {
       const node = flow.findNode(nodeId);
       if (!node) continue;
-      for (const entry of index.nodes.get(nodeId)?.values() ?? []) {
-        if (nameSet && !nameSet.has(entry.name)) continue;
+      const tools = apply(mapGet, index.nodes, [nodeId]);
+      for (const entry of tools ? apply(mapValues, tools, []) : []) {
+        if (nameSet && !apply(setHas, nameSet, [entry.name])) continue;
         const { execute, component: _component, ...info } = entry;
-        const source = nodeToolSources.get(entry);
+        const source = getNodeToolSource(entry);
         const nodeRevision = source && source.nodeId === nodeId && source.nodeId === info.nodeId && source.name === info.name && source.execute === execute
           ? resolveNodeRevision?.(source.component) : undefined;
         yield { ...info, nodeLabel: String(node.data.label ?? node.label ?? nodeId), nodeRevision };
@@ -134,7 +158,7 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
     }
   }
   return (): NodeToolsContext => ({
-    get tools() { return [...list([...index.nodes.keys()])]; },
+    get tools() { return [...list([...apply(mapKeys, index.nodes, [])])]; },
     get version() { return index.version; },
     list,
     async call({ nodeId, name, args, expectedNodeRevision }, signal) {
@@ -142,27 +166,25 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
       const callSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
       callSignal.throwIfAborted();
       const key = `${nodeId}:${name}`;
-      const entry = registry.get(key);
+      const entry: RegisteredNodeTool | undefined = apply(mapGet, registry, [key]);
       if (!entry) throw new Error(`节点未注册函数 ${name}，请先通过 getNodeTools 查询可用节点函数`);
       const { nodeId: entryNodeId, name: entryName, execute } = entry;
-      const source = nodeToolSources.get(entry);
+      const source = getNodeToolSource(entry);
       if (!flow.findNode(nodeId)) throw new Error("节点函数已卸载或不属于本轮画布");
       let cancel: () => void = () => {};
       try {
-        const result = await Promise.race([
-          Promise.resolve().then(() => {
+        const result = await new promiseConstructor((resolve, reject) => {
+          cancel = () => reject(callSignal.reason);
+          callSignal.addEventListener("abort", cancel, { once: true });
+          try {
             callSignal.throwIfAborted();
-            if (registry.get(key) !== entry || !flow.findNode(nodeId)) throw new Error("节点函数已卸载或不属于本轮画布");
+            if (apply(mapGet, registry, [key]) !== entry || !flow.findNode(nodeId)) throw new Error("节点函数已卸载或不属于本轮画布");
             if (expectedNodeRevision !== undefined && (!source || source.nodeId !== nodeId || source.name !== name || source.execute !== execute
               || entryNodeId !== nodeId || entryName !== name || resolveNodeRevision?.(source.component) !== expectedNodeRevision))
               throw new Error("节点脚本版本已变化或无法确认，请重新查询节点函数");
-            return Reflect.apply(execute, entry, [args, { signal: callSignal }]);
-          }),
-          new Promise<never>((_resolve, reject) => {
-            cancel = () => reject(callSignal.reason);
-            callSignal.addEventListener("abort", cancel, { once: true });
-          }),
-        ]);
+            resolve(apply(execute, entry, [args, { signal: callSignal }]));
+          } catch (error) { reject(error); }
+        });
         callSignal.throwIfAborted();
         return result ?? null;
       } finally {
