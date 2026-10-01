@@ -2,9 +2,14 @@
   <el-container class="home">
     <bg class="pageBackground" />
     <el-header class="pageHeader">
-      <el-badge isDot :hidden="!hasDesktopUpdate">
-        <el-button round size="large" :icon="IconSettings" :aria-label="hasDesktopUpdate ? '设置，有新版本可用' : '设置'" @click="settingsVisible = true">设置</el-button>
-      </el-badge>
+      <div class="headerActions">
+        <el-badge isDot :hidden="!hasDesktopUpdate">
+          <el-button round size="large" :icon="IconSettings" :aria-label="hasDesktopUpdate ? '设置，有新版本可用' : '设置'" @click="settingsVisible = true">设置</el-button>
+        </el-badge>
+        <router-link to="/mobile" custom v-slot="{ href, navigate }">
+          <el-button class="mobileEntry" round size="large" :icon="IconDeviceMobile" tag="a" :href="href" @click="navigate">手机端</el-button>
+        </router-link>
+      </div>
       <div class="githubAction">
         <span class="arrowHint starHint">
           点个 Star 支持一下
@@ -88,7 +93,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
-  IconSettings, IconBrandGithub,
+  IconSettings, IconBrandGithub, IconDeviceMobile,
   IconArrowUp, IconLayoutGrid,
   IconList, IconSortDescending,
   IconSortAscending, IconFolder, IconEdit,
@@ -286,15 +291,35 @@ async function createProject(fromPrompt = true) {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 72px;
-    padding: 0 clamp(20px, 4vw, 56px);
+    flex-wrap: wrap;
+    gap: 12px;
+    height: auto;
+    min-height: 72px;
+    padding: 16px clamp(20px, 4vw, 56px);
 
     a {
       text-decoration: none;
     }
 
+    .headerActions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+
+      .mobileEntry {
+        min-height: 44px;
+
+        &:focus-visible {
+          outline: 2px solid var(--el-color-primary);
+          outline-offset: 2px;
+        }
+      }
+    }
+
     .githubAction {
       position: relative;
+      margin-left: auto;
 
       .starHint {
         top: 0;
