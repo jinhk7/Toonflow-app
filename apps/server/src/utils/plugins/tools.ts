@@ -9,6 +9,14 @@ import conf from "@/utils/conf";
 export { toolNameSchema } from "@toonflow/tools-scaffold/runtime";
 
 const { z } = zod;
+const weakSetConstructor = WeakSet;
+const weakSetHas = WeakSet.prototype.has;
+const weakSetAdd = WeakSet.prototype.add;
+const apply = Reflect.apply;
+const freeze = Object.freeze;
+const mapGet = Map.prototype.get;
+const mapSet = Map.prototype.set;
+const mapClear = Map.prototype.clear;
 
 // ACT: 工具复用宿主 Zod 4；虚拟模块不依赖安装目录中的 node_modules。
 Bun.plugin({
@@ -21,20 +29,21 @@ Bun.plugin({
 export const toolsDirectory = resolve(dirname(conf.path), "tools");
 const builtinToolHashes = new Map<string, string>();
 let builtinCanvas: { plugin: ToolPlugin; metadata: ToolMetadata; revision: string } | undefined;
-let builtinCanvasExecutions = new WeakSet<object>();
+let builtinCanvasExecutions = new weakSetConstructor<object>();
 
 export async function configureBuiltinCanvasTools(toolsRoot?: string) {
   builtinCanvas = undefined;
-  builtinCanvasExecutions = new WeakSet<object>();
-  builtinToolHashes.clear();
+  builtinCanvasExecutions = new weakSetConstructor<object>();
+  apply(mapClear, builtinToolHashes, []);
   if (!toolsRoot) return;
   try {
     const root = await realpath(toolsRoot);
     const files = await readdir(root, { withFileTypes: true });
     const tools = await Promise.all(files.filter(file => file.isFile() && /^[a-z][a-zA-Z0-9]*\.tool\.js$/.test(file.name))
       .map(file => readTool(file.name.slice(0, -8), root)));
-    for (const tool of tools) builtinToolHashes.set(tool.metadata.name, tool.revision);
+    for (const tool of tools) apply(mapSet, builtinToolHashes, [tool.metadata.name, tool.revision]);
     builtinCanvas = await loadTool("canvas", root);
+    freeze(builtinCanvas.plugin);
   } catch (error) {
     if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
     throw error;
@@ -42,7 +51,8 @@ export async function configureBuiltinCanvasTools(toolsRoot?: string) {
 }
 
 export function isBuiltinCanvasTool(tool: { execute?: unknown }) {
-  return typeof tool.execute === "function" && builtinCanvasExecutions.has(tool.execute);
+  const execute = tool.execute;
+  return typeof execute === "function" && apply(weakSetHas, builtinCanvasExecutions, [execute]);
 }
 
 export function parseTool(source: string, name: string) {
@@ -103,7 +113,7 @@ export async function listTools() {
       const enabled = !files.some(entry => entry.name === `${name}.disabled`);
       try {
         const { metadata, revision } = await readTool(name);
-        return { ...metadata, enabled, config: getToolConfig(metadata), revision, builtin: revision === builtinToolHashes.get(name), loadError: "" };
+        return { ...metadata, enabled, config: getToolConfig(metadata), revision, builtin: revision === apply(mapGet, builtinToolHashes, [name]), loadError: "" };
       } catch (err) {
         const loadError = err instanceof Error ? err.message : "工具文件无法读取";
         return { name, version: "", displayName: name, description: loadError, author: "", github: "", components: [], configRules: [], enabled, config: {}, revision: "", builtin: false, loadError };
@@ -128,7 +138,8 @@ export async function createPluginTools(name: string, context: ToolContext) {
   const config = validateToolConfig(plugin, context.config);
   const definitions = await plugin.createTools({ ...context, config });
   if (builtin) for (const tool of definitions) {
-    if (typeof tool.execute === "function") builtinCanvasExecutions.add(tool.execute);
+    const execute = tool.execute;
+    if (typeof execute === "function") apply(weakSetAdd, builtinCanvasExecutions, [execute]);
   }
   return { definitions, metadata };
 }

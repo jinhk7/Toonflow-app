@@ -6,6 +6,12 @@ import { z } from "zod";
 import conf from "@/utils/conf";
 import { isWithin } from "@/utils/workspace/files";
 
+const apply = Reflect.apply;
+const mapGet = Map.prototype.get;
+const mapSet = Map.prototype.set;
+const mapClear = Map.prototype.clear;
+const setHas = Set.prototype.has;
+
 export const nodeNameSchema = z.string().max(96).regex(/^[a-z][a-zA-Z0-9]*$/);
 export const nodesDirectory = resolve(dirname(conf.path), "nodes");
 const configRulesSchema = z.array(z.record(z.string(), z.json())).max(100);
@@ -49,16 +55,16 @@ function readTrustFile(root: string, path: string, limit: number) {
 }
 
 export function configureBuiltinNodes(nodesRoot?: string) {
-  builtinNodeHashes.clear();
+  apply(mapClear, builtinNodeHashes, []);
   if (!nodesRoot) return;
   try {
     const root = realpathSync(nodesRoot);
     for (const file of readdirSync(root, { withFileTypes: true })) {
       if (!file.isFile() || !/^[a-z][a-zA-Z0-9]*\.umd\.js$/.test(file.name)) continue;
       const content = readTrustFile(root, file.name, nodePackageLimit);
-      if (content) builtinNodeHashes.set(file.name.slice(0, -7), createHash("sha256").update(content).digest("hex"));
+      if (content) apply(mapSet, builtinNodeHashes, [file.name.slice(0, -7), createHash("sha256").update(content).digest("hex")]);
     }
-  } catch { builtinNodeHashes.clear(); }
+  } catch { apply(mapClear, builtinNodeHashes, []); }
 }
 
 export function isBuiltinNodeTool(nodeId: unknown, name: string, context?: NodeToolContext) {
@@ -74,8 +80,9 @@ export function isBuiltinNodeTool(nodeId: unknown, name: string, context?: NodeT
     const graphType: unknown = targets.length === 1 ? targets[0].type : undefined;
     if (typeof graphType !== "string" || !graphType.startsWith("remote-")) return false;
     const type = graphType.slice("remote-".length);
-    if (!builtinNodeTools.get(type)?.has(name)) return false;
-    const expected = builtinNodeHashes.get(type);
+    const tools = apply(mapGet, builtinNodeTools, [type]);
+    if (!tools || !apply(setHas, tools, [name])) return false;
+    const expected = apply(mapGet, builtinNodeHashes, [type]);
     if (!expected || context.nodeRevision !== expected) return false;
     const installed = readTrustFile(realpathSync(nodesDirectory), `${type}.umd.js`, nodePackageLimit);
     return !!installed && createHash("sha256").update(installed).digest("hex") === expected;
@@ -114,7 +121,7 @@ export async function readNode(name: string) {
   return {
     name,
     revision,
-    builtin: revision === builtinNodeHashes.get(name),
+    builtin: revision === apply(mapGet, builtinNodeHashes, [name]),
     displayName: typeof metadata.displayName === "string" && metadata.displayName.trim() ? metadata.displayName : name,
     version: typeof metadata.version === "string" ? metadata.version.trim() : "",
     author: typeof metadata.author === "string" ? metadata.author : "",
