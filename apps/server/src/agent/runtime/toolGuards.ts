@@ -107,7 +107,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
         throw Object.assign(new Error("运行已暂停"), { code: "AGENT_PAUSED", status: 409 });
       }
       if (ctx.canvas) ctx.canvasPath = ctx.canvas.id;
-      const toolContext = { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ execute }) };
+      const toolContext = { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ name: tool.name, execute }) };
       const sideEffect = isSideEffectTool(tool.name, toolContext);
       const key = ctx.runId + ":" + toolCallId;
       if (activeToolCalls.has(key)) throw Object.assign(new Error("工具调用仍在执行，不能重入"), { status: 409 });

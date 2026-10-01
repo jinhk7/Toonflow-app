@@ -9,9 +9,9 @@ import conf from "@/utils/conf";
 export { toolNameSchema } from "@toonflow/tools-scaffold/runtime";
 
 const { z } = zod;
-const weakSetConstructor = WeakSet;
-const weakSetHas = WeakSet.prototype.has;
-const weakSetAdd = WeakSet.prototype.add;
+const weakMapConstructor = WeakMap;
+const weakMapGet = WeakMap.prototype.get;
+const weakMapSet = WeakMap.prototype.set;
 const apply = Reflect.apply;
 const freeze = Object.freeze;
 const mapGet = Map.prototype.get;
@@ -29,11 +29,11 @@ Bun.plugin({
 export const toolsDirectory = resolve(dirname(conf.path), "tools");
 const builtinToolHashes = new Map<string, string>();
 let builtinCanvas: { plugin: ToolPlugin; metadata: ToolMetadata; revision: string } | undefined;
-let builtinCanvasExecutions = new weakSetConstructor<object>();
+let builtinCanvasExecutions = new weakMapConstructor<object, string>();
 
 export async function configureBuiltinCanvasTools(toolsRoot?: string) {
   builtinCanvas = undefined;
-  builtinCanvasExecutions = new weakSetConstructor<object>();
+  builtinCanvasExecutions = new weakMapConstructor<object, string>();
   apply(mapClear, builtinToolHashes, []);
   if (!toolsRoot) return;
   try {
@@ -50,9 +50,10 @@ export async function configureBuiltinCanvasTools(toolsRoot?: string) {
   }
 }
 
-export function isBuiltinCanvasTool(tool: { execute?: unknown }) {
+export function isBuiltinCanvasTool(tool: { name?: unknown; execute?: unknown }) {
+  const name = tool.name;
   const execute = tool.execute;
-  return typeof execute === "function" && apply(weakSetHas, builtinCanvasExecutions, [execute]);
+  return typeof name === "string" && typeof execute === "function" && apply(weakMapGet, builtinCanvasExecutions, [execute]) === name;
 }
 
 export function parseTool(source: string, name: string) {
@@ -137,9 +138,10 @@ export async function createPluginTools(name: string, context: ToolContext) {
   const { plugin, metadata } = builtin ?? await loadTool(name);
   const config = validateToolConfig(plugin, context.config);
   const definitions = await plugin.createTools({ ...context, config });
-  if (builtin) for (const tool of definitions) {
+  if (builtin) for (let index = 0; index < definitions.length; index++) {
+    const tool = definitions[index]!;
     const execute = tool.execute;
-    if (typeof execute === "function") apply(weakSetAdd, builtinCanvasExecutions, [execute]);
+    if (typeof execute === "function") apply(weakMapSet, builtinCanvasExecutions, [execute, tool.name]);
   }
   return { definitions, metadata };
 }
