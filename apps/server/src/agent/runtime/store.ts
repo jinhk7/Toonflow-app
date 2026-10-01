@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import conf from "@/utils/conf";
 import type { AgentEvent } from "@/agent/runtime/types";
 import type { QuestionAnswer, QuestionRequest } from "@toonflow/tools-scaffold/runtime";
+import { classifyToolExecutionMode } from "@/agent/runtime/toolExecution";
 
 export type AgentRunStatus =
   | "preparing"
@@ -277,7 +278,7 @@ export function recordToolCallStart(runId: string, toolCallId: string, name: str
   db.prepare(`
     INSERT INTO agent_tool_calls (toolCallId, runId, name, status, argsJson, resultJson, sideEffect, createdAt, updatedAt)
     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
-    ON CONFLICT(toolCallId) DO UPDATE SET status = excluded.status, argsJson = excluded.argsJson, updatedAt = excluded.updatedAt
+    ON CONFLICT(toolCallId) DO UPDATE SET status = excluded.status, argsJson = excluded.argsJson, sideEffect = excluded.sideEffect, updatedAt = excluded.updatedAt
   `).run(toolCallId, runId, name, status, JSON.stringify(args ?? null), sideEffect ? 1 : 0, createdAt, createdAt);
 }
 
@@ -294,9 +295,24 @@ export function getToolCallRecord(toolCallId: string) {
 }
 
 const readOnlyTools = new Set(["read", "ls", "report", "skill", "question", "getCanvas", "selectNodes", "fitCanvas"]);
+const localNodeTools = new Set([
+  "node:setPrompt", "node:setText", "node:getConfig", "node:setConfig", "node:getGenerationStatus",
+  "node:setImage", "node:setVideo", "node:setAudio",
+]);
 
-export function isSideEffectTool(name: string) {
-  return !readOnlyTools.has(name);
+export function getToolCallInput(value: unknown): unknown {
+  if (value && typeof value === "object" && "args" in value && "canvasId" in value && "canvasPath" in value) return value.args;
+  return value;
+}
+
+export function isSideEffectTool(name: string, args?: unknown) {
+  if (readOnlyTools.has(name)) return false;
+  if (classifyToolExecutionMode(name) !== "canvas") return true;
+  // ACT: 此标记控制逐次审批和未知结果核对；本地画布编辑免审批，生成及未知节点函数仍受保护。
+  if (name !== "nodeTools" && !name.startsWith("node:")) return false;
+  const input = getToolCallInput(args);
+  const nodeToolName = name === "nodeTools" && input && typeof input === "object" && "name" in input ? input.name : name;
+  return typeof nodeToolName !== "string" || !localNodeTools.has(nodeToolName);
 }
 
 function stableValue(value: unknown): unknown {
@@ -319,13 +335,13 @@ export function listPendingAuthorizations(runId: string) {
   return rows.map(row => {
     const args = JSON.parse(row.argsJson) as unknown;
     return { toolCallId: row.toolCallId, toolName: row.name, args, modelId: run.modelId, scopeKey: authorizationScopeKey(row.name, args, run.modelId) };
-  }).filter(call => (grants.get(call.scopeKey) ?? 0) < 1);
+  }).filter(call => isSideEffectTool(call.toolName, call.args) && (grants.get(call.scopeKey) ?? 0) < 1);
 }
 
 export function grantAuthorization(runId: string, toolCallId: string, remaining = 1) {
   const run = getAgentRun(runId);
   const call = getToolCallRecord(toolCallId);
-  if (!run || !call || call.runId !== runId || call.status !== "pendingAuthorization" || !call.argsJson || !isSideEffectTool(call.name))
+  if (!run || !call || call.runId !== runId || call.status !== "pendingAuthorization" || !call.argsJson || !isSideEffectTool(call.name, JSON.parse(call.argsJson)))
     throw Object.assign(new Error("没有可授权的待执行工具调用"), { status: 409 });
   if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 1000) throw Object.assign(new Error("授权次数无效"), { status: 400 });
   const args = JSON.parse(call.argsJson) as unknown;
@@ -340,7 +356,7 @@ export function grantAuthorization(runId: string, toolCallId: string, remaining 
 }
 
 export function requireSideEffectAuthorization(runId: string, toolName: string, args: unknown, toolCallId: string) {
-  if (!isSideEffectTool(toolName)) return;
+  if (!isSideEffectTool(toolName, args)) return;
   const run = getAgentRun(runId);
   if (!run) throw Object.assign(new Error("运行不存在"), { status: 404 });
   const scopeKey = authorizationScopeKey(toolName, args, run.modelId);
@@ -355,15 +371,13 @@ export function requireSideEffectAuthorization(runId: string, toolName: string, 
 }
 
 export function hasPendingSideEffectReview(runId: string) {
-  const row = getAgentRunDatabase().prepare(`
-    SELECT 1 FROM agent_tool_calls WHERE runId = ? AND sideEffect = 1 AND status IN ('started', 'needsReview') LIMIT 1
-  `).get(runId);
-  return Boolean(row);
+  return listPendingSideEffectReviews(runId).length > 0;
 }
 
 export function listPendingSideEffectReviews(runId: string) {
   const rows = getAgentRunDatabase().prepare("SELECT toolCallId, name, argsJson, status FROM agent_tool_calls WHERE runId = ? AND sideEffect = 1 AND status IN ('started', 'needsReview') ORDER BY createdAt").all(runId) as { toolCallId: string; name: string; argsJson: string; status: string }[];
-  return rows.map(row => ({ toolCallId: row.toolCallId, toolName: row.name, args: JSON.parse(row.argsJson), status: row.status }));
+  return rows.map(row => ({ toolCallId: row.toolCallId, toolName: row.name, args: JSON.parse(row.argsJson), status: row.status }))
+    .filter(call => isSideEffectTool(call.toolName, call.args));
 }
 
 export function acknowledgeRunReview(runId: string, toolCallId: string) {

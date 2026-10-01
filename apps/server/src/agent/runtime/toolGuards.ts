@@ -2,6 +2,7 @@ import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-
 import type { AgentRunControl } from "@/agent/runtime/types";
 import {
   getToolCallRecord,
+  getToolCallInput,
   isSideEffectTool,
   recordToolCallFinish,
   recordToolCallStart,
@@ -36,7 +37,7 @@ function parseStoredResult(resultJson: string | null): AgentToolResult<unknown> 
   }
 }
 async function scopedInput(toolName: string, args: unknown, context: ToolGuardContext) {
-  if (classifyToolExecutionMode(toolName) !== "canvas" || !isSideEffectTool(toolName)) return args;
+  if (classifyToolExecutionMode(toolName) !== "canvas" || !isSideEffectTool(toolName, args)) return args;
   if (!context.cwd || !context.canvasPath) throw Object.assign(new Error("缺少画布版本上下文，不能授权操作"), { status: 409 });
   const { path } = await resolveWorkspacePath(context.cwd, context.canvasPath);
   const graph = await readGraph(path);
@@ -89,25 +90,25 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       if (ctx.runControl?.shouldPauseBeforeStep()) {
         throw Object.assign(new Error("运行已暂停"), { code: "AGENT_PAUSED", status: 409 });
       }
+      const sideEffect = isSideEffectTool(tool.name, params);
       const key = ctx.runId + ":" + toolCallId;
       if (activeToolCalls.has(key)) throw Object.assign(new Error("工具调用仍在执行，不能重入"), { status: 409 });
 
       const previous = getToolCallRecord(toolCallId);
       if (previous?.runId !== undefined) {
         const stored = JSON.parse(previous.argsJson ?? "null") as Record<string, unknown> | null;
-        const original = stored && "canvasId" in stored ? stored.args : stored;
+        const original = getToolCallInput(stored);
         if (previous.runId !== ctx.runId || previous.name !== tool.name || JSON.stringify(original ?? null) !== JSON.stringify(params ?? null))
           throw Object.assign(new Error("工具调用 ID 对应的输入已变化"), { status: 409 });
       }
       if (previous?.status === "completed") return parseStoredResult(previous.resultJson);
-      if (previous?.status === "started" && previous.sideEffect) {
+      if (previous?.status === "started" && previous.sideEffect && sideEffect) {
         recordToolCallFinish(toolCallId, "needsReview");
         throw Object.assign(new Error("副作用结果未知，需人工核对，不会重播"), { code: "AGENT_NO_REPLAY", status: 409 });
       }
-      if (previous?.status === "needsReview" || previous?.status === "skipped")
+      if (sideEffect && (previous?.status === "needsReview" || previous?.status === "skipped"))
         throw Object.assign(new Error("该副作用步骤已核对，不会重新执行"), { code: "AGENT_NO_REPLAY", status: 409 });
       assertBackgroundToolAllowed(tool.name, { canvasAttached: ctx.canvasAttached });
-      const sideEffect = isSideEffectTool(tool.name);
       activeToolCalls.add(key);
       let started = false;
       try {
