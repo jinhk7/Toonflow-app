@@ -309,10 +309,11 @@ export function requiresToolAuthorization(name: string, args?: unknown, context?
   if (readOnlyTools.has(name)) return false;
   if (classifyToolExecutionMode(name) !== "canvas") return true;
   // 审批与防重播分别判断：本地修改免逐次审批，执行结果未知时仍需核对。
-  if (name !== "nodeTools" && !name.startsWith("node:")) return false;
+  if (name.startsWith("node:")) return true;
+  if (name !== "nodeTools") return false;
   const input = getToolCallInput(args);
   if (!input || typeof input !== "object" || Array.isArray(input) || !("nodeId" in input)) return true;
-  const nodeToolName = name === "nodeTools" && "name" in input ? input.name : name;
+  const nodeToolName = "name" in input ? input.name : undefined;
   return typeof nodeToolName !== "string" || !isBuiltinNodeTool(input.nodeId, nodeToolName, context);
 }
 

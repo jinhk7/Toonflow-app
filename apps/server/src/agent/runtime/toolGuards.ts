@@ -40,7 +40,7 @@ function parseStoredResult(resultJson: string | null): AgentToolResult<unknown> 
   }
 }
 async function nodeToolContext(toolName: string, args: unknown, context: ToolGuardContext, signal?: AbortSignal): Promise<ToolGuardContext & { nodeRevision?: string }> {
-  if (toolName !== "nodeTools" && !toolName.startsWith("node:")) return context;
+  if (toolName !== "nodeTools") return context;
   if (!context.canvas || !args || typeof args !== "object" || Array.isArray(args) || !("nodeId" in args) || typeof args.nodeId !== "string") return context;
   const name = toolName === "nodeTools" && "name" in args ? args.name : toolName;
   if (typeof name !== "string") return context;
@@ -132,7 +132,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
         recordToolCallStart(ctx.runId, toolCallId, tool.name, authorizationInput, sideEffect, needsAuthorization ? "pendingAuthorization" : "started");
         if (needsAuthorization) requireSideEffectAuthorization(ctx.runId, tool.name, authorizationInput, toolCallId, context);
         started = true;
-        const input = tool.name === "nodeTools" && context.nodeRevision
+        const input = tool.name === "nodeTools" && context.nodeRevision && params && typeof params === "object" && !Array.isArray(params)
           ? { ...params, expectedNodeRevision: context.nodeRevision } : params;
         const result = await execute(toolCallId, input, signal, onUpdate, extensionCtx);
         recordToolCallFinish(toolCallId, "completed", result);
