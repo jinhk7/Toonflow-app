@@ -106,7 +106,8 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       if (ctx.runControl?.shouldPauseBeforeStep()) {
         throw Object.assign(new Error("运行已暂停"), { code: "AGENT_PAUSED", status: 409 });
       }
-      const sideEffect = isSideEffectTool(tool.name);
+      const toolContext = { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ execute }) };
+      const sideEffect = isSideEffectTool(tool.name, toolContext);
       const key = ctx.runId + ":" + toolCallId;
       if (activeToolCalls.has(key)) throw Object.assign(new Error("工具调用仍在执行，不能重入"), { status: 409 });
 
@@ -128,7 +129,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       activeToolCalls.add(key);
       let started = false;
       try {
-        const context = await nodeToolContext(tool.name, params, { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ execute }) }, signal);
+        const context = await nodeToolContext(tool.name, params, toolContext, signal);
         const needsAuthorization = requiresToolAuthorization(tool.name, params, context);
         const authorizationInput = await scopedInput(tool.name, params, ctx, needsAuthorization, context.nodeRevision);
         recordToolCallStart(ctx.runId, toolCallId, tool.name, authorizationInput, sideEffect, needsAuthorization ? "pendingAuthorization" : "started");

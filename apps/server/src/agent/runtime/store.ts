@@ -295,20 +295,22 @@ export function getToolCallRecord(toolCallId: string) {
   } | undefined;
 }
 
-const readOnlyTools = new Set(["read", "ls", "report", "skill", "question", "getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "getNodeTools", "selectNodes", "fitCanvas"]);
+const readOnlyTools = new Set(["read", "ls", "report", "skill", "question"]);
+const readOnlyCanvasTools = new Set(["getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "getNodeTools", "selectNodes", "fitCanvas"]);
 export function getToolCallInput(value: unknown): unknown {
   if (value && typeof value === "object" && "args" in value && "canvasId" in value && "canvasPath" in value) return value.args;
   return value;
 }
 
-export function isSideEffectTool(name: string) {
-  return !readOnlyTools.has(name);
+export function isSideEffectTool(name: string, context?: NodeToolContext) {
+  return !readOnlyTools.has(name) && !(readOnlyCanvasTools.has(name) && context?.builtinCanvasTool);
 }
 
 export function requiresToolAuthorization(name: string, args?: unknown, context?: NodeToolContext) {
   if (readOnlyTools.has(name)) return false;
   if (classifyToolExecutionMode(name) !== "canvas") return true;
   if (!context?.builtinCanvasTool) return true;
+  if (readOnlyCanvasTools.has(name)) return false;
   // 审批与防重播分别判断：本地修改免逐次审批，执行结果未知时仍需核对。
   if (name.startsWith("node:")) return true;
   if (name !== "nodeTools") return false;
