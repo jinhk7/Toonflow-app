@@ -297,9 +297,17 @@ export function getToolCallRecord(toolCallId: string) {
 
 const readOnlyTools = new Set(["read", "ls", "report", "skill", "question"]);
 const readOnlyCanvasTools = new Set(["getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "getNodeTools", "selectNodes", "fitCanvas"]);
+function isScopedToolInput(value: unknown): value is { args: unknown; canvasId: string; canvasPath: string; nodeRevision?: unknown } {
+  return !!value && typeof value === "object" && !Array.isArray(value) && "args" in value
+    && "canvasId" in value && typeof value.canvasId === "string" && !!value.canvasId
+    && "canvasPath" in value && typeof value.canvasPath === "string" && !!value.canvasPath
+    && "nodes" in value && !!value.nodes && typeof value.nodes === "object" && !Array.isArray(value.nodes)
+    && "edges" in value && !!value.edges && typeof value.edges === "object" && !Array.isArray(value.edges)
+    && "outputs" in value && !!value.outputs && typeof value.outputs === "object" && !Array.isArray(value.outputs);
+}
+
 export function getToolCallInput(value: unknown): unknown {
-  if (value && typeof value === "object" && "args" in value && "canvasId" in value && "canvasPath" in value) return value.args;
-  return value;
+  return isScopedToolInput(value) ? value.args : value;
 }
 
 export function isSideEffectTool(name: string, context?: NodeToolContext) {
@@ -321,12 +329,7 @@ export function requiresToolAuthorization(name: string, args?: unknown, context?
 }
 
 function storedToolContext(run: AgentRunRecord | undefined, args: unknown): NodeToolContext | undefined {
-  if (!run || !args || typeof args !== "object" || Array.isArray(args) || !("args" in args)
-    || !("canvasId" in args) || typeof args.canvasId !== "string" || !args.canvasId
-    || !("canvasPath" in args) || typeof args.canvasPath !== "string" || !args.canvasPath
-    || !("nodes" in args) || !args.nodes || typeof args.nodes !== "object" || Array.isArray(args.nodes)
-    || !("edges" in args) || !args.edges || typeof args.edges !== "object" || Array.isArray(args.edges)
-    || !("outputs" in args) || !args.outputs || typeof args.outputs !== "object" || Array.isArray(args.outputs)) return;
+  if (!run || !isScopedToolInput(args)) return;
   return { cwd: run.cwd, canvasPath: args.canvasPath,
     nodeRevision: "nodeRevision" in args && typeof args.nodeRevision === "string" ? args.nodeRevision : undefined };
 }
