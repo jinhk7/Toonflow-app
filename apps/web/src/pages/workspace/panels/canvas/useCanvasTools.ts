@@ -112,11 +112,14 @@ export function useCanvasTools(options: {
 
   async function execute(request: CanvasToolCall, signal: AbortSignal, canvasId: string): Promise<unknown> {
     signal.throwIfAborted();
-    if (isCanvasRead(request.name)) {
+    const readsCanvas = isCanvasRead(request.name);
+    if (readsCanvas) {
       await nextTick();
       signal.throwIfAborted();
-      return readCanvas(request, canvasId, signal);
     }
+    if ((request.name === "getNodeTools" || request.name === "nodeTools") && request.args.expectedCanvasId !== undefined
+      && request.args.expectedCanvasId !== options.getCanvasBinding().id) throw new Error("画布已切换，请重新查询节点函数");
+    if (readsCanvas) return readCanvas(request, canvasId, signal);
     switch (request.name) {
       case "addCanvas": {
         const { name } = canvasSchemas.addCanvas.parse(request.args);

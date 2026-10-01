@@ -46,7 +46,7 @@ async function nodeToolContext(toolName: string, args: unknown, context: ToolGua
   if (!context.canvas || !args || typeof args !== "object" || Array.isArray(args) || !("nodeId" in args) || typeof args.nodeId !== "string") return context;
   const name = toolName === "nodeTools" && "name" in args ? args.name : toolName;
   if (typeof name !== "string") return context;
-  const result = await context.canvas.call({ name: "getNodeTools", args: { nodeIds: [args.nodeId], names: [name] } }, signal);
+  const result = await context.canvas.call({ name: "getNodeTools", args: { nodeIds: [args.nodeId], names: [name], expectedCanvasId: context.canvasPath } }, signal);
   if (!result || typeof result !== "object" || !("nodeTools" in result) || !Array.isArray(result.nodeTools)) return context;
   const tools = result.nodeTools.filter(tool => tool && typeof tool === "object" && tool.nodeId === args.nodeId && tool.name === name);
   return { ...context, nodeRevision: tools.length === 1 && typeof tools[0].nodeRevision === "string" ? tools[0].nodeRevision : undefined };
@@ -132,12 +132,15 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       try {
         const context = await nodeToolContext(tool.name, params, toolContext, signal);
         const needsAuthorization = requiresToolAuthorization(tool.name, params, context);
-        const authorizationInput = await scopedInput(tool.name, params, ctx, needsAuthorization, context.nodeRevision);
+        const authorizationInput = await scopedInput(tool.name, params, context, needsAuthorization, context.nodeRevision);
+        if (classifyToolExecutionMode(tool.name) === "canvas" && ctx.canvas?.id !== context.canvasPath) {
+          throw Object.assign(new Error("画布已切换，请重新执行操作"), { status: 409 });
+        }
         recordToolCallStart(ctx.runId, toolCallId, tool.name, authorizationInput, sideEffect, needsAuthorization ? "pendingAuthorization" : "started");
         if (needsAuthorization) requireSideEffectAuthorization(ctx.runId, tool.name, authorizationInput, toolCallId, context);
         started = true;
-        const input = tool.name === "nodeTools" && context.nodeRevision && params && typeof params === "object" && !Array.isArray(params)
-          ? { ...params, expectedNodeRevision: context.nodeRevision } : params;
+        const input = tool.name === "nodeTools" && params && typeof params === "object" && !Array.isArray(params)
+          ? { ...params, expectedCanvasId: context.canvasPath, ...(context.nodeRevision ? { expectedNodeRevision: context.nodeRevision } : {}) } : params;
         const result = await execute(toolCallId, input, signal, onUpdate, extensionCtx);
         recordToolCallFinish(toolCallId, "completed", result);
         if (["addCanvas", "switchCanvas", "renameCanvas"].includes(tool.name)) {
