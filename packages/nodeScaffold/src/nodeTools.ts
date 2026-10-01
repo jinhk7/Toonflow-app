@@ -39,6 +39,8 @@ const mapSize = Object.getOwnPropertyDescriptor(Map.prototype, "size")!.get!;
 const setConstructor = Set;
 const setHas = Set.prototype.has;
 const promiseConstructor = Promise;
+const promiseResolve = Promise.resolve;
+const promiseThen = Promise.prototype.then;
 
 // 共享 Vue Flow 实例上的注册表供各 UMD 访问，不进入画布 JSON。
 const nodeToolsKey = Symbol.for("toonflow.nodeTools");
@@ -182,7 +184,8 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
             if (expectedNodeRevision !== undefined && (!source || source.nodeId !== nodeId || source.name !== name || source.execute !== execute
               || entryNodeId !== nodeId || entryName !== name || resolveNodeRevision?.(source.component) !== expectedNodeRevision))
               throw new Error("节点脚本版本已变化或无法确认，请重新查询节点函数");
-            resolve(apply(execute, entry, [args, { signal: callSignal }]));
+            const pending = apply(promiseResolve, promiseConstructor, [apply(execute, entry, [args, { signal: callSignal }])]);
+            apply(promiseThen, pending, [resolve, reject]);
           } catch (error) { reject(error); }
         });
         callSignal.throwIfAborted();
