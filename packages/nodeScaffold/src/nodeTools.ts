@@ -15,6 +15,8 @@ export interface NodeToolDefinition<Schema extends z.ZodType = z.ZodType> {
 
 type RegisteredNodeTool = NodeToolInfo & Pick<NodeToolDefinition, "execute"> & { component?: object };
 type NodeToolsIndex = { nodes: Map<string, Map<string, RegisteredNodeTool>>; version: number };
+// 来源只存宿主闭包；复制共享条目不能复制注册证明。
+const nodeToolSources = new WeakMap<RegisteredNodeTool, { nodeId: string; name: RegisteredNodeTool["name"]; execute: RegisteredNodeTool["execute"]; component: object }>();
 
 // 共享 Vue Flow 实例上的注册表供各 UMD 访问，不进入画布 JSON。
 const nodeToolsKey = Symbol.for("toonflow.nodeTools");
@@ -45,6 +47,13 @@ function getRegistry(flow: ReturnType<typeof useVueFlow>) {
     Object.defineProperties(registry, {
       set: { value(this: Map<string, RegisteredNodeTool>, key: string, entry: RegisteredNodeTool) {
         const previous = this.get(key);
+        if (this === registry) {
+          const component = getCurrentInstance()?.type;
+          const { nodeId, name, execute } = entry;
+          if (component && key === `${nodeId}:${name}` && typeof execute === "function")
+            nodeToolSources.set(entry, { nodeId, name, execute, component });
+          else nodeToolSources.delete(entry);
+        }
         Map.prototype.set.call(this, key, entry);
         if (this === registry && previous !== entry) {
           if (previous) remove(previous);
@@ -91,7 +100,6 @@ export const nodeTools = {
     const key = `${nodeId}:${name}`;
     const entry: RegisteredNodeTool = {
       nodeId, name, description: definition.description.trim(),
-      component: getCurrentInstance()?.type,
       parameters,
       async execute(args, context) {
         const parsed = await definition.parameters.parseAsync(args);
@@ -117,8 +125,11 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
       if (!node) continue;
       for (const entry of index.nodes.get(nodeId)?.values() ?? []) {
         if (nameSet && !nameSet.has(entry.name)) continue;
-        const { execute: _execute, component, ...info } = entry;
-        yield { ...info, nodeLabel: String(node.data.label ?? node.label ?? nodeId), nodeRevision: resolveNodeRevision?.(component) };
+        const { execute, component: _component, ...info } = entry;
+        const source = nodeToolSources.get(entry);
+        const nodeRevision = source && source.nodeId === nodeId && source.nodeId === info.nodeId && source.name === info.name && source.execute === execute
+          ? resolveNodeRevision?.(source.component) : undefined;
+        yield { ...info, nodeLabel: String(node.data.label ?? node.label ?? nodeId), nodeRevision };
       }
     }
   }
@@ -133,6 +144,8 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
       const key = `${nodeId}:${name}`;
       const entry = registry.get(key);
       if (!entry) throw new Error(`节点未注册函数 ${name}，请先通过 getNodeTools 查询可用节点函数`);
+      const { nodeId: entryNodeId, name: entryName, execute } = entry;
+      const source = nodeToolSources.get(entry);
       if (!flow.findNode(nodeId)) throw new Error("节点函数已卸载或不属于本轮画布");
       let cancel: () => void = () => {};
       try {
@@ -140,9 +153,10 @@ export function useNodeToolsContext(resolveNodeRevision?: (component?: object) =
           Promise.resolve().then(() => {
             callSignal.throwIfAborted();
             if (registry.get(key) !== entry || !flow.findNode(nodeId)) throw new Error("节点函数已卸载或不属于本轮画布");
-            if (expectedNodeRevision !== undefined && resolveNodeRevision?.(entry.component) !== expectedNodeRevision)
+            if (expectedNodeRevision !== undefined && (!source || source.nodeId !== nodeId || source.name !== name || source.execute !== execute
+              || entryNodeId !== nodeId || entryName !== name || resolveNodeRevision?.(source.component) !== expectedNodeRevision))
               throw new Error("节点脚本版本已变化或无法确认，请重新查询节点函数");
-            return entry.execute(args, { signal: callSignal });
+            return execute.call(entry, args, { signal: callSignal });
           }),
           new Promise<never>((_resolve, reject) => {
             cancel = () => reject(callSignal.reason);
