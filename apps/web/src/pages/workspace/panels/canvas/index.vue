@@ -145,7 +145,7 @@ import {
 import { Background } from "@vue-flow/background";
 import { useCanvasTools } from "./useCanvasTools";
 import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
-import { getLoadedNodeRevision, initializeNodeHost, loadNodeComponent } from "./loadNodeComponent";
+import { getLoadedNodeRevision, initializeNodeHost, loadNodeComponent, markUntrustedNodeRealm } from "./loadNodeComponent";
 import { useCanvasHistory } from "./useCanvasHistory";
 import { copyNodeToClipboard, nodeClipboardCommand, readClipboardNode } from "./nodeClipboard";
 import { readClipboardText } from "@/lib/clipboard";
@@ -951,12 +951,15 @@ provide("reloadRemoteNode", (type: string) => {
   return loadNode(name, `/api/nodes/files?name=${name}`, true);
 });
 
-async function loadNode(name: string, url: string, force = false, revision?: string): Promise<void> {
+async function loadNode(name: string, url: string, force = false, revision?: string, builtin = false): Promise<void> {
   if (!revision) {
-    const { data } = await axios.get<{ code: number; data: { name: string; url: string; revision?: string }[] }>("/api/nodes/get", { headers: { "Cache-Control": "no-cache" } });
-    revision = data.code === 200 && Array.isArray(data.data) ? data.data.find(node => node.name === name && node.url === url)?.revision : undefined;
+    const { data } = await axios.get<{ code: number; data: { name: string; url: string; revision?: string; builtin?: boolean }[] }>("/api/nodes/get", { headers: { "Cache-Control": "no-cache" } });
+    const node = data.code === 200 && Array.isArray(data.data) ? data.data.find(node => node.name === name && node.url === url) : undefined;
+    revision = node?.revision;
+    builtin = node?.builtin === true;
   }
   if (!revision || !/^[a-f0-9]{64}$/.test(revision)) throw new Error("节点脚本版本无效");
+  if (builtin !== true) markUntrustedNodeRealm();
   const nodeType = `remote-${name}`;
   const signal = canvasController.signal;
   const pending = nodeLoads.get(nodeType);
@@ -977,7 +980,7 @@ async function loadNode(name: string, url: string, force = false, revision?: str
   }
   delete nodeErrors.value[nodeType];
   const expectedRevision = revision;
-  const nodeLoad = loadNodeComponent(name, url, expectedRevision, force)
+  const nodeLoad = loadNodeComponent(name, url, expectedRevision, force, builtin)
     .then((remoteNode) => {
       // 同类型节点共享组件，运行错误由每个节点自己的边界显示。
       nodeTypes.value = { ...nodeTypes.value, [nodeType]: markRaw(remoteNode) };
@@ -997,7 +1000,7 @@ async function loadRemoteNodes(reloadName?: string) {
   const signal = canvasController.signal;
   nodeListLoading.value = true;
   try {
-    const { data } = await axios.get<{ code: number; data: { name: string; displayName: string; url: string; revision: string; enabled?: boolean; config?: Record<string, unknown> }[] }>(
+    const { data } = await axios.get<{ code: number; data: { name: string; displayName: string; url: string; revision: string; builtin?: boolean; enabled?: boolean; config?: Record<string, unknown> }[] }>(
       "/api/nodes/get",
       { headers: { "Cache-Control": "no-cache" } }
     );
@@ -1022,8 +1025,7 @@ async function loadRemoteNodes(reloadName?: string) {
       enabledNodes.map(async (node) => {
         const nodeType = `remote-${node.name}`;
         try {
-          if (nodeTypes.value[nodeType] && !nodeErrors.value[nodeType] && !reloadNames.has(node.name) && getLoadedNodeRevision(nodeTypes.value[nodeType]) === node.revision) return;
-          await loadNode(node.name, node.url, reloadNames.has(node.name), node.revision);
+          await loadNode(node.name, node.url, reloadNames.has(node.name), node.revision, node.builtin === true);
         } catch (error) {
           console.error("加载远端节点失败", node, error);
           // 保存拒绝时旧组件仍可用，不从节点菜单中移除；脚本加载错误仍排除。

@@ -4,7 +4,7 @@ import axios from "axios";
 import formCreate from "@form-create/element-ui";
 import type { Component } from "vue";
 
-type ToolRenderer = { name: string; tools: string[]; url: string };
+type ToolRenderer = { name: string; tools: string[]; url: string; builtin?: boolean };
 const toolWindow = window as typeof window & {
   toonflowToolHost?: { vue: typeof vueRuntime; elementPlus: typeof elementPlusRuntime; axios: typeof axios; formCreate: typeof formCreate };
   toonflowToolViews?: Record<string, Record<string, Component>>;
@@ -13,7 +13,7 @@ toolWindow.toonflowToolHost = { vue: vueRuntime, elementPlus: elementPlusRuntime
 const componentLoads = new Map<string, Promise<Record<string, Component>>>();
 let rendererRequest: Promise<ToolRenderer[]> | undefined;
 
-export async function loadToolComponent(toolName: string): Promise<Component | undefined> {
+export async function loadToolComponent(toolName: string, beforeLoad?: (builtin: boolean) => void): Promise<Component | undefined> {
   // ACT: 只合并并发查询；新卡片重新查询安装状态，组件按内容版本复用。
   rendererRequest ??= axios.get<{ code: number; data: ToolRenderer[]; message?: string }>("/api/tools/renderers")
     .then(({ data }) => {
@@ -28,6 +28,7 @@ export async function loadToolComponent(toolName: string): Promise<Component | u
     !new RegExp(`^/api/tools/client\\?name=${renderer.name}&version=[a-f0-9]{64}$`).test(renderer.url)) {
     throw new Error("工具界面地址无效");
   }
+  beforeLoad?.(renderer.builtin === true);
   let pending = componentLoads.get(renderer.url);
   if (!pending) {
     pending = new Promise<Record<string, Component>>((resolve, reject) => {

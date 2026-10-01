@@ -30,6 +30,7 @@ import { loadToolComponent } from "@toonflow/tools-scaffold/client";
 import { IconCopy, IconTool } from "@tabler/icons-vue";
 import chatReasoning from "@tdesign-vue-next/chat/es/chat-reasoning";
 import type { AgentToolCall } from "@toonflow/server/agent/types";
+import { markUntrustedNodeRealm } from "@/pages/workspace/panels/canvas/loadNodeComponent";
 import messageMarkdown from "@/components/messageMarkdown.vue";
 
 const { tool, directory } = defineProps<{ tool: AgentToolCall; directory?: string }>();
@@ -43,7 +44,7 @@ watch(() => [tool.name, tool.question?.callId] as const, async ([name], _previou
   rendererError.value = "";
   if (name === "subAgent") return;
   try {
-    const component = await loadToolComponent(name);
+    const component = await loadToolComponent(name, builtin => { if (builtin !== true) markUntrustedNodeRealm(); });
     if (active) {
       renderer.value = component;
       if (!component && tool.status === "running" && tool.question?.callId) rendererError.value = "该工具未提供可用的交互组件";

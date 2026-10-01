@@ -19,15 +19,22 @@ Bun.plugin({
 });
 
 export const toolsDirectory = resolve(dirname(conf.path), "tools");
+const builtinToolHashes = new Map<string, string>();
 let builtinCanvas: { plugin: ToolPlugin; metadata: ToolMetadata; revision: string } | undefined;
 let builtinCanvasExecutions = new WeakSet<object>();
 
 export async function configureBuiltinCanvasTools(toolsRoot?: string) {
   builtinCanvas = undefined;
   builtinCanvasExecutions = new WeakSet<object>();
+  builtinToolHashes.clear();
   if (!toolsRoot) return;
   try {
-    builtinCanvas = await loadTool("canvas", await realpath(toolsRoot));
+    const root = await realpath(toolsRoot);
+    const files = await readdir(root, { withFileTypes: true });
+    const tools = await Promise.all(files.filter(file => file.isFile() && /^[a-z][a-zA-Z0-9]*\.tool\.js$/.test(file.name))
+      .map(file => readTool(file.name.slice(0, -8), root)));
+    for (const tool of tools) builtinToolHashes.set(tool.metadata.name, tool.revision);
+    builtinCanvas = await loadTool("canvas", root);
   } catch (error) {
     if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return;
     throw error;
@@ -96,10 +103,10 @@ export async function listTools() {
       const enabled = !files.some(entry => entry.name === `${name}.disabled`);
       try {
         const { metadata, revision } = await readTool(name);
-        return { ...metadata, enabled, config: getToolConfig(metadata), revision, loadError: "" };
+        return { ...metadata, enabled, config: getToolConfig(metadata), revision, builtin: revision === builtinToolHashes.get(name), loadError: "" };
       } catch (err) {
         const loadError = err instanceof Error ? err.message : "工具文件无法读取";
-        return { name, version: "", displayName: name, description: loadError, author: "", github: "", components: [], configRules: [], enabled, config: {}, revision: "", loadError };
+        return { name, version: "", displayName: name, description: loadError, author: "", github: "", components: [], configRules: [], enabled, config: {}, revision: "", builtin: false, loadError };
       }
     }));
 }

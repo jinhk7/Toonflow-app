@@ -49,6 +49,7 @@ const deleteExport = nodeExports.delete.bind(nodeExports);
 const forEachExport = nodeExports.forEach.bind(nodeExports);
 let namespace: NodeTypesObject = freezeObject(createObject(null));
 let nodeHost: NodeHost | undefined;
+let untrustedNodeRealm = false;
 
 const browserWindow = window as typeof window & { define?: unknown; module?: unknown; exports?: unknown };
 const ambientModules = ["define", "module", "exports"] as const;
@@ -97,10 +98,20 @@ export function getLoadedNodeRevision(component?: object | string) {
   return component && typeof component !== "string" ? getRevision(component) : undefined;
 }
 
-export function loadNodeComponent(name: string, url: string, revision: string, force = false): Promise<NodeComponent> {
+export function markUntrustedNodeRealm() {
+  // ACT: 自定义 UMD 能修改共享 Vue 实例；混用后的整页节点函数保持审批，刷新纯内置页面后恢复。
+  untrustedNodeRealm = true;
+}
+
+export function getTrustedNodeRevision(component?: object | string) {
+  return untrustedNodeRealm ? undefined : getLoadedNodeRevision(component);
+}
+
+export function loadNodeComponent(name: string, url: string, revision: string, force = false, builtin = false): Promise<NodeComponent> {
   if (!apply(regexpExec, revisionPattern, [revision])) return Promise.reject(new Error("节点脚本版本无效"));
+  if (builtin !== true) markUntrustedNodeRealm();
   const pending = getRequest(name);
-  if (pending) return pending.revision === revision ? pending.promise : pending.promise.catch(() => {}).then(() => loadNodeComponent(name, url, revision, force));
+  if (pending) return pending.revision === revision ? pending.promise : pending.promise.catch(() => {}).then(() => loadNodeComponent(name, url, revision, force, builtin));
   const key = `${name}:${revision}`;
   const cached = getComponent(key);
   if (!force && cached && (typeof cached === "object" || typeof cached === "function")) {

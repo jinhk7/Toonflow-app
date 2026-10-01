@@ -1,5 +1,5 @@
 import { lstat, readFile } from "node:fs/promises";
-import { closeSync, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, readdirSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { z } from "zod";
@@ -51,13 +51,14 @@ function readTrustFile(root: string, path: string, limit: number) {
 export function configureBuiltinNodes(nodesRoot?: string) {
   builtinNodeHashes.clear();
   if (!nodesRoot) return;
-  let root: string;
-  try { root = realpathSync(nodesRoot); }
-  catch { return; }
-  for (const type of builtinNodeTools.keys()) {
-    const content = readTrustFile(root, `${type}.umd.js`, nodePackageLimit);
-    if (content) builtinNodeHashes.set(type, createHash("sha256").update(content).digest("hex"));
-  }
+  try {
+    const root = realpathSync(nodesRoot);
+    for (const file of readdirSync(root, { withFileTypes: true })) {
+      if (!file.isFile() || !/^[a-z][a-zA-Z0-9]*\.umd\.js$/.test(file.name)) continue;
+      const content = readTrustFile(root, file.name, nodePackageLimit);
+      if (content) builtinNodeHashes.set(file.name.slice(0, -7), createHash("sha256").update(content).digest("hex"));
+    }
+  } catch { builtinNodeHashes.clear(); }
 }
 
 export function isBuiltinNodeTool(nodeId: unknown, name: string, context?: NodeToolContext) {
@@ -94,6 +95,7 @@ export async function readNode(name: string) {
   // ACT: 当前整包读取元数据和计算版本，内存开销随节点总体积增长；包变大时改为流式计算版本并只读首行元数据。
   const content = await readFile(path);
   const source = content.toString("utf8");
+  const revision = createHash("sha256").update(content).digest("hex");
   let metadata: Record<string, unknown> = {};
   try {
     const header = source.match(/^\/\*! toonflowNode:([^\r\n]*) \*\/(?:\r?\n|$)/)?.[1];
@@ -111,7 +113,8 @@ export async function readNode(name: string) {
   if (!rules.success) throw Object.assign(new Error("节点配置表单规则无效，请重新构建节点"), { status: 400 });
   return {
     name,
-    revision: createHash("sha256").update(content).digest("hex"),
+    revision,
+    builtin: revision === builtinNodeHashes.get(name),
     displayName: typeof metadata.displayName === "string" && metadata.displayName.trim() ? metadata.displayName : name,
     version: typeof metadata.version === "string" ? metadata.version.trim() : "",
     author: typeof metadata.author === "string" ? metadata.author : "",
