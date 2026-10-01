@@ -4,6 +4,7 @@ import { useNodeEvent, useNodeToolsContext, validateConnection } from "@toonflow
 import { canvasSchemas, type CanvasContext, type CanvasToolCall } from "@toonflow/tool-canvas/runtime";
 import { arrangeCanvas } from "./arrangeCanvas";
 import { canvasEdgeSummary, canvasNodeSummary, createCanvasQueries, isCanvasRead } from "./canvasQueries";
+import { getTrustedNodeRevision } from "./loadNodeComponent";
 
 export function useCanvasTools(options: {
   availableNodes: Ref<{ type: string; label: string }[]>;
@@ -18,7 +19,7 @@ export function useCanvasTools(options: {
   resolveCanvasContext?(id: string): CanvasContext | undefined;
 }) {
   const flow = useVueFlow();
-  const getNodeTools = useNodeToolsContext();
+  const getNodeTools = useNodeToolsContext(getTrustedNodeRevision);
   let nodeRevision = 0;
   let edgeRevision = 0;
   // 只跟踪列表结构，不深读节点 data；批量更新合并到同一 tick。
@@ -58,7 +59,6 @@ export function useCanvasTools(options: {
     let redirected: CanvasContext | undefined;
     return {
       get id() { return redirected?.id ?? options.getCanvasBinding().id; },
-      // 函数定义通过 getNodeTools 按需发现，初始化消息不携带节点清单。
       tools: [],
       getNodeLabel(nodeId) {
         if (redirected) return redirected.getNodeLabel?.(nodeId);
@@ -112,11 +112,14 @@ export function useCanvasTools(options: {
 
   async function execute(request: CanvasToolCall, signal: AbortSignal, canvasId: string): Promise<unknown> {
     signal.throwIfAborted();
-    if (isCanvasRead(request.name)) {
+    const readsCanvas = isCanvasRead(request.name);
+    if (readsCanvas) {
       await nextTick();
       signal.throwIfAborted();
-      return readCanvas(request, canvasId, signal);
     }
+    if ((request.name === "getNodeTools" || request.name === "nodeTools") && request.args.expectedCanvasId !== undefined
+      && request.args.expectedCanvasId !== options.getCanvasBinding().id) throw new Error("画布已切换，请重新查询节点函数");
+    if (readsCanvas) return readCanvas(request, canvasId, signal);
     switch (request.name) {
       case "addCanvas": {
         const { name } = canvasSchemas.addCanvas.parse(request.args);

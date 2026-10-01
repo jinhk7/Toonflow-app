@@ -38,6 +38,7 @@ export interface NodeToolInfo {
   nodeId: string;
   name: `node:${string}`;
   nodeLabel?: string;
+  nodeRevision?: string;
   description: string;
   parameters: Record<string, unknown>;
 }
@@ -46,6 +47,7 @@ export interface NodeToolCall {
   nodeId: string;
   name: `node:${string}`;
   args: Record<string, unknown>;
+  expectedNodeRevision?: string;
 }
 
 export interface NodeToolsContext {

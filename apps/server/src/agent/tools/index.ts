@@ -9,8 +9,27 @@ import {
 import type { CanvasContext, QuestionContext, ToolContext } from "@toonflow/tools-scaffold/runtime";
 import conf from "@/utils/conf";
 import { isWithin, resolveWorkspacePath, writeWorkspaceFile, lockWorkspaceFiles, assertNoManagedGraph } from "@/utils/workspace/files";
-import { listTools, loadTool, validateToolConfig } from "@/utils/plugins/tools";
+import { createPluginTools, listTools } from "@/utils/plugins/tools";
 import { createSkillContext } from "@/agent/skills";
+
+const apply = Reflect.apply;
+const freeze = Object.freeze;
+const clone = structuredClone;
+
+function createCanvasView(canvas?: CanvasContext): CanvasContext | undefined {
+  if (!canvas) return;
+  const call = canvas.call;
+  const getNodeLabel = canvas.getNodeLabel;
+  const tools = clone(canvas.tools);
+  for (let index = 0; index < tools.length; index++) freeze(tools[index]);
+  freeze(tools);
+  return freeze({
+    get id() { return canvas.id; },
+    tools,
+    getNodeLabel: getNodeLabel ? (nodeId: string) => apply(getNodeLabel, canvas, [nodeId]) : undefined,
+    call: (request: Parameters<CanvasContext["call"]>[0], signal?: AbortSignal) => apply(call, canvas, [request, signal]),
+  });
+}
 
 export function createAgentToolContext(cwd: string, config: Record<string, unknown> = {}, canvas?: CanvasContext, question?: QuestionContext): ToolContext {
   const skillsDirectory = join(dirname(conf.path), "skills");
@@ -30,7 +49,7 @@ export function createAgentToolContext(cwd: string, config: Record<string, unkno
     return submitAndWaitMediaJob(cwd, type, payload, { signal, idempotencyKey });
   };
   return {
-    cwd, config, resolvePath, writeFile, canvas, question, skills: createSkillContext(cwd),
+    cwd, config, resolvePath, writeFile, canvas: createCanvasView(canvas), question, skills: createSkillContext(cwd),
     ffmpeg: signal => createWorkspaceFfmpeg(cwd, signal),
     media: {
       listModels: listMediaModels,
@@ -49,9 +68,7 @@ export async function createAgentTools(cwd: string, canvas?: CanvasContext, ques
   for (const item of await listTools()) {
     if (!item.enabled) continue;
     if (item.loadError) throw new Error(`${item.displayName}：${item.loadError}`);
-    const { plugin, metadata } = await loadTool(item.name);
-    const config = validateToolConfig(plugin, item.config);
-    const definitions = await plugin.createTools({ ...context, config });
+    const { definitions, metadata } = await createPluginTools(item.name, { ...context, canvas: createCanvasView(context.canvas), config: item.config });
     for (const tool of definitions) {
       if (!tool.name || typeof tool.execute !== "function") throw new Error(`${item.displayName} 返回了无效的工具`);
       if (names.has(tool.name)) throw new Error(`工具名称重复：${tool.name}`);

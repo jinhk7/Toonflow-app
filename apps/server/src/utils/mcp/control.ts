@@ -10,6 +10,7 @@ export const controlStateSchema = z.object({
   projectList: z.array(z.object({ directory: z.string().max(4096), name: z.string().max(256), lastOpenedAt: z.number() })).max(1000),
   tools: z.array(z.object({
     nodeId: z.string().max(256), name: z.templateLiteral(["node:", z.string()]), nodeLabel: z.string().max(200).optional(),
+    nodeRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     description: z.string().max(4000), parameters: z.record(z.string(), z.json()),
   })).max(10000),
 }).passthrough();

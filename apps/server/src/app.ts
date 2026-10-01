@@ -34,6 +34,10 @@ export async function createApp({
   if (dataDirectory && toolsRoot)
     await initializePlugins(resolve(dataDirectory, "tools"), toolsRoot, /^[a-z][a-zA-Z0-9]*\.tool\.js$/, pluginRevision);
   if (dataDirectory && nodesRoot) await initializePlugins(resolve(dataDirectory, "nodes"), nodesRoot, /^[a-z][a-zA-Z0-9]*\.umd\.js$/, pluginRevision);
+  const { configureBuiltinCanvasTools } = await import("@/utils/plugins/tools");
+  await configureBuiltinCanvasTools(toolsRoot);
+  const { configureBuiltinNodes } = await import("@/utils/plugins/nodes");
+  configureBuiltinNodes(nodesRoot);
   // ACT: 供应方和技能可由用户编辑，只补首次安装，不随应用版本覆盖。
   if (dataDirectory && providersRoot)
     await initializePlugins(resolve(dataDirectory, "providers"), resolve(providersRoot, "media"), autoInstallProviders);

@@ -5,6 +5,9 @@ import type { AgentEvent } from "@/agent/runtime/types";
 type CanvasResult = { result?: unknown; error?: string };
 type PendingCall = { cwd: string; finish(response: CanvasResult): void };
 
+const find = Array.prototype.find;
+const apply = Reflect.apply;
+
 // ACT: 画布调用在运行存活期间持久等待；多进程部署需共享请求通道。
 const pendingCalls = new Map<string, PendingCall>();
 
@@ -19,11 +22,13 @@ export function createCanvasContext(
   let disposed = false;
   const context: CanvasContext = {
     ...canvas,
+    get id() { return canvas.id; },
+    set id(id: string) { canvas.id = id; },
     async call(request, signal) {
       const pending = queue.then(() => {
         if (disposed) throw new Error("画布调用所属对话已结束");
         signal?.throwIfAborted();
-        const operation = canvasOperations.find(item => item.name === request.name);
+        const operation = apply(find, canvasOperations, [(item: (typeof canvasOperations)[number]) => item.name === request.name]) as (typeof canvasOperations)[number] | undefined;
         if (!operation) throw new Error("画布操作不存在");
         const args = operation.parameters.parse(request.args);
         const callId = crypto.randomUUID();
@@ -34,7 +39,12 @@ export function createCanvasContext(
             clearTimeout(timer);
             signal?.removeEventListener("abort", abort);
             if (error !== undefined) reject(new Error(error || "画布调用失败"));
-            else resolve(result);
+            else {
+              if (operation.name === "addCanvas" || operation.name === "switchCanvas" || operation.name === "renameCanvas") {
+                context.id = result && typeof result === "object" && "id" in result && typeof result.id === "string" ? result.id : "";
+              }
+              resolve(result);
+            }
           };
           const abort = () => finish({ error: "画布调用已取消" });
           const timer = setTimeout(() => finish({ error: "画布调用超时，请确认画布仍然打开" }), 120000);

@@ -15,6 +15,7 @@ export default Router().post("/", validateFields({
       nodeId: z.string().min(1).max(256),
       name: z.string().max(101).regex(/^node:[a-z][a-zA-Z0-9]*$/),
       nodeLabel: z.string().max(200).optional(),
+      nodeRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
       description: z.string().max(4000),
       parameters: z.record(z.string(), z.json()).refine(value => value.type === "object", "函数参数必须是 object JSON Schema"),
     })).max(1000),
