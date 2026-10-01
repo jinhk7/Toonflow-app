@@ -19,6 +19,8 @@ export function createCanvasContext(
   let disposed = false;
   const context: CanvasContext = {
     ...canvas,
+    get id() { return canvas.id; },
+    set id(id: string) { canvas.id = id; },
     async call(request, signal) {
       const pending = queue.then(() => {
         if (disposed) throw new Error("画布调用所属对话已结束");
