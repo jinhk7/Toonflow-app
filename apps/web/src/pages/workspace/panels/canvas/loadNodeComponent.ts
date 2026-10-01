@@ -110,7 +110,7 @@ export function loadNodeComponent(name: string, url: string, revision: string, f
   // ACT: 同名节点只加载一份脚本，所有画布共享进行中的重载，避免互相清除全局导出。
   const request = new Promise<NodeComponent>((resolve, reject) => {
     let component: NodeComponent | undefined;
-    const script: HTMLScriptElement = apply(createElement, document, ["script"]);
+    const script = apply(createElement, document, ["script"]);
     let digest = "";
     for (let index = 0; index < revision.length; index += 2) digest += fromCharCode(parseHex(revision[index]! + revision[index + 1]!, 16));
     apply(setAttribute, script, ["src", force ? `${url}${url.includes("?") ? "&" : "?"}reload=${crypto.randomUUID()}` : url]);
