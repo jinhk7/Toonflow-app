@@ -140,11 +140,13 @@ function fillSection(section: EditorSection, graph?: WorkspaceGraph) {
 function models(section: EditorSection, field: EditorField): ModelChoice[] {
   const source = at(section.current, field.editor?.model?.sourcePath);
   const providerField = field.editor?.model?.providerField;
-  return Array.isArray(source) ? source.filter(item => item && (providerField ? typeof item[providerField] === "string" && typeof item[field.name] === "string" : typeof item[field.name] === "string" || typeof item.providerId === "string" && typeof item.modelId === "string")) : [];
+  return Array.isArray(source) ? source.filter(item => item && (typeof item.providerId === "string" && typeof item.modelId === "string" || typeof item[field.name] === "string" && (!providerField || typeof item[providerField] === "string"))) : [];
 }
 function modelOptionValue(model: ModelChoice, field: EditorField) {
   const providerField = field.editor?.model?.providerField;
-  return providerField ? JSON.stringify([model[providerField], model[field.name]]) : typeof model[field.name] === "string" ? model[field.name] : JSON.stringify([model.providerId, model.modelId]);
+  if (!providerField) return typeof model[field.name] === "string" ? model[field.name] : JSON.stringify([model.providerId, model.modelId]);
+  const standardModel = typeof model.providerId === "string" && typeof model.modelId === "string";
+  return JSON.stringify(standardModel ? [model.providerId, model.modelId] : [model[providerField], model[field.name]]);
 }
 function modelValue(section: EditorSection, field: EditorField) {
   const providerField = field.editor?.model?.providerField;

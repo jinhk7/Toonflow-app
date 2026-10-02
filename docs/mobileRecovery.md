@@ -63,7 +63,7 @@
 - `savedGraphEvidence.json`、`qaDraftEvidence.json`：保存结果和冲突保留的合成草稿。
 - `mobileVideoEditorFull.png`、`mobileAgentIndependent.png`、`desktopCanvasAndAgent.png`：实际页面截图。
 
-没有推送、创建 PR、合入、部署或重启生产；原工作区未提交改动未修改。隔离数据和证据保留用于复核，交付结束后关闭本次隔离服务及自建标签。
+初次本地交付没有推送或创建 PR。后按用户授权推送同一分支并创建草稿 PR9，当前仍未合入、部署或重启生产；原工作区未提交改动未修改。隔离数据和证据保留用于复核，交付结束后关闭本次隔离服务及自建标签。
 
 
 
@@ -76,7 +76,7 @@
 | 导演普通配置提交破坏 Custom 引用 | prompt 未变且未显式传 promptModel 时保留原结构；引用随来源连接调整 | directorReferenceFixEvidence.json |
 | 恢复草稿时 reader 首次失败，无法重试 | 草稿保留，提供核对入口，读取成功后可显示远端并选择接受版本 | mobileEditorRepairEvidence.json、reviewDomQaEvidence.json |
 | 插件目录缓存过期且没有变更通知 | 安装、配置、启停、卸载成功后发布持久 pluginsChanged；恢复和显式刷新核对目录 | pluginNotifyFixEvidence.json、pluginInstallFixEvidence.json、syncReviewFixEvidence.json、reviewDomQaEvidence.json |
-| 模型元数据被硬编码为 providerId/modelId | 按 providerField 和当前字段名定位模型与联动能力 | mobileMetadataDomFixEvidence.json |
+| 宿主模型记录字段与表单字段映射混用 | 标准 providerId/modelId 记录用于选项与能力关联，providerField 和当前字段名用于写回表单；保留旧自定义记录字段兼容 | mobileModelStandardRecordFixEvidence.json |
 | nullable boolean 被当字符串且原 null 丢失 | 布尔三态提交 true/false/null；其他联合类型和纯 null 使用 JSON，合法 null 保留 | mobileMetadataDomFixEvidence.json |
 | 多标签丢失回执时共享命令槽被覆盖或误删 | 命令按 commandId 分开保存并兼容旧槽；旧回执只结算自身凭据，不删除或自动推进其他标签的新草稿 | mobileEditorOwnerRepairEvidence.json、reviewDomQaEvidence.json |
 
@@ -93,8 +93,10 @@
 - CDP 真实网络断连与恢复后，任务进度仍恢复；只有原生 online 的场景读取一次任务快照及一次目录。额外注入 online 事件的竞争验证会取消旧恢复链，活跃订阅最终仍为 3，没有新增重复订阅。
 - 本轮未发送真实 Agent、模型或供应商请求；当前隔离服务 rejectedFetches 为 0。
 
-构建与检查：server routes/typecheck、Web 类型检查、完整 build:server、最终 Web 重建均实际通过，仅保留现有 chunk 提示。最终草稿修复后再次通过 Web 类型检查和构建，产物 mobileNodeDetail-BchS0scv.js。编辑器源码 SHA256 为 ee4164bf03773c7eccd595789d9c72a63af21086f4068f88d9056224839b3ff7。最新 mobileEditorImmutableRepairEvidence.json 的 13 组完整 Vue、正式临时 HTTP/SDK 与后端 CAS 验证全部通过。
+构建与检查：server routes/typecheck、Web 类型检查、完整 build:server、最终 Web 重建均实际通过，仅保留现有 chunk 提示。草稿修复阶段产物 mobileNodeDetail-BchS0scv.js，编辑器源码 SHA256 为 ee4164bf03773c7eccd595789d9c72a63af21086f4068f88d9056224839b3ff7；mobileEditorImmutableRepairEvidence.json 的 13 组完整 Vue、正式临时 HTTP/SDK 与后端 CAS 验证全部通过。后续模型映射修复只改两个模型选项 helper，Web 类型检查与构建再次通过，当前产物 mobileNodeDetail-MCxNQvRA.js，编辑器源码 SHA256 为 efcddb270a308039f62ae0b3ff6c422440e49f3f93d2ecc68e547bd0fc8d6923。
 
 生产备份已保存到主仓库 backup/pr9Deployment20261002T180532：data/build/work 共 1302 个文件逐 SHA256 核对一致，另含基线源码归档、Git 状态、原两个未提交文件和 stash 引用。主仓库仍为 PR8 基线，Agnes 配置与原修改未动。部署仍以同 Astra、Codex review 和最新 HEAD CI 三道门槛为前提。
 
 最终 Edge 双标签验证通过：A 的命令响应和 SDK 回执 GET 定向返回 503（真实命令已提交），B 冲突后 A 凭据仍在；A 重载恢复 B 新稿，旧回执删除已确认原快照而不改变 B 原版本。未接受新版本的保存仍冲突，显示远端后明确接受再保存成功，B 重载为 clean，独立快照为 0，原已保存草稿不复活。最新源码下 reader 取消后仍可核对，规范目录文件单独变化恢复、20 秒 idle 零 API、75% 实时进度更新均通过，活跃订阅最终为 3，外部 fetch 拒绝为 0；证据见 reviewDomQaEvidence.json。
+
+同 Astra 对 ddd56e5 的复审中，其余七项及保存时序、草稿原子清理、取消 loading 均通过，模型字段映射仍有一项 P2。前一轮 vendor/engine fixture 同时改写了模型记录字段，遗漏宿主标准返回值。本轮严格保留原输入 models=[{providerId:"p",modelId:"m1",sizes:["512"]},{providerId:"p",modelId:"m2",sizes:["1024"]}]，只将表单映射设为 vendor/engine、providerField="vendor"。完整 Vue SFC 与原服务端 validator/Zod 验证确认两个非 null 模型选项、原尺寸 512 回填、切换 m2 清除旧尺寸、选择 1024 后参数为 {vendor:"p",engine:"m2",size:"1024"}；原模型记录前后完全一致。标准内置字段、导演组合模型字段及旧自定义记录兼容验证也通过。390×844 真实 Edge 原生下拉及保存操作得到同样结果，捕获完整 CanvasCommand 并通过原 Zod；无网络错误或真实供应商请求，独立标签已关闭。证据见 mobileModelStandardRecordFixEvidence.json、mobileModelStandardRecordFix.png。此项 DOM 的元数据、读取响应和保存回执为定向合成响应，不代表真实第三方后端保存。PR9 保持 draft，待同 Astra 对新提交复验后继续既定审查流程。
