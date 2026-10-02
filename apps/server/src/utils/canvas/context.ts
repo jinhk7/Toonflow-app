@@ -17,7 +17,7 @@ import { readVersionedContent, writeVersionedContent, assertNoManagedResource } 
 import { acceptCanvasCommand, appendWorkspaceEvent, getCanvasCommand, getGraphWrite, listIncompleteCanvasCommands, requestDigest, updateCanvasCommand } from "@/utils/canvas/store";
 import { acceptNodeJob, activateNodeJob, getNodeJob, getNodeJobRequest, cancelNodeJob, waitForNodeJob } from "@/utils/jobs";
 import { arrangeGraph } from "@/utils/canvas/layout";
-import { captureNodeInputs, captureInputFile, type NodeInputSnapshot } from "@/utils/canvas/inputs";
+import { captureNodeInputs, captureInputFile, discardNodeInputs, pruneNodeInputs, type NodeInputSnapshot } from "@/utils/canvas/inputs";
 import { listAiModels, getConfiguredModel, readAiReferences, aiReferenceSchema } from "@/utils/ai";
 import { listMediaModels } from "@/utils/media/generation";
 import { acceptMediaJob, getMediaJob, getMediaJobByIdempotency, retryMediaJobCollection } from "@/utils/media/mediaJobs";
@@ -360,7 +360,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
           return structuredClone(frozen.inputs[handleId] ?? []);
         }
         await refresh();
-        return (await captureNodeInputs(cwd, canvasPath, requireGraph(), nodeId, revision)).inputs[handleId] ?? [];
+        return (await captureNodeInputs(cwd, canvasPath, requireGraph(), nodeId, revision, undefined, false)).inputs[handleId] ?? [];
       },
       async getModels(type) {
         if (type === "text") return listAiModels();
@@ -487,20 +487,22 @@ export async function createBackendCanvasContext(directory: string, target?: { i
     if (options.command || isCanvasRead(request.name)) return execute(request, command, signal);
     const previous = getCanvasCommand(cwd, command.commandId);
     if (!previous && request.name === "nodeTools" && !command.inputSnapshot) { await refresh(); command.inputSnapshot = await captureNodeInputs(cwd, canvasPath, requireGraph(), request.args.nodeId, request.args.expectedNodeRevision, request.args.name); }
-    if (!acceptCanvasCommand(command, identity)) {
-      const existing = getCanvasCommand(cwd, command.commandId)!;
-      if (existing.status === "completed") return existing.result;
-      throw Object.assign(new Error(existing.errorMessage ?? "命令仍在执行或等待核对"), { status: 409 });
-    }
-    updateCanvasCommand(cwd, { commandId: command.commandId, status: "running" });
     try {
-      const result = await execute(request, command, signal);
-      updateCanvasCommand(cwd, { commandId: command.commandId, status: "completed", result });
-      return result;
-    } catch (error) {
-      updateCanvasCommand(cwd, { commandId: command.commandId, status: signal.aborted ? "needsReview" : "failed", errorMessage: error instanceof Error ? error.message : "命令失败" });
-      throw error;
-    }
+      if (!acceptCanvasCommand(command, identity)) {
+        const existing = getCanvasCommand(cwd, command.commandId)!;
+        if (existing.status === "completed") return existing.result;
+        throw Object.assign(new Error(existing.errorMessage ?? "命令仍在执行或等待核对"), { status: 409 });
+      }
+      updateCanvasCommand(cwd, { commandId: command.commandId, status: "running" });
+      try {
+        const result = await execute(request, command, signal);
+        updateCanvasCommand(cwd, { commandId: command.commandId, status: "completed", result });
+        return result;
+      } catch (error) {
+        updateCanvasCommand(cwd, { commandId: command.commandId, status: signal.aborted ? "needsReview" : "failed", errorMessage: error instanceof Error ? error.message : "命令失败" });
+        throw error;
+      }
+    } finally { await discardNodeInputs(command.inputSnapshot); }
   }
 
   await refresh();
@@ -510,14 +512,16 @@ export async function createBackendCanvasContext(directory: string, target?: { i
       await refresh();
       signal.throwIfAborted();
       const snapshot = await captureNodeInputs(cwd, canvasPath, requireGraph(), nodeId, expectedNodeRevision, name);
-      // 权威正文不一定通过 readOutputs 暴露；沿用节点已声明的正文路径，避免执行时重新读最新文件。
-      for (const field of ["textPath", "modelPath"]) {
-        const path = snapshot.node.data[field];
-        if (typeof path === "string" && path && !snapshot.texts[path]) snapshot.texts[path] = await readVersionedContent(cwd, path);
-      }
-      signal.throwIfAborted();
-      capturedTools.set(snapshot, { canvasPath, nodeId, name });
-      return snapshot;
+      try {
+        // 权威正文不一定通过 readOutputs 暴露；沿用节点已声明的正文路径，避免执行时重新读最新文件。
+        for (const field of ["textPath", "modelPath"]) {
+          const path = snapshot.node.data[field];
+          if (typeof path === "string" && path && !snapshot.texts[path]) snapshot.texts[path] = await readVersionedContent(cwd, path);
+        }
+        signal.throwIfAborted();
+        capturedTools.set(snapshot, { canvasPath, nodeId, name });
+        return snapshot;
+      } catch (error) { await discardNodeInputs(snapshot); throw error; }
     },
     async executeWithNodeToolSnapshot(commandId, snapshot, callback) {
       const captured = capturedTools.get(snapshot);
@@ -562,7 +566,9 @@ export async function submitCanvasCommand(raw: CanvasCommand) {
     const args = canvasSchemas.nodeTools.parse(command.args);
     command.inputSnapshot = await captureNodeInputs(command.directory, command.canvasPath, await readGraph(path, command.directory), args.nodeId, args.expectedNodeRevision, args.name);
   }
-  if (acceptCanvasCommand(command, identity)) startCommand(command);
+  try {
+    if (acceptCanvasCommand(command, identity)) startCommand(command);
+  } finally { await discardNodeInputs(command.inputSnapshot); }
   return getCanvasCommand(command.directory, command.commandId)!;
 }
 
@@ -586,7 +592,7 @@ function startCommand(command: CanvasCommand) {
       try { appendWorkspaceEvent(command.directory, "graphChanged", { command: view }, { commandId: command.commandId }); }
       catch (notificationError) { console.error("命令状态已保存，通知暂不可用", notificationError); }
       return view;
-    } finally { running.delete(key); }
+    } finally { running.delete(key); await discardNodeInputs((command as BackendCommand).inputSnapshot); }
   })();
   running.set(key, promise);
   void promise.catch(error => console.error("后台命令状态持久化失败，请核对命令", command.commandId, error));
@@ -599,5 +605,9 @@ export async function ensureCanvasCommandsReady() {
     if (status === "accepted") startCommand(command);
     else updateCanvasCommand(command.directory, { commandId: command.commandId, status: "needsReview", errorMessage: "后端重启时命令已开始，请核对结果后继续" });
   }
+  await pruneNodeInputs(listIncompleteCanvasCommands().flatMap(({ command }) => {
+    const snapshot = (command as BackendCommand).inputSnapshot;
+    return snapshot ? [snapshot.directory] : [];
+  }));
   recovered = true;
 }

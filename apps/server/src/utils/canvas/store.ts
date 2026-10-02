@@ -91,6 +91,10 @@ export function listIncompleteCanvasCommands() {
     .map(row => ({ command: JSON.parse(row.requestJson) as CanvasCommand, status: row.status }));
 }
 
+export function hasPendingInputSnapshot(directory: string) {
+  return !!db().query("SELECT 1 FROM canvas_commands WHERE status IN ('accepted','running') AND json_extract(requestJson, '$.inputSnapshot.directory') = ? LIMIT 1").get(directory);
+}
+
 function insertWorkspaceEvent(directory: string, type: WorkspaceEvent["type"], payload: Record<string, unknown>, target: { commandId?: string; canvasId?: string; nodeId?: string } = {}) {
   const database = db();
   const event = { eventId: crypto.randomUUID(), directory, type, payload, ...target, createdAt: new Date().toISOString() };

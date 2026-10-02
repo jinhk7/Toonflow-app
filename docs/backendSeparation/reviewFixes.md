@@ -90,6 +90,18 @@ UI 工作包的隔离验证证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowU
 
 textNode 的 Node/vue-tsc 类型检查与正式 Vite 构建通过。此次未改后端、SDK 或其他节点，待两项 UI 独立复审。
 
+## PR 8 首轮审查修复
+
+- 画布草稿在每次目录或画布切换时重新绑定，目标没有草稿时清空提示；恢复前和异步视口恢复后检查归属，异步保存结果也不能写入另一画布的草稿提示。兼容旧草稿格式。
+- 节点媒体输入副本在捕获失败、授权退出、命令终态和受理失败时清理。数据库中 accepted/running 命令引用的副本仍保留；启动回收孤立副本，并保护正在捕获的输入。临时 getInputs 不再复制媒体。清理限定为数据目录 nodeInputs 下的 UUID 普通目录，清理失败保留文件并记录错误，不改写已保存的命令结果。
+- jobs/cancel 校验并规范化 directory，再核对任务所属工作区；已有执行客户端已传此字段，无需改调用协议。
+
+临时工作区真实 Express/SQLite/文件验证：`C:\Users\jinhk\AppData\Local\Temp\toonflowPrReviewDRboaw\evidence.json`。验证复制、临时读取不复制、受理中保留、completed/failed/needsReview 后清理、孤立副本回收及复制中途失败清理。调用实际媒体输入快照函数，确认删除 nodeInputs 后独立媒体任务输入仍存在。实际 HTTP 跨目录取消返回 404 且原任务仍 accepted；缺目录返回 400；规范化后的本目录取消返回 200 并转 cancelled。
+
+实际 SFC 函数和 watch 配合 Vue refs 执行：`C:\Users\jinhk\AppData\Local\Temp\toonflowPrDraftWDgxrw\evidence.json`，覆盖 A 草稿→无草稿 B、返回缓存 A、另一目录同路径、旧格式草稿、错绑恢复拒绝、恢复 await 期间切换及本画布正常恢复。本轮是内存 Vue 验证，非新增 DOM 运行；前轮浏览器验证见 browserQa.md。初次验证夹具遗漏端口声明及源码 CRLF 规范化，补齐后通过，未因此修改生产逻辑。
+
+服务端 TypeScript、Node/vue-tsc 检查及服务端、Web 正式构建通过。未新增测试文件，未调用真实模型或修改原运行目录。
+
 ## 验证边界
 
 未调用真实模型、供应商或 R2，未做真实 Tailscale/物理锁屏验证；未部署或重启生产服务。原生桌面 `.hutch` SDK 与完整分发打包的既有边界不变。

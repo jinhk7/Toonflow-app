@@ -17,7 +17,7 @@ import { assertBackgroundToolAllowed, classifyToolExecutionMode, isReadOnlyServe
 import { readGraph } from "@/utils/workspace/graph";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
 import { isBuiltinCanvasTool } from "@/utils/plugins/tools";
-import type { NodeInputSnapshot } from "@/utils/canvas/inputs";
+import { discardNodeInputs, type NodeInputSnapshot } from "@/utils/canvas/inputs";
 import { requestDigest } from "@/utils/canvas/store";
 
 export type ToolGuardContext = {
@@ -169,10 +169,11 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       assertBackgroundToolAllowed(tool, { canvasAttached: ctx.canvasAttached });
       activeToolCalls.add(key);
       let started = false;
+      let inputSnapshot: NodeInputSnapshot | undefined;
       try {
         const context = await nodeToolContext(tool.name, params, toolContext, signal);
         const needsAuthorization = requiresToolAuthorization(tool.name, params, context);
-        const inputSnapshot = needsAuthorization ? await captureAuthorizedNodeInput(tool.name, params, context, signal) : undefined;
+        inputSnapshot = needsAuthorization ? await captureAuthorizedNodeInput(tool.name, params, context, signal) : undefined;
         const authorizationInput = await scopedInput(tool.name, params, context, needsAuthorization, context.nodeRevision, inputSnapshot);
         if (mode === "canvas" && ctx.canvas?.id !== context.canvasPath) {
           throw Object.assign(new Error("画布已切换，请重新执行操作"), { status: 409 });
@@ -195,7 +196,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       } catch (error) {
         if (started) recordToolCallFinish(toolCallId, sideEffect ? "needsReview" : "error", error instanceof Error ? error.message : String(error));
         throw error;
-      } finally { activeToolCalls.delete(key); }
+      } finally { activeToolCalls.delete(key); await discardNodeInputs(inputSnapshot); }
     },
   };
   originalTools.set(wrapped.execute, tool);

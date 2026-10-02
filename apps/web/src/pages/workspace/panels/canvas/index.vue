@@ -556,17 +556,22 @@ let saveCancelled = false;
 let changedWhilePaused = false;
 let saveRevision = 0;
 const graphSnapshots = new Map<string, WorkspaceGraph>();
-type CanvasDraft = { draftId: string; baseline: WorkspaceGraph; flow: Pick<WorkspaceGraph, "nodes" | "edges" | "viewport"> };
+type CanvasDraft = { draftId: string; directory: string; path: string; baseline: WorkspaceGraph; flow: Pick<WorkspaceGraph, "nodes" | "edges" | "viewport"> };
 const canvasDraft = ref<CanvasDraft>();
+function readCanvasDraft(directory: string, path: string) {
+  const draft = readWorkspaceDraft<CanvasDraft>(directory, path, "canvasGraph");
+  if (draft && Array.isArray(draft.flow?.nodes) && Array.isArray(draft.flow?.edges) && draft.baseline?.toonflowCanvas === true)
+    return { ...draft, directory, path };
+}
 function persistCanvasDraft(directory: string, path: string, baseline: WorkspaceGraph, snapshot = toObject()) {
-  const draft: CanvasDraft = { draftId: crypto.randomUUID(), baseline, flow: { nodes: snapshot.nodes as Node[], edges: snapshot.edges as Edge[], viewport: snapshot.viewport } };
+  const draft: CanvasDraft = { draftId: crypto.randomUUID(), directory, path, baseline, flow: { nodes: snapshot.nodes as Node[], edges: snapshot.edges as Edge[], viewport: snapshot.viewport } };
   saveWorkspaceDraft(directory, path, "canvasGraph", draft);
   return draft;
 }
 async function restoreCanvasDraft() {
   const draft = canvasDraft.value;
   const path = canvasId.value;
-  if (!draft || !path) return;
+  if (!draft || !path || draft.path !== path || draft.directory !== project.value?.directory) return;
   const paused = savePaused;
   savePaused = true;
   try {
@@ -574,6 +579,7 @@ async function restoreCanvasDraft() {
     flow.setEdges(JSON.parse(JSON.stringify(draft.flow.edges)));
     await flow.setViewport(draft.flow.viewport);
     await nextTick();
+    if (canvasId.value !== path || project.value?.directory !== draft.directory) return;
     graphSnapshots.set(path, JSON.parse(JSON.stringify(draft.baseline)));
   } finally { savePaused = paused; }
   scheduleCanvasSave();
@@ -585,10 +591,6 @@ async function exportCanvasDraft() {
   catch (error) { ElMessage.error(error instanceof Error ? error.message : "导出草稿失败"); }
 }
 function rememberGraph(path: string, graph: WorkspaceGraph) {
-  if (!graphSnapshots.has(path) && project.value?.directory) {
-    const draft = readWorkspaceDraft<CanvasDraft>(project.value.directory, path, "canvasGraph");
-    if (draft && Array.isArray(draft.flow?.nodes) && Array.isArray(draft.flow?.edges) && draft.baseline?.toonflowCanvas === true) canvasDraft.value = draft;
-  }
   // 保存基线必须与 Vue Flow 的可变节点数据隔离，否则修改 pending 会同时篡改基线而被漏写。
   graphSnapshots.set(path, JSON.parse(JSON.stringify(graph)) as WorkspaceGraph);
 }
@@ -689,13 +691,13 @@ const saveCanvas = debounce((directory: string, fileName: string) => {
       const draft = persistCanvasDraft(directory, fileName, baseline, flow);
       const updated = await useWorkspaceFiles(directory).saveGraph(fileName, baseline, { nodes: flow.nodes as WorkspaceGraph["nodes"], edges: flow.edges as WorkspaceGraph["edges"], viewport: flow.viewport });
       if (readWorkspaceDraft<CanvasDraft>(directory, fileName, "canvasGraph")?.draftId === draft.draftId) removeWorkspaceDraft(directory, fileName, "canvasGraph");
-      if (active) canvasDraft.value = undefined;
+      if (canvasId.value === fileName && project.value?.directory === directory) canvasDraft.value = undefined;
       rememberGraph(fileName, updated);
       if (canvasId.value === fileName && project.value?.directory === directory) mergeSavedGraph(flow, updated);
       saveError = undefined;
     } catch (err) {
       saveError = err;
-      if (active) canvasDraft.value = readWorkspaceDraft<CanvasDraft>(directory, fileName, "canvasGraph");
+      if (canvasId.value === fileName && project.value?.directory === directory) canvasDraft.value = readCanvasDraft(directory, fileName);
       ElMessage.error(
         axios.isAxiosError<{ message?: string }>(err)
           ? err.response?.data.message || "画布保存失败"
@@ -783,6 +785,7 @@ watch(() => [viewport.value.x, viewport.value.y, viewport.value.zoom], scheduleC
 watch(
   [() => project.value?.directory, canvasId],
   ([directory, fileName], [previousDirectory, previousFileName]) => {
+    canvasDraft.value = directory && fileName ? readCanvasDraft(directory, fileName) : undefined;
     if (directory !== previousDirectory) {
       workspaceController.abort(new Error("工作区已切换，本轮画布操作已停止"));
       workspaceController = new AbortController();
