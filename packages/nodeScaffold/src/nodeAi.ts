@@ -206,7 +206,7 @@ export function groupNodeModels<T extends Pick<NodeAiModel, "providerId" | "prov
 }
 
 async function readResult<T>(response: Response): Promise<T> {
-  const result = await response.json();
+  const result = await response.json() as { code: number; message?: string; data: T };
   if (!response.ok || result.code !== 200) throw new Error(result.message || `AI 请求失败（HTTP ${response.status}）`);
   return result.data;
 }

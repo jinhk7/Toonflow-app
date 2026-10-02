@@ -8,7 +8,7 @@
 - GET /api/workspaces/canvas/command/get：directory、commandId；用于接受响应丢失后的对账。
 - GET /api/workspaces/canvas/events：directory、afterSeq；application/x-ndjson，持久 WorkspaceEvent。断线不取消。
 - GET /api/workspaces/canvas/content：directory、path；返回 content、revision。
-- PUT /api/workspaces/canvas/content：directory、path、content、expectedRevision、commandId；CAS 写入，409 保留草稿。
+- PUT /api/workspaces/canvas/content/write：directory、path、content、expectedRevision、commandId；CAS 写入，409 保留草稿。读取/写入各一个路由文件，遵守仓库接口规范。
 - GET /api/nodes/get：保留原字段并增加 protocolVersion、executionRevision、stateVersion、handles、defaultData、actions、layoutSize、executionStatus。不可通过执行 Vue 获取这些数据。
 - POST /api/agent/accept：保留 /api/agent 的原输入，增加 clientMessageId；返回 runId、sessionFile、重复受理标记，再订阅既有 /api/agent/events/get。
 - GET /api/agent/accept/get：directory、clientMessageId；查询受理记录。
@@ -26,7 +26,11 @@ CanvasCommand name 沿用现有 canvasOperations。nodeTools 参数沿用 nodeId
 
 NodeExecutionDefinition 提供 name/stateVersion/handles/defaultData/layoutSize/actions，以及可选 initialize/remove/migrate/validateConnection。actions 的 Zod schema 和实际 execute 来自服务器加载模块。后端私有来源证明记录真实 handler，客户端描述不包含函数。
 
+可选 readOutputs(context) 返回后端从权威文件派生的输出，仅查询，不写状态。文本节点用此方法读取正文，保持 textPath/content.md 为唯一正文，不把全文重复写进 Graph。getInputs 由后端解析这些派生输出。UI不得自行构建权威输出。
+
 NodeExecutionContext 绑定 directory/canvasPath/node/commandId/revision；提供 readText/writeText、patchData/setOutput、输入值解析、配置和持久 runJob。执行不得依赖 Vue、DOM、当前页面或浏览器本地状态。重计算通过 runJob，不长时间持有 Graph 锁。
+
+内置 job kind：text 输入 {providerId,modelId,prompt,systemPrompt?,references?,path?,expectedRevision?}，结果 {text,path?,revision?}；media 输入 {mediaType,request,binding?}，request 为既有 MediaGenerationRequest，结果 GeneratedMedia[]；render 使用下列渲染契约。nodeId/canvasPath/pluginRevision 使用外层 NodeJobRequest 固定，不相信客户端额外伪造目标。自定义任务按后端 handler 注册发现。
 
 ## 作业与渲染
 

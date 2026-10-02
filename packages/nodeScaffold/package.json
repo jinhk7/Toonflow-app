@@ -7,6 +7,7 @@
     ".": "./index.ts",
     "./runtime": "./src/runtime.ts",
     "./execution": "./src/execution.ts",
+    "./inputValues": "./src/inputValues.ts",
     "./nodeSkeleton": "./src/nodeSkeleton.vue",
     "./connection": "./src/connection.ts",
     "./values": "./src/values.ts",

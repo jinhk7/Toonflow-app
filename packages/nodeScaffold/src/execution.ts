@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { NodeHandle } from "./connection";
-import type { NodeInputValue, NodeOutput } from "./values";
+import type { NodeInputValue, NodeOutput, NodeOutputs } from "./values";
+import type { NodeAiModel, NodeMediaModel, NodeMediaJobView } from "./nodeAi";
 
 export type CanvasCommand = {
   commandId: string;
@@ -80,14 +81,19 @@ export type NodeExecutionContext = {
   patchData(data: Record<string, unknown>): Promise<NodeExecutionSnapshot>;
   setOutput(slot: string, output: NodeOutput | null): Promise<void>;
   getInputs(handleId: string): Promise<NodeInputValue[]>;
+  getModels(type: "text" | "image" | "video" | "audio"): Promise<(NodeAiModel | NodeMediaModel)[]>;
   runJob(request: NodeJobRequest): Promise<NodeJobView>;
   getJob(jobId: string): Promise<NodeJobView | undefined>;
+  cancelJob(jobId: string): Promise<NodeJobView | undefined>;
+  getMediaJob(jobId: string): Promise<NodeMediaJobView | undefined>;
+  retryMediaCollection(jobId: string): Promise<NodeMediaJobView>;
   waitForJob(jobId: string): Promise<unknown>;
 };
 
 export type NodeExecutionAction<Schema extends z.ZodType = z.ZodType> = {
   name: string;
   description: string;
+  snapshotInputs?: boolean;
   parameters: Schema;
   execute(args: z.output<Schema>, context: NodeExecutionContext): unknown | Promise<unknown>;
 };
@@ -100,10 +106,11 @@ export type NodeExecutionDefinition = {
   defaultData: Record<string, unknown>;
   layoutSize: { width: number; height: number };
   actions: NodeExecutionAction[];
+  readOutputs?(context: NodeExecutionContext): Promise<NodeOutputs>;
   initialize?(context: NodeExecutionContext): Promise<void>;
   remove?(context: NodeExecutionContext): Promise<void>;
   migrate?(data: Record<string, unknown>, fromVersion: number): Record<string, unknown> | Promise<Record<string, unknown>>;
-  validateConnection?(request: { source: NodeExecutionSnapshot; sourceHandle: string; target: NodeExecutionSnapshot; targetHandle: string }): boolean;
+  validateConnection?(request: { source: NodeExecutionSnapshot; sourceHandle: string; target: NodeExecutionSnapshot; targetHandle: string; nodes?: NodeExecutionSnapshot[]; edges?: { source: string; sourceHandle?: string | null; target: string; targetHandle?: string | null }[] }): boolean;
 };
 
 export type NodeExecutionDescriptor = {
