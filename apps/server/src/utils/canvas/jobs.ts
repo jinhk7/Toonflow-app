@@ -16,6 +16,7 @@ const textInput = z.object({
   references: z.array(aiReferenceSchema).max(32).optional(), path: z.string().min(1).optional(),
   expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(), commandId: z.string().min(1),
   nodeId: z.string().optional(), canvasPath: z.string().optional(), canvasId: z.string().optional(),
+  publication: z.object({ path: z.string().min(1), nodeVersion: z.number().int().positive() }).optional(),
   nodeType: z.string().min(1).optional(), pluginRevision: z.string().min(1).optional(), configuredRevision: z.string().min(1),
   referenceContents: z.array(z.object({ dataType: z.enum(["STRING", "IMAGE", "VIDEO"]), value: z.string() })),
 }).refine(input => Boolean(input.nodeType) === Boolean(input.pluginRevision), "节点类型和执行版本必须同时提供");
@@ -62,7 +63,7 @@ export function registerBuiltinNodeJobHandlers() {
           const node = graph.nodes.find(item => item.id === input.nodeId);
           if (graph.toonflowGraph!.id !== input.canvasId || node?.type?.replace(/^remote-/, "") !== input.nodeType
             || node.data?.executionRevision !== input.pluginRevision || node.data?.generationJobId !== context.jobId
-            || node.data?.textPath !== input.path) {
+            || input.publication?.path !== input.path || graph.toonflowGraph!.nodes[input.nodeId] !== input.publication.nodeVersion) {
             throw Object.assign(new Error("文本目标节点或任务绑定已变化，生成结果保留供核对"), { code: "JOB_NEEDS_REVIEW" });
           }
         }

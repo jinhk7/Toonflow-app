@@ -304,7 +304,11 @@ export async function createBackendCanvasContext(directory: string, target?: { i
     const metadata = await readNode(nodeType(node.type));
     function jobForNode(jobId: string) {
       const job = getNodeJob(jobId);
-      return job?.directory === cwd && job.nodeId === nodeId && job.canvasPath === canvasPath ? job : undefined;
+      if (job?.directory !== cwd || job.nodeId !== nodeId || job.canvasPath !== canvasPath) return;
+      const request = getNodeJobRequest(jobId);
+      const host = request?.input.host as { canvasId?: unknown } | undefined;
+      const canvasId = request?.canvasId ?? request?.input.canvasId ?? host?.canvasId;
+      return canvasId === requireGraph().toonflowGraph!.id ? job : undefined;
     }
     function mediaForJob(jobId: string) {
       const local = getNodeJob(jobId);
@@ -371,7 +375,9 @@ export async function createBackendCanvasContext(directory: string, target?: { i
             if (reference.dataType === "STRING" || !frozen?.files[reference.value.url]) return [readAiReferences(cwd, [reference], signal).then(items => items[0]!)];
             return [readAiReferences(frozen.directory, [{ ...reference, value: { ...reference.value, url: frozen.files[reference.value.url]! } }], signal).then(items => items[0]!)];
           }));
-          input = { ...input, canvasId: current.toonflowGraph!.id, referenceContents: references, configuredRevision: requestDigest(getConfiguredModel(parsed.providerId, parsed.modelId)), ...(parsed.path ? { expectedRevision: request.input.expectedRevision ?? (await context.readText(parsed.path)).revision } : {}) };
+          // 发布目标由宿主固定，不依赖插件使用 textPath、documentPath 或其他字段存放路径。
+          input = { ...input, canvasId: current.toonflowGraph!.id, referenceContents: references, configuredRevision: requestDigest(getConfiguredModel(parsed.providerId, parsed.modelId)), publication: parsed.path ? { path: parsed.path, nodeVersion: node.version + 1 } : undefined,
+            ...(parsed.path ? { expectedRevision: request.input.expectedRevision ?? (await context.readText(parsed.path)).revision } : {}) };
         } else if (request.kind === "directorDraft" || request.kind === "render") {
           const loaded = await loadNodeExecution(nodeType(node.type), revision);
           const host: Record<string, unknown> = {
@@ -437,7 +443,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
           }
         }
         const deferStart = ["text", "directorDraft", "render"].includes(request.kind);
-        const job = await acceptNodeJob({ directory: cwd, commandId: jobCommandId, request: { ...request, input, pluginRevision: revision, nodeId, canvasPath }, deferStart });
+        const job = await acceptNodeJob({ directory: cwd, commandId: jobCommandId, request: { ...request, input, pluginRevision: revision, nodeId, canvasPath, canvasId: current.toonflowGraph!.id }, deferStart });
         try {
           if (request.kind === "text" || request.kind === "media" || request.kind === "directorDraft") await context.patchData({ generationJobId: job.jobId });
           else if (request.kind === "render") await context.patchData({ renderJobId: job.jobId });
@@ -454,7 +460,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
         const media = mediaForJob(jobId);
         if (!media) throw Object.assign(new Error("媒体任务不存在"), { status: 404 });
         const retried = await retryMediaJobCollection(media.jobId, cwd);
-        const job = await acceptNodeJob({ directory: cwd, commandId: `${command.commandId}:${nextStep()}`, request: { kind: "media", nodeId, canvasPath, pluginRevision: revision, input: { mediaJobId: media.jobId, nodeType: nodeType(node.type), pluginRevision: revision } } });
+        const job = await acceptNodeJob({ directory: cwd, commandId: `${command.commandId}:${nextStep()}`, request: { kind: "media", nodeId, canvasPath, canvasId: current.toonflowGraph!.id, pluginRevision: revision, input: { mediaJobId: media.jobId, nodeType: nodeType(node.type), pluginRevision: revision } } });
         await context.patchData({ generationJobId: job.jobId });
         return { ...retried, files: retried.files as never };
       },

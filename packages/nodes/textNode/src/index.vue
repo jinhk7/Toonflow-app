@@ -36,8 +36,9 @@
       </el-card>
     </template>
   </nodeSkeleton>
-  <div v-if="textSave?.state.error" class="saveStatus nodrag nopan" role="status">
+  <div v-if="textSave?.state.error || textSave?.state.storageError" class="saveStatus nodrag nopan" role="status">
     <span>{{ textSave.state.error }}</span>
+    <span v-if="textSave.state.storageError">{{ textSave.state.storageError }}</span>
     <el-button :loading="textSave.state.saving" @click="retryTextSave">对账并重试原保存</el-button>
     <el-button v-if="textSave.state.conflict" :disabled="textSave.state.saving" @click="resolveTextConflict">核对远端后保存草稿</el-button>
   </div>

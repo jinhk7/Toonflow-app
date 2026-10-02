@@ -11,19 +11,26 @@ export function createTextSave(options: {
   write(request: TextWrite): Promise<{ revision: string }>;
 }) {
   const key = `toonflow.textDraft.${JSON.stringify([options.directory, options.path])}`;
-  const state = reactive({ content: "", savedText: "", revision: "", dirty: false, saving: false, error: "", conflict: false, remote: undefined as TextSnapshot | undefined });
+  const state = reactive({ content: "", savedText: "", revision: "", dirty: false, saving: false, error: "", storageError: "", conflict: false, remote: undefined as TextSnapshot | undefined });
   // ACT: 保留一个待确认写入和最新草稿；先对账原命令，再使用确认版本保存后续编辑。
   let pending: TextWrite | undefined;
   let running: Promise<void> | undefined;
 
   function persist() {
-    if (!state.dirty && !pending) { localStorage.removeItem(key); return; }
-    localStorage.setItem(key, JSON.stringify({ content: state.content, revision: state.revision, pending, conflict: state.conflict } satisfies TextDraft));
+    try {
+      if (!state.dirty && !pending) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify({ content: state.content, revision: state.revision, pending, conflict: state.conflict } satisfies TextDraft));
+      state.storageError = "";
+    } catch {
+      state.storageError = state.dirty || pending ? "本地草稿存储不可用，未保存内容仅保留在当前页面，请完成后台保存后再关闭" : "正文已保存到后台，但本地草稿清理失败，请重试";
+    }
   }
   function load(snapshot: TextSnapshot) {
     state.content = state.savedText = snapshot.content;
     state.revision = snapshot.revision;
-    const raw = localStorage.getItem(key);
+    let raw: string | null;
+    try { raw = localStorage.getItem(key); state.storageError = ""; }
+    catch { state.storageError = "无法读取本地草稿，请重试；当前显示后台正文"; return; }
     if (!raw) return;
     const draft: TextDraft = JSON.parse(raw);
     if (!draft || typeof draft !== "object" || typeof draft.content !== "string" || typeof draft.revision !== "string" || !/^[a-f0-9]{64}$/.test(draft.revision)
@@ -77,9 +84,14 @@ export function createTextSave(options: {
     persist();
     return state.error ? Promise.resolve() : flush();
   }
-  function retry() {
+  async function retry() {
+    if (state.storageError && !state.dirty && !pending) {
+      load(await options.read());
+      if (state.storageError) return;
+    }
     state.error = "";
     state.conflict = false;
+    persist();
     return flush();
   }
   function resolveConflict(snapshot: TextSnapshot, content: string) {

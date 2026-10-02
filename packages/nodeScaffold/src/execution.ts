@@ -49,6 +49,7 @@ export type NodeJobRequest = {
   pluginRevision?: string;
   nodeId?: string;
   canvasPath?: string;
+  canvasId?: string;
 };
 
 export type NodeJobView = {

@@ -30,7 +30,37 @@ Graph 项 3/12 证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowGraphReviewAf
 
 ## UI 工作包
 
-审查项 6（孙会话嵌套事件）、7（文本错误后保存及草稿持久化）、10（媒体配置同步）、13（画布刷新失败的游标与补刷）由独立 UI 工作包负责，提交后统一集成验证。
+独立 UI 工作包提交 `bbd5e36825ad358064e11018482442978ef2781e` 已合入后端修复 `edfd630`，代码整合提交为 `263ea7f`。随后独立复审确认原十三项中十项通过，剩余三项及新发现的 PR7 兼容问题见下节；不以内部回归代替验收。
+
+| 审查项 | 修复与真实 HTTP 联调 |
+| --- | --- |
+| 6 孙会话嵌套事件 | 递归定位当前会话的包装事件，使用 root run 游标；真实 SQLite 写入三层委派事件，通过正式 NDJSON 接口及客户端恢复提问和正文。断开后 `afterSeq=2` 仅收到 3/4，提问快照与最深层会话归属一致 |
+| 7 文本错误后保存及草稿持久化 | 保留待确认命令、正文和版本，显式重试或处理冲突；真实正文接口提交后丢弃两次响应，重新创建保存状态后以原命令对账，再保存后续草稿。远端更改触发 409，确认后版本再次变化仍拒绝覆盖，读取当前版本后显式解决成功 |
+| 10 媒体配置同步 | 同步权威模型、尺寸、比例及视频参数，保留未提交字段；实际官方图片/视频后端通过 HTTP 修改和读取配置，组件实际 `applyConfig` 函数显示一致并保留脏字段。携带旧节点版本的生成请求被拒，作业列表仍为空 |
+| 13 画布失败游标与补刷 | 刷新失败或忙碌不确认事件，安排后续刷新；正式工作区事件接口配合真实 Graph GET 验证三秒重连补齐最后一次变更，不依赖另一条新事件 |
+
+UI 工作包的隔离验证证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowUiReviewEvidence20261002\evidence.json`。合并后的真实 HTTP 联调证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowUiHttpIntegratedmNKmrE\evidence.json`，保留临时工作区、SQLite、官方插件与接口请求记录。模型和 Agent 事件使用已安装官方元数据及持久事件夹具，没有调用模型或供应商。
+
+项 13 追加组件链路证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowUiHttpIntegrateddXkFXJ\evidence.json`。内存执行页面原有 `refreshGraph`、`useWorkspaceFiles`/Axios 与 `useWorkspaceEvents`，临时画布出现不完整 JSON 时正式接口返回 HTTP 500，旧视图及游标保持不变；恢复文件但不新增事件，三秒重连后补齐视图。此验证未挂载浏览器 DOM。首次尝试因内存浏览器环境缺少 `window.location` 导致 Axios 初始化失败，调整验证环境后通过，未因此修改业务代码。
+
+合并后用 Node 执行 Vue 类型检查，Web、nodeScaffold、文本、图片、视频、导演六包通过；Web 及文本、图片、视频节点正式构建通过。Web 仅有既有大 chunk 提示。后端和导演构建沿用 `edfd630` 的通过结果，本次 UI 提交未修改它们。原生产目录九个已修改/新增文件与保留基线 `337eae0` 逐一比较（统一换行）均一致。
+
+## 263ea7f 复审残余
+
+| 项目 | 本次修复与回归 |
+| --- | --- |
+| 通用文本发布要求内置 textPath | 宿主固定 publication `{path,nodeVersion}`，发布核对绑定后的节点版本及画布/执行器/任务身份。真实持久作业、Graph 锁与正文 CAS 验证通用 documentPath 发布成功；删除、改变路径/任务绑定、替换节点类型/执行版本、重建画布均保留生成结果供核对。插件自行提供的伪造 publication/canvasId 被宿主覆盖 |
+| 相同路径与节点 ID 跨画布 UUID 控制作业 | NodeJobRequest 固定 canvasId，get/cancel/wait 共用归属校验。三种调用均拒绝新 UUID，原 UUID 恢复后可访问自己的任务；另经正式 HTTP 删除、同名重建、生命周期恢复节点快照，原任务仍保持 accepted，不能从新画布查询或取消 |
+| localStorage 配额耗尽阻断在线保存 | 存储异常转为独立可见 storageError，保留内存草稿及原命令，继续在线写入。实际 HTTP 验证配额耗尽、两次响应丢失、清理失败、读取被禁用；显式重试完成原命令对账或恢复存储，不同步抛错阻断输入 |
+| PR7 内置编辑动作前缀不匹配 | 可信后端动作查找统一去掉单个 node: 前缀，保留真实 handler、revision 和磁盘内容校验。正式官方 canvas/textNode 通过运行守卫编辑正文无需审批；生成仍返回 AGENT_NEEDS_AUTHORIZATION，伪造 handler/revision 和双重前缀均不可信 |
+
+证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowTextTargetFixENNpQa\evidence.json`（七种文本发布状态、官方文本节点、无节点文本任务及 get/cancel/wait）和 `C:\Users\jinhk\AppData\Local\Temp\toonflowUiHttpIntegratedF3rWqe\evidence.json`（存储四场景、官方 PR7 链路及真实删除/重建 HTTP 流程）。通用插件描述及 AI 流仅在内存替代，宿主源代码、持久作业、文件、锁与正文 CAS 使用实际实现；没有创建插件/测试专用源文件。第一次通用验证尝试用普通 Graph 修改替换类型，被既有校验拒绝，随后改为临时文件替换来验证发布身份检查；第一次 PR7 验证遗漏后台工具注册，按正式注册路径补齐后通过，均未为验证环境问题修改业务代码。
+
+本次改变文本发布的宿主绑定方式：生成期间任何节点版本变化都会进入 needsReview，结果保留；不会猜测第三方插件哪个字段代表路径。旧任务缺少新绑定时也不直接覆盖正文。此前通过的其余项目没有扩大修改范围。
+
+额外发现、尚未修改：替代文本流立即完成时，`nodeTools` 动作返回前的 `refresh()` 与文本发布的 Graph 锁可能竞争，调用方得到 EBUSY，但后台作业最终完成。补充复现等待了作业终态，证据 `C:\Users\jinhk\AppData\Local\Temp\toonflowTextTargetFixUH2E6B\evidence.json` 中 `fastCompletionError` 与 `fastCompletionJob.status=completed` 同时存在。此边界超出本次指定四项，交回父线程安排后续处理；常规受理后再完成的流使用前述 ENNpQa 证据。
+
+残余修复后 server、Web、nodeScaffold、textNode 类型检查通过，server 及 textNode 正式构建通过；保留合并时六包检查和四包构建证据。所有检查均使用既有命令或 inline 验证。
 
 ## 验证边界
 

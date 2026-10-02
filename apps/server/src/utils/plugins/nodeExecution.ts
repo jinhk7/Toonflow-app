@@ -282,7 +282,7 @@ export function isBuiltinNodeExecutionAction(name: string, action: NodeExecution
 
 export function isBuiltinNodeExecutionTool(name: string, actionName: string, revision: string) {
   const execution = apply(mapGet, loadedDefinitions, [`${name}:${revision}`]) as LoadedNodeExecution | undefined;
-  const action = execution?.definition.actions.find(item => item.name === actionName);
+  const action = execution?.definition.actions.find(item => item.name === actionName.replace(/^node:/, ""));
   if (!action || !isBuiltinNodeExecutionAction(name, action, revision)) return false;
   let file: number | undefined;
   try {

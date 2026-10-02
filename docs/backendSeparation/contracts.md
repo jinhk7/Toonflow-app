@@ -51,13 +51,13 @@ NodeExecutionContext 绑定 directory/canvasPath/node/commandId/revision；提�
 
 ## 作业与渲染
 
-NodeJobRequest {kind,input,pluginRevision?,nodeId?,canvasPath?}。kind 按后端注册处理器发现，不限制节点名称。接受、执行、进度、产物提交和订阅分离。
+NodeJobRequest {kind,input,pluginRevision?,nodeId?,canvasPath?,canvasId?}。节点宿主受理时覆盖 canvasId 为当前画布 UUID；查询、等待及取消同时校验目录、节点、路径和 UUID。同路径重建画布不能控制旧任务，已持久保存于旧输入或 host 的 UUID 仍可核对；没有 UUID 证明的旧绑定不能通过节点操作。kind 按后端注册处理器发现，不限制节点名称。接受、执行、进度、产物提交和订阅分离。
 
 NodeJobView.summary 提供从固定输入抽取的展示信息（指令、格式、锚点等），不公开供应商密钥。beginCommit 只保护最终发布阶段；进入该阶段后取消返回当前运行状态，避免已写产物却报告取消。此前取消仍中止工作。媒体包装任务的取消仅停止观察，客户端仍查询原媒体任务，明确区分供应商状态与 observerStatus。
 
 directorDraft 与 render 的持久输入为 `{payload,host}`：payload 是业务快照，host 固定命令、节点/画布版本、配置摘要、插件 revision、父分组版本，以及 AI 配置/引用或渲染 worker/输出节点 revision。directorDraft 为 review 恢复策略，render 为 safe。生成成果先写 checkpoint，再 CAS 发布；目标变化时进入 needsReview，保留结果，不覆盖后续编辑。
 
-directorDraft 已保存 generated/contentPublished checkpoint 时可显式继续发布，不再调用模型；没有成果或处理器版本变化仍拒绝恢复。Graph 提交锁内校验全部声明的节点依赖。文本发布持 Graph 锁核对画布身份、节点执行版本、正文路径和 generationJobId，再完成正文 CAS；目标已删除或绑定变化时保留文本供核对。
+directorDraft 已保存 generated/contentPublished checkpoint 时可显式继续发布，不再调用模型；没有成果或处理器版本变化仍拒绝恢复。Graph 提交锁内校验全部声明的节点依赖。文本宿主在固定输入中持久保存 publication {path,nodeVersion}，nodeVersion 为绑定 generationJobId 后的节点版本；发布持 Graph 锁核对画布身份、执行版本、任务绑定及 publication，再完成正文 CAS。插件可使用 documentPath 或其他路径字段，不要求 textPath；节点在生成期间发生修改时保留成果供核对，不覆盖目标。旧任务缺少 publication 时不自动发布。
 
 渲染 worker 输入 RenderJobInput：scene、plan、anchor、lighting、settings、aspect、width、height、frameRate、time、duration、format（image/video）、assets。所有资产都是后端预先校验的任务快照引用。
 
