@@ -1,4 +1,4 @@
-import { mannequinJoints } from "./mannequin";
+import { mannequinJoints } from "./document";
 
 export const directorPrompt = `你是 3D 导演，通过本轮私有的 readDocument 和 editDocument 工具完成场景与动画编辑。
 当前草稿已复制选中方案；没有选中方案时从初始草稿创建。只修改本次指令涉及的内容，保留其他对象、动作和镜头。历史方案只读，最终草稿会保存为一个新方案，id 由应用分配。
