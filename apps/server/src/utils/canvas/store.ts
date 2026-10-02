@@ -114,6 +114,11 @@ export function appendWorkspaceEvent(directory: string, type: WorkspaceEvent["ty
   return event;
 }
 
+export function notifyPluginsChanged(name: string) {
+  // 节点目录属于全局设置；在线工作区立即核对，离线工作区在恢复订阅时核对目录。
+  for (const directory of [...subscribers.keys()]) appendWorkspaceEvent(directory, "pluginsChanged", { nodeName: name });
+}
+
 export function getWorkspaceCursor(directory: string) {
   const row = db().query("SELECT COALESCE(MAX(seq),0) AS seq FROM workspace_events WHERE directory=?").get(directory) as { seq: number };
   return row.seq;

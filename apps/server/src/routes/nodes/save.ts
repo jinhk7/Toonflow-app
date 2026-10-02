@@ -14,6 +14,7 @@ export default router.put("/", validateFields({ name: u.nodePlugins.nodeNameSche
     const { configRules } = await u.nodePlugins.readNode(name);
     const parsed = u.nodePlugins.validateNodeConfig(configRules, config);
     u.conf.set("nodeConfigs", { ...u.conf.get("nodeConfigs", {}), [name]: parsed });
+    u.canvasStore.notifyPluginsChanged(name);
     res.json(success(parsed, "节点配置已保存"));
   } finally { release(); }
 });

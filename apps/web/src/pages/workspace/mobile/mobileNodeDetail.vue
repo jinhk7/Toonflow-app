@@ -53,8 +53,8 @@
         :canvasPath="canvasPath"
         :node="node"
         :graph="graph"
+        :refreshNode="refreshNodeEditor"
         @catalog="catalog = $event"
-        @nodeChanged="nodeEditor?.refresh()"
         @changed="load" />
     </el-main>
     <el-empty v-else-if="!loading" description="节点不存在" />
@@ -114,6 +114,12 @@ const parentGroupId = ref("");
 const connectionVisible = ref(false);
 const catalog = ref<NodeCatalogEntry[]>([]);
 const nodeEditor = ref<InstanceType<typeof mobileNodeEditor>>();
+async function refreshNodeEditor(signal?: AbortSignal, contentOnly = false) {
+  signal?.throwIfAborted();
+  const synchronized = await nodeEditor.value?.refresh(signal, contentOnly);
+  signal?.throwIfAborted();
+  return synchronized;
+}
 
 const title = computed(() => node.value ? nodeLabel(node.value) : "节点");
 const typeLabel = computed(() => String(node.value?.type ?? ""));

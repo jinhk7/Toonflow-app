@@ -37,5 +37,6 @@ export default router.delete("/", validateFields({ name: z.string().regex(/^[a-z
   const configs = u.conf.get("nodeConfigs", {});
   delete configs[req.body.name];
   u.conf.set("nodeConfigs", configs);
+  u.canvasStore.notifyPluginsChanged(req.body.name);
   res.json(success(null, "节点已卸载"));
 });

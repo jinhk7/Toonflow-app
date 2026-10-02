@@ -5,7 +5,7 @@
 ## 根因与修复
 
 1. PR8 删除了手机图片、视频生成节点的模型和提示词编辑卡，通用动作表单默认展示读取动作，缺少当前值回填、模型能力选项和多行编辑。为现有后端动作增加可选 `editor` 元数据，手机按原动作参数 schema 展示独立编辑区。保存仍使用后端 `nodeTools` 命令，Agent 窗口不参与节点编辑。
-2. 节点任务面板从事件序号 0 重放整个工作区历史，每条任务或画布事件都重读任务、媒体和插件目录。任务列表现在提供兼容旧数组接口的快照游标；完整任务事件直接更新对应任务，文本增量不重读列表，插件目录只在首次进入或插件变化时读取。
+2. 节点任务面板从事件序号 0 重放整个工作区历史，每条任务或画布事件都重读任务、媒体和插件目录。任务列表现在提供兼容旧数组接口的快照游标；完整任务事件直接更新对应任务，文本增量不重读列表，插件目录在首次进入、恢复连接、显式刷新和插件变更时核对；不增加空闲轮询。
 3. 订阅 watch 每次返回新数组，节点对象替换也会重新恢复任务。绑定改为稳定的目录、画布和节点 ID；旧请求、订阅及计时器在切换或卸载时取消，恢复读取完成后才继续接收事件。
 4. 图读取反复展示全屏 loading、替换未变化对象，加上节点页重复初始化读取，导致重绘和输入中断。只有首次加载或切换工作区展示 loading；相同图、节点和连接保留引用，更新失败保留旧图和草稿。
 5. 默认 MCP `panel` 使用完整节点路由，UUID 路径超过服务端 32 字符上限，400 后每三秒重连。改用短的路由模式，完整路径、参数和查询仍保留在 `navigation`。
@@ -64,3 +64,37 @@
 - `mobileVideoEditorFull.png`、`mobileAgentIndependent.png`、`desktopCanvasAndAgent.png`：实际页面截图。
 
 没有推送、创建 PR、合入、部署或重启生产；原工作区未提交改动未修改。隔离数据和证据保留用于复核，交付结束后关闭本次隔离服务及自建标签。
+
+
+
+## 审查后的边界修复
+
+| 原问题 | 当前行为 | 实际证据 |
+| --- | --- | --- |
+| 同一节点多个编辑区保存后，兄弟草稿一直使用旧版本 | 仅本页面已确认保存且远端原值未变时安全推进兄弟版本；外部冲突显示远端内容，显式接受版本后保留草稿再保存 | mobileEditorRepairEvidence.json、reviewDomQaEvidence.json |
+| 离线期间只改正文文件，快照游标吞掉正文变化；恢复复用旧读取 | 恢复先核对目录、等待读取最新内容，再采纳任务快照游标；旧读取等待结束后补新的读取 | syncIntegratedEditorFixEvidence.json、reviewDomQaEvidence.json |
+| 导演普通配置提交破坏 Custom 引用 | prompt 未变且未显式传 promptModel 时保留原结构；引用随来源连接调整 | directorReferenceFixEvidence.json |
+| 恢复草稿时 reader 首次失败，无法重试 | 草稿保留，提供核对入口，读取成功后可显示远端并选择接受版本 | mobileEditorRepairEvidence.json、reviewDomQaEvidence.json |
+| 插件目录缓存过期且没有变更通知 | 安装、配置、启停、卸载成功后发布持久 pluginsChanged；恢复和显式刷新核对目录 | pluginNotifyFixEvidence.json、pluginInstallFixEvidence.json、syncReviewFixEvidence.json、reviewDomQaEvidence.json |
+| 模型元数据被硬编码为 providerId/modelId | 按 providerField 和当前字段名定位模型与联动能力 | mobileMetadataDomFixEvidence.json |
+| nullable boolean 被当字符串且原 null 丢失 | 布尔三态提交 true/false/null；其他联合类型和纯 null 使用 JSON，合法 null 保留 | mobileMetadataDomFixEvidence.json |
+| 多标签丢失回执时共享命令槽被覆盖或误删 | 命令按 commandId 分开保存并兼容旧槽；旧回执只结算自身凭据，不删除或自动推进其他标签的新草稿 | mobileEditorOwnerRepairEvidence.json、reviewDomQaEvidence.json |
+
+同节点保存和原命令核对共用屏障：提示词写入已成功但兄弟正文新版本尚未核对完成时，禁止另一次提交，输入仍可继续。真实 Edge 延迟 sibling getText 的验证表明，忙碌期间正文提交次数为 0，读取放行后正文使用新版本保存成功。原始竞态复现保留在 reviewDomQaEvidence.json 的历史条目中，后续修复条目注明对应源码 hash。
+
+共享草稿已改为不可复用 draftId 快照：写入新快照成功后只删除此前精确 ID；完成回执在 owner 核对前清理对应 sent.draftId，失败保留。内部 CAS 更新保留 editedAt，旧回执不会抢占新输入的恢复优先级。旧共享稿使用惰性迁移标记，原槽保留但保存后不再恢复；旧共享命令使用独立 commandId settled 标记，避免跨标签读后删。取消 reader 的 loading 只由对应 readRevision 清理，不遗留禁用状态。
+
+## 本轮真实浏览器验证范围
+
+- 最终小屏为 390×844，原生输入与按钮操作，绕过 Service Worker 并禁用缓存；全部写入仅针对隔离 qaData/qaWorkspace。
+- 自定义 vendor/engine 模型、尺寸联动、nullable 布尔与纯 null 使用合法合成元数据及 CDP 定向响应；实际编辑器和原 Zod schema 校验通过。此项没有验证真实第三方插件后端保存。
+- 真实插件启停接口对隔离 audioNode 发出通知，启用状态已恢复。当前编辑 DOM 和草稿保持，目录读取 2 次，任务列表读取 0 次。QA 使用服务端规范目录，避免 fixture 的斜杠写法差异被 SDK 事件目录校验过滤。
+- 当前空闲观察 20 秒 API 新请求为 0；同一输入 DOM、焦点、光标和草稿保留。运行任务 60% 进度经真实持久事件更新，任务列表读取 0 次。
+- CDP 真实网络断连与恢复后，任务进度仍恢复；只有原生 online 的场景读取一次任务快照及一次目录。额外注入 online 事件的竞争验证会取消旧恢复链，活跃订阅最终仍为 3，没有新增重复订阅。
+- 本轮未发送真实 Agent、模型或供应商请求；当前隔离服务 rejectedFetches 为 0。
+
+构建与检查：server routes/typecheck、Web 类型检查、完整 build:server、最终 Web 重建均实际通过，仅保留现有 chunk 提示。最终草稿修复后再次通过 Web 类型检查和构建，产物 mobileNodeDetail-BchS0scv.js。编辑器源码 SHA256 为 ee4164bf03773c7eccd595789d9c72a63af21086f4068f88d9056224839b3ff7。最新 mobileEditorImmutableRepairEvidence.json 的 13 组完整 Vue、正式临时 HTTP/SDK 与后端 CAS 验证全部通过。
+
+生产备份已保存到主仓库 backup/pr9Deployment20261002T180532：data/build/work 共 1302 个文件逐 SHA256 核对一致，另含基线源码归档、Git 状态、原两个未提交文件和 stash 引用。主仓库仍为 PR8 基线，Agnes 配置与原修改未动。部署仍以同 Astra、Codex review 和最新 HEAD CI 三道门槛为前提。
+
+最终 Edge 双标签验证通过：A 的命令响应和 SDK 回执 GET 定向返回 503（真实命令已提交），B 冲突后 A 凭据仍在；A 重载恢复 B 新稿，旧回执删除已确认原快照而不改变 B 原版本。未接受新版本的保存仍冲突，显示远端后明确接受再保存成功，B 重载为 clean，独立快照为 0，原已保存草稿不复活。最新源码下 reader 取消后仍可核对，规范目录文件单独变化恢复、20 秒 idle 零 API、75% 实时进度更新均通过，活跃订阅最终为 3，外部 fetch 拒绝为 0；证据见 reviewDomQaEvidence.json。

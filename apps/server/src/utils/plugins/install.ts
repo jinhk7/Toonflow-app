@@ -11,6 +11,7 @@ import { parseNodeExecution, retainNodeExecutionRevision, validateNodeExecutionP
 import { addMediaProvider } from "@/utils/media/provider";
 import { isSafeSegment } from "@/utils/skills/files";
 import { isWithin, lockWorkspaceFiles, writeWorkspaceFile } from "@/utils/workspace/files";
+import { notifyPluginsChanged } from "@/utils/canvas/store";
 
 const maxBytes = 20 * 1024 * 1024;
 const require = createRequire(import.meta.url);
@@ -196,6 +197,7 @@ export async function installNode(fileName: string, input: string | Uint8Array, 
       throw error;
     }
   } finally { release(); }
+  notifyPluginsChanged(name);
   return { name };
 }
 

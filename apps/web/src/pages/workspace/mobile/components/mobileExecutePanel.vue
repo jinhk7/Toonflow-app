@@ -49,12 +49,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import axios from "axios";
 import { createExecutionClient, ExecutionRequestError, fetchNodeCatalog, getExecutionClientId, isExecutableNode, type NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
-import type { CanvasCommand, CanvasCommandResult, NodeJobView, WorkspaceEvent } from "@toonflow/nodes-scaffold/execution";
+import type { CanvasCommand, CanvasCommandResult, NodeJobView } from "@toonflow/nodes-scaffold/execution";
 import { graphValueJson, type WorkspaceGraph } from "@/lib/workspaceFiles";
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
 import { useWorkspaceEvents } from "@/lib/workspaceEvents";
@@ -63,8 +63,8 @@ import type { CanvasNode } from "../lib/mobileGraphModel";
 
 type ParameterSchema = { type?: string; title?: string; description?: string; default?: unknown; enum?: any[]; minimum?: number; maximum?: number; maxLength?: number; $ref?: string; oneOf?: unknown; anyOf?: unknown };
 type MediaJob = { jobId: string; mediaType?: string; status: string; linkStatus?: string; nodeId?: string; canvasPath?: string; errorMessage?: string };
-const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph }>();
-const emit = defineEmits<{ changed: []; catalog: [entries: NodeCatalogEntry[]]; nodeChanged: [event: WorkspaceEvent] }>();
+const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph; refreshNode?: (signal?: AbortSignal, contentOnly?: boolean) => Promise<boolean | void> }>();
+const emit = defineEmits<{ changed: []; catalog: [entries: NodeCatalogEntry[]] }>();
 const route = useRoute();
 const router = useRouter();
 const catalog = ref<NodeCatalogEntry[]>([]);
@@ -100,7 +100,6 @@ const submitting = ref(false);
 let revision = 0;
 let mediaRevision = 0;
 let catalogRevision = 0;
-let catalogLoaded = false;
 let snapshotCursor = 0;
 let mediaTimer: ReturnType<typeof setTimeout> | undefined;
 let latestMedia: { revision: number; binding: string; task: Promise<boolean> } | undefined;
@@ -187,14 +186,23 @@ async function loadCatalog(signal?: AbortSignal) {
   try {
     const entries = await fetchNodeCatalog(requestSignal(signal));
     if (disposed || signal?.aborted || version !== catalogRevision) return false;
-    catalog.value = entries;
-    catalogLoaded = true;
-    emit("catalog", entries);
+    if (graphValueJson(entries) !== graphValueJson(catalog.value)) {
+      catalog.value = entries;
+      emit("catalog", entries);
+    }
     return true;
   } catch (reason) {
     if (!disposed && !signal?.aborted && version === catalogRevision) error.value = reason instanceof Error ? reason.message : "节点描述读取失败";
     return false;
   }
+}
+async function syncNode(signal?: AbortSignal) {
+  if (!await loadCatalog(signal)) return false;
+  return refreshNode(signal);
+}
+async function refreshNode(signal?: AbortSignal) {
+  await nextTick();
+  return !props.refreshNode || await props.refreshNode(signal) !== false;
 }
 function load(signal?: AbortSignal) {
   const task = readTasks(signal);
@@ -213,9 +221,19 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   const results = await Promise.allSettled([
     createExecutionClient(directory).listJobSnapshot(requestSignal(signal)),
     loadMedia(signal),
+    loadCatalog(signal),
   ]);
   if (!current()) return newer();
-  const [local, media] = results;
+  const [local, media, described] = results;
+  let synchronized = described.status === "fulfilled" && described.value;
+  if (synchronized) {
+    try { synchronized = await refreshNode(signal); }
+    catch (reason) {
+      if (current()) error.value = reason instanceof Error ? reason.message : "节点编辑信息同步失败";
+      synchronized = false;
+    }
+  }
+  if (!current()) return newer();
   if (local.status === "fulfilled" && Array.isArray(local.value.jobs) && Number.isSafeInteger(local.value.cursor) && local.value.cursor >= 0) {
     const snapshot = local.value;
     const latest = new Map(jobs.value.map(job => [job.jobId, job]));
@@ -223,12 +241,13 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
     for (const job of jobs.value) if ((jobSequences.get(job.jobId) ?? 0) > snapshot.cursor && !next.some(item => item.jobId === job.jobId)) next.push(job);
     next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     if (graphValueJson(next) !== graphValueJson(jobs.value)) jobs.value = next;
-    snapshotCursor = Math.max(snapshotCursor, snapshot.cursor);
+    // 正文文件变化不一定改变节点；完成编辑投影核对后才能跳过历史内容事件。
+    if (synchronized) snapshotCursor = Math.max(snapshotCursor, snapshot.cursor);
   } else if (local.status === "fulfilled") error.value = "任务快照缺少有效列表或游标";
   const failed = results.find(item => item.status === "rejected");
   if (failed?.status === "rejected") error.value = failed.reason instanceof Error ? failed.reason.message : "任务查询失败";
   loading.value = false;
-  return !error.value && !mediaError.value && media.status === "fulfilled" && media.value;
+  return !error.value && !mediaError.value && media.status === "fulfilled" && media.value && synchronized;
 }
 
 function argumentsFromDraft() {
@@ -336,15 +355,15 @@ const { error: connectionError } = useWorkspaceEvents({
   context: () => JSON.stringify([props.canvasPath, props.node?.id]),
   cursor: () => snapshotCursor,
   refresh: async signal => {
-    const [loaded, described] = await Promise.all([load(signal), catalogLoaded || !props.node ? Promise.resolve(true) : loadCatalog(signal)]);
+    const loaded = await load(signal);
     if (pendingCommand.value) await reconcileCommand(signal, false);
-    return loaded && described;
+    return loaded;
   },
   receive: async (event, signal) => {
-    if (event.type === "pluginsChanged") return loadCatalog(signal);
+    if (event.type === "pluginsChanged") return syncNode(signal);
     if (event.type === "contentChanged" && props.node && (!event.canvasId || event.canvasId === props.canvasPath)) {
       const path = typeof event.payload.path === "string" ? event.payload.path.replaceAll("\\", "/").toLowerCase() : "";
-      if (event.nodeId === props.node.id || path && [props.node.data?.textPath, props.node.data?.modelPath].some(value => typeof value === "string" && value.replaceAll("\\", "/").toLowerCase() === path)) emit("nodeChanged", event);
+      if (event.nodeId === props.node.id || path && [props.node.data?.textPath, props.node.data?.modelPath].some(value => typeof value === "string" && value.replaceAll("\\", "/").toLowerCase() === path)) return !props.refreshNode || await props.refreshNode(signal, true) !== false;
       return;
     }
     if (event.type === "jobChanged") {
