@@ -636,16 +636,21 @@ function mergeSavedGraph(sent: Pick<WorkspaceGraph, "nodes" | "edges" | "viewpor
 let refreshingGraph = false;
 let lastConflictRevision = -1;
 async function refreshGraph() {
-  if (refreshingGraph || document.hidden || savePaused) return;
+  if (refreshingGraph || document.hidden || savePaused) return false;
   const directory = project.value?.directory;
   const path = canvasId.value;
   const baseline = path && graphSnapshots.get(path);
-  if (!directory || !path || !baseline) return;
+  if (!directory || !path) return true;
+  if (!baseline) return false;
   refreshingGraph = true;
   try {
     await saving;
     const remote = await useWorkspaceFiles(directory).readGraph(path);
-    if (canvasId.value !== path || project.value?.directory !== directory || graphSnapshots.get(path) !== baseline || remote.toonflowGraph.revision === baseline.toonflowGraph.revision) return;
+    if (canvasId.value !== path || project.value?.directory !== directory || graphSnapshots.get(path) !== baseline) return false;
+    if (remote.toonflowGraph.revision === baseline.toonflowGraph.revision) {
+      rememberGraph(path, remote);
+      return true;
+    }
     const current = toObject();
     const overlapping = (["nodes", "edges"] as const).some(kind => {
       const oldItems = new Map(baseline[kind].map(item => [item.id, item]));
@@ -664,12 +669,11 @@ async function refreshGraph() {
       canvasDraft.value = persistCanvasDraft(directory, path, baseline, current);
       if (lastConflictRevision !== remote.toonflowGraph.revision) ElMessage.warning("其他设备修改了同一画布元素，请重新打开画布处理冲突");
       lastConflictRevision = remote.toonflowGraph.revision;
-      return;
+      return false;
     }
     rememberGraph(path, remote);
     mergeSavedGraph(baseline, remote);
-  } catch (error) {
-    console.error("画布同步失败", error);
+    return true;
   } finally { refreshingGraph = false; }
 }
 const saveCanvas = debounce((directory: string, fileName: string) => {
@@ -1018,7 +1022,7 @@ useWorkspaceEvents({
       const previous = event.payload.renamedFrom;
       const target = event.payload.path;
       if (event.payload.created || typeof previous === "string") await canvasMenuRef.value?.refreshCanvases(typeof previous === "string" && typeof target === "string" ? { previous, target } : undefined);
-      if (!event.canvasId || event.canvasId === canvasId.value) await refreshGraph();
+      if (!event.canvasId || event.canvasId === canvasId.value) return refreshGraph();
     }
     if (event.type !== "uiIntent" || event.canvasId && event.canvasId !== canvasId.value) return;
     if (typeof event.payload.clientId === "string" && event.payload.clientId !== getExecutionClientId()) return;

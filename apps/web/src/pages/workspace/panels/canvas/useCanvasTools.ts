@@ -7,7 +7,7 @@ import { getExecutionClientId } from "@toonflow/nodes-scaffold/runtime";
 export function useCanvasTools(options: {
   availableNodes: Ref<{ type: string; label: string }[]>;
   flushSave(): Promise<void>;
-  refresh?(): Promise<void>;
+  refresh?(): Promise<void | boolean>;
   menu(): {
     getCanvases(): { id: string; name: string }[];
     refreshCanvases(rename?: { previous: string; target: string }): Promise<void>;

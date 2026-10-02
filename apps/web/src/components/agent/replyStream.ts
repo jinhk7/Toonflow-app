@@ -4,6 +4,13 @@ import type { AgentEvent } from "@toonflow/server/agent/types";
 import type { AgentMessage, AgentMessagePart } from "./types";
 import { readExecutionEvents } from "@toonflow/nodes-scaffold/runtime";
 
+export function findConversationEvent(event: AgentEvent, sessionFile: string | undefined): AgentEvent | undefined {
+  while (event.type === "subAgentEvent") {
+    if (event.file === sessionFile) return event.event;
+    event = event.event;
+  }
+}
+
 export async function* readAgentEvents(response: Response, signal: AbortSignal) {
   for await (const event of readExecutionEvents<AgentEvent>(response, signal)) {
     yield event;

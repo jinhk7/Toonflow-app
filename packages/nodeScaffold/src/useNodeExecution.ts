@@ -64,7 +64,7 @@ export function useNodeExecution(nodeId = useNodeId()) {
   }
 
   return {
-    descriptor, command, call,
+    descriptor, command, call, getTarget: target,
     readText: (path: string) => createExecutionClient(target().directory).readContent(path, lifetime.signal),
     writeText: (path: string, content: string, expectedRevision: string, commandId?: string) => createExecutionClient(target().directory).writeContent(path, content, expectedRevision, commandId, lifetime.signal),
     getJob: (jobId: string) => createExecutionClient(target().directory).getJob(jobId, lifetime.signal),

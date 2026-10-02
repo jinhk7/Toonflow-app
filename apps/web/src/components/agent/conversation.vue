@@ -189,7 +189,7 @@ import { modelChoices } from "@/stores/settings";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { AgentAttachment, AgentConversation, AgentMessage } from "./types";
 import type { AgentEvent, AgentMention } from "@toonflow/server/agent/types";
-import { createConversationStream } from "./replyStream";
+import { createConversationStream, findConversationEvent } from "./replyStream";
 import { acceptAgentMessage, controlAgentRun, fetchAgentRunSnapshot, getAcceptedAgentMessage, clearPendingAgentMessage, pendingAgentMessages, reviewAgentRun, subscribeAgentRunEvents, type AgentAcceptInput, type AgentRunSnapshot } from "./runClient";
 import authorizationPrompt from "./authorizationPrompt.vue";
 import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
@@ -379,7 +379,8 @@ async function reconnectActiveRun() {
     connectionError.value = "";
     await subscribeAgentRunEvents(runId, eventCursor, async (event, meta) => {
       if (props.initialSession?.parentFile) {
-        if (event.type === "subAgentEvent" && event.file === boundSessionFile.value) applyEvent(event.event);
+        const inner = findConversationEvent(event, boundSessionFile.value);
+        if (inner) applyEvent(inner);
       } else applyEvent(event);
       if (meta?.seq !== undefined) eventCursor = meta.seq;
       if (event.type === "done" || event.type === "error") {

@@ -36,6 +36,10 @@
           {{ selectedMode === "startFrameOptional" ? "仅一张图片时作为尾帧；两张图片按顺序作为首帧、尾帧" : "图片引用按顺序作为首帧、尾帧" }}
         </div>
         <promptInput v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" />
+        <div v-if="controlError" class="controlError" role="status">
+          <span>{{ controlError }}<template v-if="controlDrafts.size">；未提交的设置已保留</template></span>
+          <el-button @click="retryControls">保存保留的设置</el-button>
+        </div>
         <div class="promptFooter">
           <el-select
             v-model="data.model"
@@ -101,7 +105,7 @@ const nodeData = computed(() => node.data as typeof node.data & Record<string, u
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
 const data = reactive({
   prompt: typeof nodeData.value.prompt === "string" ? nodeData.value.prompt : "",
-  promptModel: Array.isArray(nodeData.value.promptModel) ? nodeData.value.promptModel as PromptModel : [],
+  promptModel: Array.isArray(nodeData.value.promptModel) ? JSON.parse(JSON.stringify(nodeData.value.promptModel)) as PromptModel : [],
   model: typeof nodeData.value.model === "string" ? nodeData.value.model : "",
   ratio: typeof nodeData.value.ratio === "string" ? nodeData.value.ratio : "9:16",
   duration: typeof nodeData.value.duration === "number" ? nodeData.value.duration : undefined,
@@ -135,6 +139,22 @@ const previewUrl = files.useFileUrl(outputFile, error => showNodeError(error, "�
 let applying = false;
 let disposed = false;
 let controlsSaving = Promise.resolve();
+const controlDrafts = reactive(new Map<string, number>());
+const controlError = ref("");
+let draftVersion = 0;
+let configRequest: Promise<void> | undefined;
+let configRefreshPending = false;
+function markDrafts(fields: string[]) {
+  const version = ++draftVersion;
+  for (const field of fields) controlDrafts.set(field, version);
+}
+function syncPrompt() {
+  if (controlDrafts.has("prompt") || promptTimer) return;
+  applying = true;
+  data.prompt = typeof nodeData.value.prompt === "string" ? nodeData.value.prompt : "";
+  data.promptModel = Array.isArray(nodeData.value.promptModel) ? JSON.parse(JSON.stringify(nodeData.value.promptModel)) as PromptModel : [];
+  applying = false;
+}
 let promptTimer: ReturnType<typeof setTimeout> | undefined;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let statusError = "";
@@ -143,37 +163,47 @@ watch(pendingJob, value => { if (value) controlsBlocked.value = true; }, { flush
 function applyConfig(state: ConfigState) {
   applying = true;
   models.value = state.models;
-  matchingModes.value = state.matchingModes ?? [];
+  if (!controlDrafts.has("model")) matchingModes.value = state.matchingModes ?? [];
   if (state.ratios) ratioOptions.value = state.ratios;
   const config = state.config;
-  data.model = config.modelId ? JSON.stringify([config.providerId, config.modelId]) : typeof nodeData.value.model === "string" ? nodeData.value.model : "";
-  data.ratio = config.ratio;
-  data.duration = config.duration;
-  data.resolution = config.resolution ?? "";
-  data.mode = config.mode === undefined ? "" : JSON.stringify(config.mode);
-  data.generateAudio = config.generateAudio !== false;
+  const values: Partial<typeof data> = { model: config.modelId ? JSON.stringify([config.providerId, config.modelId]) : typeof nodeData.value.model === "string" ? nodeData.value.model : "", ratio: config.ratio, duration: config.duration,
+    resolution: config.resolution ?? "", mode: config.mode === undefined ? "" : JSON.stringify(config.mode), generateAudio: config.generateAudio !== false, };
+  for (const [field, value] of Object.entries(values)) if (!controlDrafts.has(field)) Reflect.set(data, field, value);
   applying = false;
 }
 function queueControl(name: string, args: Record<string, unknown>) {
-  const pending = controlsSaving.catch(() => {}).then(() => execution.call<ConfigState>(name, args));
-  controlsSaving = pending.then(state => { if (name === "setConfig") applyConfig(state); });
-  void controlsSaving.catch(error => { if (!disposed) showNodeError(error, "节点设置保存失败"); });
+  const fields = name === "setPrompt" ? ["prompt", "promptModel"] : Object.keys(args).filter(field => field in data);
+  if (name === "setConfig" && (args.providerId || args.modelId)) fields.push("model");
+  const versions = new Map(fields.map(field => [field, controlDrafts.get(field)]));
+  const pending = controlsSaving.catch(() => {}).then(() => execution.call(name, args));
+  controlsSaving = pending.then(async () => {
+    for (const [field, version] of versions) if (controlDrafts.get(field) === version) controlDrafts.delete(field);
+    syncPrompt();
+    await loadModels();
+    if (!controlDrafts.size) controlError.value = "";
+  });
+  void controlsSaving.catch(error => {
+    controlError.value = error instanceof Error ? error.message : "节点设置保存失败";
+    if (!disposed) showNodeError(error, "节点设置保存失败");
+  });
   return controlsSaving;
 }
 function savePrompt() {
   clearTimeout(promptTimer);
   promptTimer = undefined;
+  if (!controlDrafts.has("prompt") && data.prompt === nodeData.value.prompt) return controlsSaving;
   return queueControl("setPrompt", { prompt: data.prompt });
 }
 watch(() => [data.prompt, data.promptModel], () => {
   if (applying) return;
+  markDrafts(["prompt", "promptModel"]);
   clearTimeout(promptTimer);
   promptTimer = setTimeout(() => { void savePrompt(); }, 400);
 }, { deep: true, flush: "sync" });
 watch(() => data.model, value => {
   if (applying) return;
   const choice = models.value.find(item => JSON.stringify([item.providerId, item.modelId]) === value);
-  if (choice) void queueControl("setConfig", { providerId: choice.providerId, modelId: choice.modelId });
+  if (choice) { markDrafts(["model"]); void queueControl("setConfig", { providerId: choice.providerId, modelId: choice.modelId }); }
 }, { flush: "sync" });
 watch(() => [data.duration, data.resolution, data.ratio, data.mode, data.generateAudio] as const, (values, previous) => {
   if (applying) return;
@@ -183,20 +213,48 @@ watch(() => [data.duration, data.resolution, data.ratio, data.mode, data.generat
   if (values[2] && values[2] !== previous[2]) args.ratio = values[2];
   if (values[3] && values[3] !== previous[3]) args.mode = JSON.parse(values[3]);
   if (values[4] !== previous[4]) args.generateAudio = values[4];
-  if (Object.keys(args).length) void queueControl("setConfig", args);
+  if (Object.keys(args).length) { markDrafts(Object.keys(args)); void queueControl("setConfig", args); }
 }, { flush: "sync" });
-watch(() => [nodeData.value.prompt, nodeData.value.promptModel], () => {
-  if (promptTimer) return;
-  applying = true;
-  data.prompt = typeof nodeData.value.prompt === "string" ? nodeData.value.prompt : "";
-  data.promptModel = Array.isArray(nodeData.value.promptModel) ? nodeData.value.promptModel as PromptModel : [];
-  applying = false;
-});
-async function loadModels() {
-  if (modelsLoading.value) return;
+watch(() => [nodeData.value.prompt, nodeData.value.promptModel, nodeData.value.model, nodeData.value.duration, nodeData.value.resolution, nodeData.value.ratio, nodeData.value.mode, nodeData.value.generateAudio, refList.value], () => {
+  syncPrompt();
+  void loadModels().catch(error => { controlError.value = error instanceof Error ? error.message : "远端配置读取失败"; });
+}, { deep: true });
+function loadModels(): Promise<void> {
+  configRefreshPending = true;
+  if (configRequest) return configRequest;
   modelsLoading.value = true;
-  try { applyConfig(await execution.call<ConfigState>("getConfig")); }
-  finally { modelsLoading.value = false; }
+  configRequest = (async () => {
+    do {
+      configRefreshPending = false;
+      const target = execution.getTarget();
+      const state = await execution.call<ConfigState>("getConfig");
+      if (disposed) return;
+      const current = execution.getTarget();
+      if (target.directory !== current.directory || target.canvasPath !== current.canvasPath) throw new Error("节点画布已切换");
+      if (target.version !== current.version || configRefreshPending) { configRefreshPending = true; continue; }
+      applyConfig(state);
+    } while (configRefreshPending && !disposed);
+  })().finally(() => { configRequest = undefined; modelsLoading.value = false; });
+  return configRequest;
+}
+async function retryControls() {
+  try {
+    const args: Record<string, unknown> = {};
+    if (controlDrafts.has("model")) {
+      const choice = selectedModel.value;
+      if (!choice) return void showNodeError("保留的模型已不可用，请重新选择", "设置草稿保存失败");
+      args.providerId = choice.providerId; args.modelId = choice.modelId;
+    }
+    for (const field of ["duration", "resolution", "ratio", "mode", "generateAudio"]) {
+      if (!controlDrafts.has(field)) continue;
+      const value = Reflect.get(data, field);
+      if (value !== undefined && value !== "") args[field] = field === "mode" ? JSON.parse(String(value)) : value;
+    }
+    if (Object.keys(args).length) await queueControl("setConfig", args);
+    await savePrompt();
+    await loadModels();
+    if (!controlDrafts.size) controlError.value = "";
+  } catch (error) { controlError.value = error instanceof Error ? error.message : "节点设置保存失败"; }
 }
 async function selectOutput(value: NodeMediaValue) {
   try { await execution.call("setVideo", { path: value.url, mimeType: value.mimeType }); }
@@ -238,7 +296,10 @@ async function startFromButton() {
   }
   if (["accepted", "running"].includes(state.status) || state.mediaJob && ["prepared", "submitting", "tracking", "collecting"].includes(state.mediaJob.status)) return;
   await savePrompt();
-  await execution.call("generateVideo");
+  await loadModels();
+  if (controlDrafts.size) throw new Error("仍有未提交的设置草稿，请保存后再生成");
+  const target = execution.getTarget();
+  await execution.call("generateVideo", {}, { expectedVersion: target.version });
   generating.value = true;
   controlsBlocked.value = true;
   canCancelObservation.value = true;
@@ -312,6 +373,7 @@ onScopeDispose(() => { disposed = true; clearTimeout(promptTimer); clearTimeout(
 }
 
 .promptCard {
+  .controlError { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; color: var(--el-color-warning); overflow-wrap: anywhere; }
   .referenceHint {
     margin: 8px 0;
     color: var(--el-text-color-secondary);

@@ -5,9 +5,9 @@ import type { WorkspaceEvent } from "@toonflow/nodes-scaffold/execution";
 export function useWorkspaceEvents(options: {
   directory(): string | undefined;
   context?(): string;
-  refresh(): Promise<void>;
+  refresh(): Promise<void | boolean>;
   cursor?(): number;
-  receive(event: WorkspaceEvent): void | Promise<void>;
+  receive(event: WorkspaceEvent): void | boolean | Promise<void | boolean>;
 }) {
   const error = ref("");
   let connection: AbortController | undefined;
@@ -26,13 +26,16 @@ export function useWorkspaceEvents(options: {
     const current = new AbortController();
     connection = current;
     try {
-      await options.refresh();
+      const refreshed = await options.refresh();
       current.signal.throwIfAborted();
+      if (refreshed === false) throw new Error("画布正在忙碌，等待尾随同步");
       cursor = Math.max(cursor, options.cursor?.() ?? 0);
       error.value = "";
       await createExecutionClient(directory).subscribe(cursor, async event => {
         current.signal.throwIfAborted();
-        await options.receive(event);
+        const received = await options.receive(event);
+        current.signal.throwIfAborted();
+        if (received === false) throw new Error("画布正在忙碌，事件待确认");
         cursor = Math.max(cursor, event.seq);
       }, current.signal);
     } catch (reason) {

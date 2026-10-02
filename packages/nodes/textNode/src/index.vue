@@ -36,18 +36,24 @@
       </el-card>
     </template>
   </nodeSkeleton>
+  <div v-if="textSave?.state.error" class="saveStatus nodrag nopan" role="status">
+    <span>{{ textSave.state.error }}</span>
+    <el-button :loading="textSave.state.saving" @click="retryTextSave">对账并重试原保存</el-button>
+    <el-button v-if="textSave.state.conflict" :disabled="textSave.state.saving" @click="resolveTextConflict">核对远端后保存草稿</el-button>
+  </div>
   <el-dialog v-model="editing" title="编辑文本" width="min(860px, calc(100vw - 32px))" :fullscreen="fullscreen" alignCenter appendToBody @closed="fullscreen = false">
     <el-input class="textEditor" :class="{ fullscreen }" v-model="text" type="textarea" :rows="1" :disabled="generating" resize="none" aria-label="编辑文本内容" />
   </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onScopeDispose, ref, watch } from "vue";
+import { computed, onMounted, onScopeDispose, ref, shallowRef, watch } from "vue";
 import { ElButton, ElCard, ElInput, ElSelect, ElDialog, ElOption, ElOptionGroup, ElMessage, ElMessageBox } from "element-plus";
 import { IconEdit, IconFileText, IconSparkles, IconArrowUp } from "@tabler/icons-vue";
 import { groupNodeModels, nodeSkeleton, useNode, useNodeReferences, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
+import { createTextSave } from "./textSave";
 
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
 defineOptions({ inheritAttrs: false, icon: IconFileText });
@@ -56,6 +62,7 @@ const nodeData = computed(() => node.data as typeof node.data & Record<string, u
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
 const text = ref("");
 const savedText = ref("");
+const textSave = shallowRef<ReturnType<typeof createTextSave>>();
 const textReady = ref(false);
 const textPath = `assets/${node.id}/content.md`;
 const editing = ref(false);
@@ -69,12 +76,8 @@ const modelsLoading = ref(false);
 const generating = ref(false);
 const selectedModel = computed(() => models.value.find(item => JSON.stringify([item.providerId, item.modelId]) === model.value));
 const modelGroups = computed(() => groupNodeModels(models.value));
-let revision = "";
 let applying = false;
 let disposed = false;
-let dirty = false;
-let saveError: unknown;
-let textSaving = Promise.resolve();
 let promptSaving = Promise.resolve();
 let promptTimer: ReturnType<typeof setTimeout> | undefined;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -84,10 +87,10 @@ function showError(error: unknown) {
   ElMessage.error(error instanceof Error ? error.message : "文本操作失败");
 }
 function applyText(content: string, nextRevision: string) {
+  textSave.value?.refresh({ content, revision: nextRevision });
   applying = true;
-  text.value = content;
-  savedText.value = content;
-  revision = nextRevision;
+  text.value = textSave.value?.state.content ?? content;
+  savedText.value = textSave.value?.state.savedText ?? content;
   applying = false;
 }
 watch([text, () => node.selected], ([content, selected], _previous, onCleanup) => {
@@ -99,15 +102,23 @@ watch([text, () => node.selected], ([content, selected], _previous, onCleanup) =
 }, { immediate: true });
 watch(text, value => {
   if (applying || !textReady.value || generating.value) return;
-  dirty = true;
-  textSaving = textSaving.then(async () => {
-    if (saveError) throw saveError;
-    const result = await execution.writeText(textPath, value, revision);
-    revision = result.revision;
-    savedText.value = value;
-    if (text.value === value) dirty = false;
-  }).catch(error => { saveError = error; showError(error); });
+  void textSave.value?.update(value).catch(() => {});
 }, { flush: "sync" });
+watch(() => textSave.value?.state.savedText, value => { if (value !== undefined) savedText.value = value; });
+async function retryTextSave() {
+  try { await textSave.value?.retry(); } catch (error) { showError(error); }
+}
+async function resolveTextConflict() {
+  const saving = textSave.value;
+  if (!saving?.state.conflict) return;
+  try {
+    const content = text.value;
+    const remote = await execution.readText(textPath);
+    await ElMessageBox.confirm(`远端正文：\n${remote.content}\n\n保留的本地草稿：\n${content}\n\n确认用此草稿保存到已核对的远端版本？`, "核对正文冲突", { type: "warning", confirmButtonText: "确认保存草稿", cancelButtonText: "保留草稿", customStyle: { whiteSpace: "pre-wrap", maxHeight: "80vh", overflow: "auto" } });
+    if (disposed || text.value !== content) return;
+    await saving.resolveConflict(remote, content);
+  } catch (error) { if (error !== "cancel" && error !== "close") showError(error); }
+}
 function savePrompt() {
   clearTimeout(promptTimer);
   promptTimer = undefined;
@@ -134,11 +145,10 @@ watch(() => [nodeData.value.prompt, nodeData.value.model], () => {
   applying = false;
 });
 nodeEvent.on("save", async () => {
-  await textSaving;
-  if (saveError) throw saveError;
+  await textSave.value?.flush();
 });
 nodeEvent.on("copy", () => {
-  if (!textReady.value || dirty || saveError) throw new Error("请先完成文本保存");
+  if (!textReady.value || textSave.value?.state.dirty || textSave.value?.state.error) throw new Error("请先完成文本保存");
   return { textPath: undefined, textSnapshot: text.value };
 });
 async function loadModels() {
@@ -157,7 +167,7 @@ async function refresh() {
       const job = typeof jobId === "string" ? await execution.getJob(jobId) : undefined;
       generating.value = !!job && ["accepted", "running"].includes(job.status);
       const current = await execution.readText(textPath);
-      if (!dirty && !saveError && !editing.value) applyText(current.content, current.revision);
+      if (!editing.value) applyText(current.content, current.revision);
     }
   } catch (error) { if (!disposed) showError(error); }
   finally { if (!disposed) pollTimer = setTimeout(() => { void refresh(); }, 2000); }
@@ -165,8 +175,7 @@ async function refresh() {
 async function generateText() {
   if (!textReady.value || generating.value || !selectedModel.value || !prompt.value.trim()) return;
   try {
-    await textSaving;
-    if (saveError) throw saveError;
+    await textSave.value?.flush();
     const jobId = nodeData.value.generationJobId;
     const previous = typeof jobId === "string" ? await execution.getJob(jobId) : undefined;
     if (previous?.status === "needsReview") {
@@ -182,17 +191,35 @@ async function generateText() {
 }
 onMounted(async () => {
   try {
+    const target = execution.getTarget();
+    const checkTarget = () => {
+      const current = execution.getTarget();
+      if (current.directory !== target.directory || current.canvasPath !== target.canvasPath) throw new Error("节点所属画布已切换，原正文草稿已保留");
+    };
+    textSave.value = createTextSave({ directory: target.directory, path: textPath,
+      read: () => { checkTarget(); return execution.readText(textPath); },
+      write: request => { checkTarget(); return execution.writeText(textPath, request.content, request.expectedRevision, request.commandId); },
+    });
     const value = await execution.call<{ content: string; revision: string }>("getText");
+    textSave.value.load(value);
     applyText(value.content, value.revision);
     textReady.value = true;
     await loadModels();
-    void refresh();
   } catch (error) { showError(error); }
+  finally { if (textReady.value && !disposed) void refresh(); }
 });
 onScopeDispose(() => { disposed = true; clearTimeout(promptTimer); clearTimeout(pollTimer); });
 </script>
 
 <style lang="scss" scoped>
+.saveStatus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  color: var(--el-color-warning);
+  overflow-wrap: anywhere;
+}
 .textEditor {
   &.fullscreen :deep(.el-textarea__inner) {
     height: calc(100dvh - 112px);
