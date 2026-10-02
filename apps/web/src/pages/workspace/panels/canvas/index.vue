@@ -62,7 +62,7 @@
           v-bind="nodeProps"
           :component="nodeTypes[type]"
           :error="nodeErrors[type]"
-          :loading="nodeLoads.has(type) || (nodeListLoading && !nodeTypes[type] && !nodeErrors[type])" />
+          :loading="!canvasId || nodeLoads.has(type) || (nodeListLoading && !nodeTypes[type] && !nodeErrors[type])" />
       </template>
       <background :gap="16" pattern-color="var(--el-border-color)" />
       <canvasMenu ref="canvasMenuRef" v-model:canvasId="canvasId" :directory="project?.directory" :initialCanvasId="initialCanvasId" :activateCanvas="activateCanvas" :flushSave="flushCanvases ?? flushCanvasSave" :onGraphLoaded="rememberGraph" :onGraphRenamed="renameGraphSnapshot">
@@ -172,7 +172,7 @@ import { useNodeEvent } from "@toonflow/nodes-scaffold/nodeEvent";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { generalSettings } from "@/stores/settings";
 import { getShortcutBindings, shortcutLabel, shortcutMatches, shortcutPressed } from "@/lib/canvasShortcuts";
-import useWorkspaceFiles, { type WorkspaceGraph } from "@/lib/workspaceFiles";
+import useWorkspaceFiles, { graphValueJson, type WorkspaceGraph } from "@/lib/workspaceFiles";
 import anonymousData from "@/lib/anonymousData";
 import saveFile from "@/lib/saveFile";
 import { dropCanvasFiles, importCanvasFiles, isCanvasFileDrag } from "./canvasDrop";
@@ -606,7 +606,7 @@ function mergeSavedGraph(sent: Pick<WorkspaceGraph, "nodes" | "edges" | "viewpor
     const result = server[kind].map(item => {
       const live = currentItems.get(item.id);
       currentItems.delete(item.id);
-      if (!live || JSON.stringify(live) === JSON.stringify(sentItems.get(item.id))) return item;
+      if (!live || graphValueJson(live) === graphValueJson(sentItems.get(item.id))) return item;
       if (kind === "nodes") {
         const before = sentItems.get(item.id) as Node | undefined;
         const local = live as Node;
@@ -614,7 +614,7 @@ function mergeSavedGraph(sent: Pick<WorkspaceGraph, "nodes" | "edges" | "viewpor
         const outputs = { ...remote.data?.outputs };
         for (const slot of new Set([...Object.keys(before?.data?.outputs ?? {}), ...Object.keys(local.data?.outputs ?? {})])) {
           const value = local.data?.outputs?.[slot];
-          if (JSON.stringify(value) === JSON.stringify(before?.data?.outputs?.[slot])) continue;
+          if (graphValueJson(value) === graphValueJson(before?.data?.outputs?.[slot])) continue;
           if (value === undefined) delete outputs[slot];
           else outputs[slot] = value;
         }
@@ -623,15 +623,15 @@ function mergeSavedGraph(sent: Pick<WorkspaceGraph, "nodes" | "edges" | "viewpor
       return live;
     });
     for (const item of currentItems.values()) {
-      if (JSON.stringify(item) !== JSON.stringify(sentItems.get(item.id))) result.push(item);
+      if (graphValueJson(item) !== graphValueJson(sentItems.get(item.id))) result.push(item);
     }
     return result;
   };
   const nodes = merge("nodes");
   const edges = merge("edges");
-  if (JSON.stringify(nodes) !== JSON.stringify(current.nodes)) flow.setNodes(nodes as Node[]);
-  if (JSON.stringify(edges) !== JSON.stringify(current.edges)) flow.setEdges(edges as Edge[]);
-  if (JSON.stringify(current.viewport) === JSON.stringify(sent.viewport) && JSON.stringify(server.viewport) !== JSON.stringify(current.viewport)) void flow.setViewport(server.viewport);
+  if (graphValueJson(nodes) !== graphValueJson(current.nodes)) flow.setNodes(nodes as Node[]);
+  if (graphValueJson(edges) !== graphValueJson(current.edges)) flow.setEdges(edges as Edge[]);
+  if (graphValueJson(current.viewport) === graphValueJson(sent.viewport) && graphValueJson(server.viewport) !== graphValueJson(current.viewport)) void flow.setViewport(server.viewport);
 }
 let refreshingGraph = false;
 let lastConflictRevision = -1;
@@ -657,14 +657,14 @@ async function refreshGraph() {
       const liveItems = new Map(current[kind].map(item => [item.id, item]));
       const remoteItems = new Map(remote[kind].map(item => [item.id, item]));
       return [...new Set([...oldItems.keys(), ...liveItems.keys(), ...remoteItems.keys()])].some(id => {
-        const oldValue = JSON.stringify(oldItems.get(id));
-        const liveValue = JSON.stringify(liveItems.get(id));
-        const remoteValue = JSON.stringify(remoteItems.get(id));
+        const oldValue = graphValueJson(oldItems.get(id));
+        const liveValue = graphValueJson(liveItems.get(id));
+        const remoteValue = graphValueJson(remoteItems.get(id));
         return liveValue !== oldValue && remoteValue !== oldValue && liveValue !== remoteValue;
       });
-    }) || (JSON.stringify(current.viewport) !== JSON.stringify(baseline.viewport)
-      && JSON.stringify(remote.viewport) !== JSON.stringify(baseline.viewport)
-      && JSON.stringify(current.viewport) !== JSON.stringify(remote.viewport));
+    }) || (graphValueJson(current.viewport) !== graphValueJson(baseline.viewport)
+      && graphValueJson(remote.viewport) !== graphValueJson(baseline.viewport)
+      && graphValueJson(current.viewport) !== graphValueJson(remote.viewport));
     if (overlapping) {
       canvasDraft.value = persistCanvasDraft(directory, path, baseline, current);
       if (lastConflictRevision !== remote.toonflowGraph.revision) ElMessage.warning("其他设备修改了同一画布元素，请重新打开画布处理冲突");
