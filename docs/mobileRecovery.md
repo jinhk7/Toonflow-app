@@ -99,4 +99,15 @@
 
 最终 Edge 双标签验证通过：A 的命令响应和 SDK 回执 GET 定向返回 503（真实命令已提交），B 冲突后 A 凭据仍在；A 重载恢复 B 新稿，旧回执删除已确认原快照而不改变 B 原版本。未接受新版本的保存仍冲突，显示远端后明确接受再保存成功，B 重载为 clean，独立快照为 0，原已保存草稿不复活。最新源码下 reader 取消后仍可核对，规范目录文件单独变化恢复、20 秒 idle 零 API、75% 实时进度更新均通过，活跃订阅最终为 3，外部 fetch 拒绝为 0；证据见 reviewDomQaEvidence.json。
 
-同 Astra 对 ddd56e5 的复审中，其余七项及保存时序、草稿原子清理、取消 loading 均通过，模型字段映射仍有一项 P2。前一轮 vendor/engine fixture 同时改写了模型记录字段，遗漏宿主标准返回值。本轮严格保留原输入 models=[{providerId:"p",modelId:"m1",sizes:["512"]},{providerId:"p",modelId:"m2",sizes:["1024"]}]，只将表单映射设为 vendor/engine、providerField="vendor"。完整 Vue SFC 与原服务端 validator/Zod 验证确认两个非 null 模型选项、原尺寸 512 回填、切换 m2 清除旧尺寸、选择 1024 后参数为 {vendor:"p",engine:"m2",size:"1024"}；原模型记录前后完全一致。标准内置字段、导演组合模型字段及旧自定义记录兼容验证也通过。390×844 真实 Edge 原生下拉及保存操作得到同样结果，捕获完整 CanvasCommand 并通过原 Zod；无网络错误或真实供应商请求，独立标签已关闭。证据见 mobileModelStandardRecordFixEvidence.json、mobileModelStandardRecordFix.png。此项 DOM 的元数据、读取响应和保存回执为定向合成响应，不代表真实第三方后端保存。PR9 保持 draft，待同 Astra 对新提交复验后继续既定审查流程。
+同 Astra 对 ddd56e5 的复审中，其余七项及保存时序、草稿原子清理、取消 loading 均通过，模型字段映射仍有一项 P2。前一轮 vendor/engine fixture 同时改写了模型记录字段，遗漏宿主标准返回值。本轮严格保留原输入 models=[{providerId:"p",modelId:"m1",sizes:["512"]},{providerId:"p",modelId:"m2",sizes:["1024"]}]，只将表单映射设为 vendor/engine、providerField="vendor"。完整 Vue SFC 与原服务端 validator/Zod 验证确认两个非 null 模型选项、原尺寸 512 回填、切换 m2 清除旧尺寸、选择 1024 后参数为 {vendor:"p",engine:"m2",size:"1024"}；原模型记录前后完全一致。标准内置字段、导演组合模型字段及旧自定义记录兼容验证也通过。390×844 真实 Edge 原生下拉及保存操作得到同样结果，捕获完整 CanvasCommand 并通过原 Zod；无网络错误或真实供应商请求，独立标签已关闭。证据见 mobileModelStandardRecordFixEvidence.json、mobileModelStandardRecordFix.png。此项 DOM 的元数据、读取响应和保存回执为定向合成响应，不代表真实第三方后端保存。上述结果随后由同 Astra 最终独立复验通过；后续 Codex 评审修复见下节。
+
+## Codex 评审修复
+
+同 Astra 对 461a4021 最终独立复验通过，八项问题全部闭环；随后 PR9 转为 ready，Codex 对该提交评审提出两项 P2，已完成以下修复并等待最新 HEAD 复评。
+
+| 问题 | 修复及验证 |
+| --- | --- |
+| 桌面断线期间插件变更没有可重放事件，恢复后目录仍旧 | 桌面恢复先核对画布再读取全局节点目录，两者成功后采纳游标，避免旧目录响应与新游标并发配对；目录读取失败不推进游标并等待重试。首次目录读取统一由恢复链完成，未变化的描述、配置、菜单与组件保留引用。完整桌面 SFC 和真实 Vue 恢复链验证离线新增目录后可用项更新，原节点与草稿保持，setNodes 为 0；目录失败恢复后订阅为 1，20 秒空闲无额外请求或组件加载。证据 pr9DesktopCatalogRecoveryEvidence.json；此轮使用受控 transport，未声称真实浏览器焦点已测 |
+| 通知失败使已经提交的插件操作误报失败 | 公共通知入口逐工作区隔离事件写入失败并记录明确日志，其他工作区继续通知；原插件文件或配置异常仍向 HTTP 调用方传播。正式隔离 HTTP 与 SQLite 触发器验证 install/save/setEnabled/uninstall 均返回 200 且实际提交，故障工作区事件为 0、兄弟工作区为 4、错误日志为 4；真实只读文件引发替换 EPERM 时返回 403，原文件保持且不追加通知。证据 pr9NotificationFailureEvidence.json |
+
+通知仍采用现有事件存储，没有新增 outbox；在线通知失败时通过恢复连接或显式刷新重新核对目录。故障触发器已移除，文件属性已恢复，临时服务已关闭，外部 fetch 为 0。Server、最终 Web 类型检查及 diff 检查通过，完整 build:server 与最后 Web 重建通过，仅现有 chunk 提示。游标期间自动保存推进、dirty 图冲突、原图读取异常和恢复取消均有原函数/真实 Vue 证据；游标不提前提交，独立目录仍核对，原图异常保留。未新增任何测试文件、框架或检查入口。

@@ -115,8 +115,11 @@ export function appendWorkspaceEvent(directory: string, type: WorkspaceEvent["ty
 }
 
 export function notifyPluginsChanged(name: string) {
-  // 节点目录属于全局设置；在线工作区立即核对，离线工作区在恢复订阅时核对目录。
-  for (const directory of [...subscribers.keys()]) appendWorkspaceEvent(directory, "pluginsChanged", { nodeName: name });
+  // ACT: 全局目录在恢复或显式刷新时核对；通知失败仅记录，避免反转已提交操作。
+  for (const directory of [...subscribers.keys()]) {
+    try { appendWorkspaceEvent(directory, "pluginsChanged", { nodeName: name }); }
+    catch (error) { console.error("插件操作已提交，但工作区通知失败；恢复连接时将重新核对节点目录", { name, directory }, error); }
+  }
 }
 
 export function getWorkspaceCursor(directory: string) {
