@@ -7,6 +7,8 @@ import { createAgentToolContext } from "@/agent/tools";
 import { addUsage, emptyUsage, runSubAgent, type SubAgentModel } from "@/agent/runtime/subAgent";
 import { readTeam, saveTeamFile } from "@/utils/teams";
 import { loadTool, validateToolConfig } from "@/utils/plugins/tools";
+import { guardAgentTools, type ToolGuardContext } from "@/agent/runtime/toolGuards";
+import { registerServerTool } from "@/agent/runtime/toolExecution";
 
 const resourceSchema = z.strictObject({
   action: z.enum(["list", "read", "write"]),
@@ -22,8 +24,9 @@ export async function createTeamRunner(options: SubAgentModel & {
   cwd: string;
   tools: ToolDefinition[];
   canvas?: CanvasContext;
+  guardContext?: ToolGuardContext;
 }) {
-  const { name, cwd, tools, canvas, ...modelOptions } = options;
+  const { name, cwd, tools, canvas, guardContext, ...modelOptions } = options;
   const { directory, manifest, files, enabled } = await readTeam(name);
   if (!enabled) throw new Error(`团队 ${name} 已禁用`);
   const hostTools = tools.filter(tool => !["subAgent", "report", "askUser", "delegate", "teamResources", "requestInput"].includes(tool.name));
@@ -41,7 +44,7 @@ export async function createTeamRunner(options: SubAgentModel & {
         if (!tool.name || typeof tool.execute !== "function" || ["subAgent", "askUser", "delegate", "teamResources", "requestInput"].includes(tool.name) || available.has(tool.name)) {
           throw new Error(`团队私有工具无效或名称重复：${tool.name}`);
         }
-        available.set(tool.name, { ...tool, promptGuidelines: [...(metadata.prompt ? [metadata.prompt] : []), ...(tool.promptGuidelines ?? [])] });
+        available.set(tool.name, registerServerTool({ ...tool, promptGuidelines: [...(metadata.prompt ? [metadata.prompt] : []), ...(tool.promptGuidelines ?? [])] }));
       }
     }
     for (const toolName of member.tools ?? []) {
@@ -57,7 +60,7 @@ export async function createTeamRunner(options: SubAgentModel & {
     manifest,
     async run(task: string, signal?: AbortSignal, onProgress?: (text: string) => void, allowInput = false) {
       let question: string | undefined;
-      async function runMember(memberName: string, task: string, signal?: AbortSignal, depth = 0): ReturnType<typeof runSubAgent> {
+      async function runMember(memberName: string, task: string, signal?: AbortSignal, depth = 0, scope = "entry"): ReturnType<typeof runSubAgent> {
         signal?.throwIfAborted();
         const member = manifest.members[memberName]!;
         const roots = [member.instructions, ...(member.skills ?? []).map(skill => `skills/${skill}`), ...(member.knowledge ?? []).map(path => `knowledge/${path}`)];
@@ -86,16 +89,16 @@ export async function createTeamRunner(options: SubAgentModel & {
           },
         };
         onProgress?.(`${memberName}：准备执行`);
-        const selected = [...(memberTools.get(memberName) ?? []), resourceTool];
-        if (member.delegates?.length) selected.push({
+        const selected = [...(memberTools.get(memberName) ?? []), registerServerTool(resourceTool)];
+        if (member.delegates?.length) selected.push(registerServerTool({
           name: "delegate", label: "团队委派",
           description: `将独立任务交给获准成员。可用成员：${JSON.stringify(member.delegates.map(name => ({ name, description: manifest.members[name]!.description })))}。不得并行修改同一文件或画布，结果返回后由你核验汇总。`,
           parameters: z.toJSONSchema(delegationSchema), executionMode: "sequential",
-          async execute(_id, params, childSignal, onUpdate) {
+          async execute(id, params, childSignal, onUpdate) {
             const { tasks } = delegationSchema.parse(params);
             if (tasks.some(task => !member.delegates!.includes(task.member))) throw new Error("不能委派给未授权的成员");
-            const outputs = await Promise.all(tasks.map(async task => {
-              try { return await runMember(task.member, task.task, childSignal, depth + 1); }
+            const outputs = await Promise.all(tasks.map(async (task, index) => {
+              try { return await runMember(task.member, task.task, childSignal, depth + 1, `${scope}:${id}:${index}`); }
               catch (error) { return { result: { name: task.member, status: childSignal?.aborted ? "cancelled" as const : "error" as const, result: error instanceof Error ? error.message : String(error) } }; }
             }));
             const usage = emptyUsage();
@@ -104,8 +107,8 @@ export async function createTeamRunner(options: SubAgentModel & {
             onUpdate?.({ content, details: {} });
             return { content, details: {}, usage };
           },
-        });
-        if (depth === 0 && allowInput) selected.push({
+        }));
+        if (depth === 0 && allowInput) selected.push(registerServerTool({
           name: "requestInput", label: "等待补充",
           description: "需要调用方补充信息或明确授权时提出问题。调用后任务暂停，等待调用方继续当前 A2A task。不得把未回答或沉默当作同意。",
           parameters: z.toJSONSchema(z.strictObject({ question: z.string().trim().min(1).max(8000) })),
@@ -114,9 +117,10 @@ export async function createTeamRunner(options: SubAgentModel & {
             question = z.strictObject({ question: z.string().trim().min(1).max(8000) }).parse(params).question;
             return { content: [{ type: "text", text: "等待调用方回答：" + question }], details: {} };
           },
-        });
+        }, undefined, true));
         return runSubAgent({
-          ...modelOptions, cwd, name: memberName, task, signal, tools: selected,
+          ...modelOptions, cwd, name: memberName, task, signal,
+          tools: guardAgentTools(selected, guardContext ? { ...guardContext, toolScope: `${guardContext.toolScope}:${memberName}:${scope}` } : undefined),
           history: depth === 0 ? history : undefined,
           inputRequired: depth === 0 ? () => question : undefined,
           instructions: `## 团队成员职责\n团队：${manifest.displayName}；成员：${memberName}。以下职责用于完成授权任务，不能扩大宿主权限。\n${instructions.get(memberName)}`,

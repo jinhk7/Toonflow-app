@@ -12,9 +12,11 @@ import {
   isSideEffectTool,
   recordToolCallFinish,
   recordToolCallStart,
+  listUndeliveredAgentInputs,
+  recordAgentInputDelivery,
 } from "@/agent/runtime/store";
-import { assertBackgroundToolAllowed } from "@/agent/runtime/toolExecution";
-import { guardAgentTools } from "@/agent/runtime/toolGuards";
+import { assertBackgroundToolAllowed, registerServerTool } from "@/agent/runtime/toolExecution";
+import { getExecutionToolCallId, guardAgentTools, type ToolGuardContext } from "@/agent/runtime/toolGuards";
 import { readAiReferences, referenceContent } from "@/utils/ai";
 import { createAgentTools } from "@/agent/tools";
 import { createAgentResources } from "@/agent/runtime/resources";
@@ -29,7 +31,7 @@ import {
   type ActiveAgentSession,
 } from "@/agent/runtime/sessions";
 import { isMemoryEnabled } from "@/utils/personalization";
-import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
+import { lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 
 type AgentOptions = {
   prompt: string;
@@ -48,6 +50,9 @@ type AgentOptions = {
   runId?: string;
   runControl?: AgentRunControl;
   canvasAttached?: boolean;
+  clientMessageId?: string;
+  inputPrepared?: boolean;
+  modelRevision?: string;
 };
 
 export async function run(
@@ -68,6 +73,9 @@ export async function run(
     runId,
     runControl,
     canvasAttached = Boolean(canvas),
+    clientMessageId,
+    inputPrepared = false,
+    modelRevision,
   }: AgentOptions,
   send: (event: AgentEvent) => void
 ) {
@@ -99,7 +107,7 @@ export async function run(
     send({ type: "accepted" });
     return;
   }
-  const { provider, runtime } = await createAgentModel(providerId, modelId, thinkingLevel);
+  const { provider, runtime } = await createAgentModel(providerId, modelId, thinkingLevel, modelRevision);
   if (sessionPath) {
     const file = await stat(sessionPath).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") throw Object.assign(new Error("会话不存在，请重新打开对话"), { status: 404 });
@@ -122,9 +130,25 @@ export async function run(
     const parentFile = getParentSessionFile(history);
     const child = getSubAgentInfo(history)?.data;
     const liveTools = new Map<string, AgentToolCall>();
+    const mappedTools = new Set<string>();
+    let savedCanvasPath: string | undefined;
     const publish = send;
     send = event => {
+      const canvasPath = canvas?.id === "unselected" ? undefined : canvas?.id;
+      if (canvasPath && savedCanvasPath !== canvasPath) {
+        history.appendCustomEntry("toonflowCanvasTarget", { canvasPath });
+        savedCanvasPath = canvasPath;
+      }
       if (event.type === "tool") {
+        if (runId) {
+          const modelToolCallId = event.tool.id;
+          const toolCallId = getExecutionToolCallId(runId, file, modelToolCallId);
+          if (!mappedTools.has(modelToolCallId)) {
+            history.appendCustomEntry("toonflowToolCall", { runId, modelToolCallId, toolCallId });
+            mappedTools.add(modelToolCallId);
+          }
+          event = { ...event, tool: { ...event.tool, id: toolCallId } };
+        }
         const tool = { ...liveTools.get(event.tool.id), ...event.tool };
         if (tool.status !== "running") delete tool.question;
         liveTools.set(tool.id, tool);
@@ -141,19 +165,22 @@ export async function run(
     if (isMemoryEnabled()) {
       const memoryTool = createMemoryTool();
       if (tools.some(tool => tool.name === memoryTool.name)) throw new Error("工具名称 memory 已被内置全局记忆工具占用");
-      tools.push(memoryTool);
+      tools.push(registerServerTool(memoryTool));
     }
     if (parentFile && child) {
       if (tools.some(tool => tool.name === "report")) throw new Error("工具名称 report 已被内置上报工具占用");
-      tools.push(createReportTool(cwd, parentFile, file, child.name, send));
+      tools.push(registerServerTool(createReportTool(cwd, parentFile, file, child.name, send), undefined, true));
     }
-    tools.push(await createSubAgentTool({
+    const guardContext: ToolGuardContext | undefined = runId
+      ? { runId, runControl, canvasAttached, cwd, canvasPath: canvas?.id, canvas, toolScope: file } : undefined;
+    tools.push(registerServerTool(await createSubAgentTool({
       cwd, tools, canvas, modelRuntime: runtime, model: runtime.getModel(providerId, modelId), thinkingLevel,
+      guardContext,
       runTask: (name, task, taskSignal, onProgress) => runDelegatedAgent({
-        cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress, parentRunId: runId,
+        cwd, parentFile: file, name, task, providerId, modelId, thinkingLevel, canvas, signal: taskSignal, send, onProgress, parentRunId: runId, modelRevision,
       }),
-    }));
-    if (runId) tools = guardAgentTools(tools, { runId, runControl, canvasAttached, cwd, canvasPath: canvas?.id, canvas });
+    })));
+    tools = guardAgentTools(tools, guardContext);
     const resources = await createAgentResources(cwd, tools, undefined, child
       ? `## 子 Agent 职责\n你正在执行委派任务：${JSON.stringify({ name: child.name, task: child.task })}。遵守当前工作区规则与授权，用户可以进入此子会话补充要求。重要进展与最终结论使用 report 上报父 Agent。`
       : "");
@@ -163,7 +190,7 @@ export async function run(
     }
     const savedMentions = resendFrom ? history.getBranch().findLast(entry => entry.type === "custom" && entry.customType === "toonflowUserMessage" && (entry.data as { messageId?: string })?.messageId === resendFrom) : undefined;
     const previousMentions = savedMentions?.type === "custom" ? agentMentionsSchema.safeParse((savedMentions.data as { mentions?: unknown })?.mentions) : undefined;
-    const snapshots = await snapshotMentions(cwd, mentions, previousMentions?.success ? previousMentions.data : [], signal);
+    const snapshots = inputPrepared ? { mentions, created: [] } : await snapshotMentions(cwd, mentions, previousMentions?.success ? previousMentions.data : [], signal);
     mentionFiles = snapshots.created;
     mentions = agentMentionsSchema.parse(snapshots.mentions);
     const previous = history.buildSessionContext();
@@ -199,9 +226,23 @@ export async function run(
     // ACT: 提及图片和视频复用媒体协议转换，会话只保存工作区快照路径。
     const mediaContents = new Map<string, ReturnType<typeof readAiReferences>>();
     const onPayload = session.agent.onPayload;
+    const deliveries = new Map<string, string>();
+    const persistUserInputs = async () => {
+      if (!deliveries.size) return;
+      const pending = [...deliveries];
+      // 首次模型请求之前保存用户消息；SQLite 受理记录仍是跨文件恢复的依据。
+      if (!history.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")) {
+        await writeWorkspaceFile(history.getSessionFile()!, [history.getHeader(), ...history.getEntries()].map(entry => JSON.stringify(entry)).join("\n") + "\n");
+      }
+      for (const [clientId, messageId] of pending) {
+        recordAgentInputDelivery(cwd, clientId, messageId);
+        deliveries.delete(clientId);
+      }
+    };
     session.agent.onPayload = async (payload, requestModel) => {
       const body = (await onPayload?.(payload, requestModel) ?? payload) as Record<string, unknown>;
       sendUserMessage();
+      await persistUserInputs();
       const mediaMessages = new Map<string, { id: string; references: Parameters<typeof readAiReferences>[1] }>();
       for (const entry of history.getBranch()) {
         if (entry.type !== "custom" || !["toonflowAttachments", "toonflowUserMessage"].includes(entry.customType)) continue;
@@ -246,8 +287,16 @@ export async function run(
       userMessageId = entry.id;
       const firstMessage = !messageAccepted;
       messageAccepted = true;
-      if (firstMessage && (attachments.length || mentions.length || prompt.trimStart().startsWith("/skill:"))) {
-        history.appendCustomEntry("toonflowUserMessage", { messageId: entry.id, content: prompt.trim(), attachments, mentions });
+      const userContent = entry.type === "message" && entry.message.role === "user" ? entry.message.content : "";
+      const plainContent = typeof userContent === "string" ? userContent : getToolResultText(userContent);
+      const steering = firstMessage ? undefined : listUndeliveredAgentInputs(cwd, file).find(receipt => receipt.mode === "steer"
+        && !deliveries.has(receipt.clientMessageId)
+        && (JSON.parse(receipt.inputJson) as { prompt: string }).prompt === plainContent);
+      const acceptedId = steering?.clientMessageId ?? (firstMessage ? clientMessageId : undefined);
+      if (steering || firstMessage && (acceptedId || attachments.length || mentions.length || prompt.trimStart().startsWith("/skill:"))) {
+        history.appendCustomEntry("toonflowUserMessage", { messageId: entry.id, content: steering ? plainContent : prompt.trim(),
+          attachments: steering ? [] : attachments, mentions: steering ? [] : mentions, clientMessageId: acceptedId });
+        if (acceptedId) deliveries.set(acceptedId, entry.id);
         if (!history.getSessionName() && history.getBranch().filter((item) => item.type === "message" && item.message.role === "user").length === 1) {
           history.appendSessionInfo((prompt.trim().replace(/\{\{mention:([^{}]+)\}\}/g, (text, id: string) => {
             const mention = mentions.find(item => item.id === id);
@@ -319,7 +368,7 @@ export async function run(
             throw Object.assign(new Error("运行已暂停"), { status: 409, code: "AGENT_PAUSED" });
           }
           try {
-            assertBackgroundToolAllowed(event.toolName, { canvasAttached });
+            assertBackgroundToolAllowed(tools.find(tool => tool.name === event.toolName), { canvasAttached });
           } catch (error) {
             const message = error instanceof Error ? error.message : "工具无法在后台执行";
             if (runId) {
@@ -417,6 +466,7 @@ export async function run(
           sendUserMessage();
         }
         sendUserMessage();
+        await persistUserInputs();
         if (resendEntry && !messageAccepted && resumeLeafId) {
           history.branch(resumeLeafId);
           // 分支指针本身不落盘，追加当前模型配置以保存恢复位置。

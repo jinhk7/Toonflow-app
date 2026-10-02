@@ -30,6 +30,10 @@ NodeExecutionDefinition 提供 name/stateVersion/handles/defaultData/layoutSize/
 
 NodeExecutionContext 绑定 directory/canvasPath/node/commandId/revision；提供 readText/writeText、patchData/setOutput、输入值解析、配置和持久 runJob。执行不得依赖 Vue、DOM、当前页面或浏览器本地状态。重计算通过 runJob，不长时间持有 Graph 锁。
 
+受理时固定节点状态、配置、执行 revision、上游文本与媒体文件副本；getInputs 按 referenceOrder 排序。动作可显式声明 snapshotInputs:false，省去无需上游输入的状态查询/配置更新的素材复制；此声明不改变审批规则，并禁止该动作随后读取上游输入。
+
+宿主 getModels 返回公开模型能力；getJob/cancelJob 面向持久节点作业。getMediaJob/retryMediaCollection 同时接受包装作业 ID、原媒体 ID 或本项目旧幂等键，复用原媒体任务。runJob 负责保存 generationJobId，media 负责 pendingMediaJob 与输出槽版本绑定，插件不得重复写入这些标记。重试收取不再次调用供应商生成。文本产物先保存到任务结果再 CAS 发布，正文冲突进入 needsReview 且保留文本。
+
 内置 job kind：text 输入 {providerId,modelId,prompt,systemPrompt?,references?,path?,expectedRevision?}，结果 {text,path?,revision?}；media 输入 {mediaType,request,binding?}，request 为既有 MediaGenerationRequest，结果 GeneratedMedia[]；render 使用下列渲染契约。nodeId/canvasPath/pluginRevision 使用外层 NodeJobRequest 固定，不相信客户端额外伪造目标。自定义任务按后端 handler 注册发现。
 
 ## 作业与渲染

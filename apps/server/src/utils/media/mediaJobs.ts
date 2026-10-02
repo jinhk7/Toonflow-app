@@ -15,6 +15,8 @@ import { mediaInputDirectory, snapshotMediaRequest } from "@/utils/media/generat
 import { getMediaProvider } from "@/utils/media/provider";
 import { readGraph } from "@/utils/workspace/graph";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
+import { loadNodeExecution } from "@/utils/plugins/nodeExecution";
+import { isTypeCompatible } from "@toonflow/nodes-scaffold/connection";
 
 export type MediaJobView = {
   jobId: string;
@@ -76,6 +78,7 @@ export type AcceptMediaJobInput = {
   request: MediaGenerationRequest;
   idempotencyKey: string;
   binding?: { canvasPath: string; nodeId: string; outputSlot: string; expectedNodeVersion: number };
+  snapshot?: { directory: string; request: MediaGenerationRequest };
 };
 
 export type AcceptMediaJobResult =
@@ -100,20 +103,20 @@ export async function acceptMediaJob(input: AcceptMediaJobInput): Promise<Accept
   let binding: NonNullable<Parameters<typeof insertMediaJob>[0]["binding"]> | undefined;
   if (input.binding) {
     const { canvasPath, nodeId, outputSlot, expectedNodeVersion } = input.binding;
-    if (input.mediaType === "audio" || outputSlot !== input.mediaType) throw Object.assign(new Error("输出槽位或节点类型不匹配"), { status: 400 });
     const { path } = await resolveWorkspacePath(directory, canvasPath);
-    const graph = await readGraph(path);
+    const graph = await readGraph(path, directory);
     const node = graph.nodes.find(item => item.id === nodeId);
-    const type = input.mediaType === "image" ? "imageGenerationNode" : "videoGenerationNode";
+    const definition = node ? (await loadNodeExecution((node.type ?? "").replace(/^remote-/, ""))).definition : undefined;
+    const handle = definition?.handles.find(item => item.type === "source" && item.id === outputSlot);
     const pending = node?.data?.pendingMediaJob as { idempotencyKey?: unknown; outputSlot?: unknown } | undefined;
-    if (!node || (node.type !== type && node.type !== `remote-${type}`) || graph.toonflowGraph!.nodes[nodeId] !== expectedNodeVersion
+    if (!node || !handle || !isTypeCompatible(input.mediaType.toUpperCase(), handle.dataType) || graph.toonflowGraph!.nodes[nodeId] !== expectedNodeVersion
       || pending?.idempotencyKey !== input.idempotencyKey || pending.outputSlot !== outputSlot)
       throw Object.assign(new Error("节点已变化或不再等待此任务，请刷新后重新确认生成"), { status: 409 });
     binding = { canvasId: graph.toonflowGraph!.id, canvasPath, nodeId, nodeVersion: expectedNodeVersion,
       outputSlot, outputVersion: graph.toonflowGraph!.outputs[JSON.stringify([nodeId, outputSlot])] ?? 0 };
   }
   const jobId = crypto.randomUUID();
-  const snapshot = await snapshotMediaRequest(directory, jobId, input.request);
+  const snapshot = await snapshotMediaRequest(input.snapshot?.directory ?? directory, jobId, input.snapshot?.request ?? input.request);
   let row: MediaJobRow;
   try {
     row = insertMediaJob({

@@ -16,6 +16,7 @@ export default Router().post("/", validateFields({
   directory: z.string().min(1).max(4096), path: z.string().min(1).max(4096),
   operationId: z.string().uuid(), changes: z.array(change).min(1).max(500),
 }), async (req, res) => {
-  const { path } = await u.workspaceFile.resolveWorkspaceFile(req.body.directory, req.body.path);
-  res.set("Cache-Control", "no-store").json(success(await u.graph.modifyGraph(path, req.body.operationId, req.body.changes)));
+  const { directory, path } = await u.workspaceFile.resolveWorkspaceFile(req.body.directory, req.body.path);
+  if (req.header("X-Toonflow-Protocol") !== "2") throw Object.assign(new Error("画布执行协议已升级，请刷新客户端"), { status: 428 });
+  res.set("Cache-Control", "no-store").json(success(await u.graph.modifyGraph(path, req.body.operationId, req.body.changes, directory)));
 });

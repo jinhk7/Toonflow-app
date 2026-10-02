@@ -1,9 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { BrowserFfmpegRequest } from "@toonflow/ffmpeg";
 import { validateFields } from "@/lib/middleware";
 import { success } from "@/lib/responseFormat";
 import u from "@/utils";
+import "@/utils/jobs/ffmpeg";
 
 const callSchema = z.object({
   method: z.string().min(1).max(64), args: z.array(z.json()).max(128),
@@ -22,47 +22,75 @@ const inputSchema = z.object({
   }).strict(),
   calls: z.array(callSchema).max(2048),
   operation: callSchema,
+  wait: z.boolean().optional(),
 });
-// ACT: Bun 的静默 SSE 不保证触发断开事件；显式取消复用本接口和单进程会话状态。
-const requests = new Map<string, AbortController>();
 
 export default Router().post("/", validateFields(inputSchema.shape), async (req, res) => {
-  const input = inputSchema.parse(req.body) as BrowserFfmpegRequest;
+  const { wait, ...input } = inputSchema.parse(req.body);
   const cwd = await u.workspace.resolveWorkspace(input.directory);
-  const requestKey = `${cwd}\0${input.requestId}`;
+  await u.jobs.ensureNodeJobsReady();
   if (input.operation.method === "cancel") {
-    requests.get(requestKey)?.abort();
+    const job = u.jobs.getNodeJobForCommand(cwd, input.requestId, "ffmpeg");
+    res.json(success(job ? u.jobs.cancelNodeJob(job.jobId) : null));
+    return;
+  }
+  if (input.operation.method === "prepare") {
+    await u.ffmpeg.createWorkspaceFfmpeg(cwd);
     res.json(success());
     return;
   }
-  const controller = new AbortController();
-  if (input.operation.method !== "prepare") {
-    if (requests.has(requestKey)) throw Object.assign(new Error("FFmpeg 请求已在执行"), { status: 409 });
-    requests.set(requestKey, controller);
+  const job = await u.jobs.acceptNodeJob({ directory: cwd, commandId: input.requestId, request: {
+    kind: "ffmpeg", input: { ...input, directory: cwd } as unknown as Record<string, unknown>,
+  } });
+  res.status(202);
+  if (wait === false) {
+    res.json(success(job));
+    return;
   }
-  const close = () => controller.abort();
-  res.once("close", close);
-  req.once("aborted", close);
-  req.socket.once("close", close);
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  try {
-    const factory = await u.ffmpeg.createWorkspaceFfmpeg(cwd, controller.signal);
-    if (input.operation.method === "prepare") {
-      res.json(success());
-      return;
+  // 兼容现有 fluent 浏览器消费者；SSE 仅观察持久任务，不持有执行取消权。
+  res.set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
+  res.flushHeaders();
+  let closed = false;
+  let terminalSent = false;
+  let successfulEvent: Record<string, unknown> | undefined;
+  const controller = new AbortController();
+  const send = (event: Record<string, unknown>, terminal = false) => {
+    if (closed || res.destroyed || terminalSent) return;
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+    if (terminal) terminalSent = true;
+  };
+  const unsubscribe = u.jobs.subscribeNodeJob(job.jobId, event => {
+    if (closed || res.destroyed) return;
+    if (event.type === "ffmpeg") {
+      const name = event.payload.event;
+      if (name === "end" || name === "result") {
+        successfulEvent = event.payload;
+        if (u.jobs.getNodeJob(job.jobId)?.status === "completed") send(successfulEvent, true);
+      } else send(event.payload, name === "error");
     }
-    res.set({ "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" });
-    res.flushHeaders();
-    heartbeat = setInterval(() => { if (!res.destroyed) res.write(": keepalive\n\n"); }, 1000);
-    await u.ffmpeg.executeRemoteFfmpeg(factory, input, event => {
-      if (!res.destroyed) res.write(`data: ${JSON.stringify(event)}\n\n`);
-    }, controller.signal);
-    res.end();
+    else if (event.type === "jobChanged") {
+      const changed = event.payload.job as { status: string; errorMessage?: string };
+      // 历史 end/result 可能早于完成账本提交；needsReview 不得被旧成功事件覆盖。
+      if (changed.status === "completed" && successfulEvent) send(successfulEvent, true);
+      else if (["failed", "cancelled", "needsReview"].includes(changed.status))
+        send({ event: "error", args: [{ message: changed.errorMessage ?? "FFmpeg 任务未完成" }] }, true);
+    }
+  });
+  const close = () => {
+    closed = true;
+    unsubscribe();
+    controller.abort();
+  };
+  res.once("close", close);
+  const heartbeat = setInterval(() => { if (!closed && !res.destroyed) res.write(": keepalive\n\n"); }, 1000);
+  try {
+    await u.jobs.waitForNodeJob(job.jobId, controller.signal);
+  } catch {
+    // 作业失败已发送持久错误事件；HTTP 断开仅停止等待。
   } finally {
-    if (requests.get(requestKey) === controller) requests.delete(requestKey);
+    close();
     clearInterval(heartbeat);
     res.off("close", close);
-    req.off("aborted", close);
-    req.socket.off("close", close);
+    if (!res.destroyed) res.end();
   }
 });

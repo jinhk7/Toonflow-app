@@ -5,6 +5,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import conf from "@/utils/conf";
 import { isWithin } from "@/utils/workspace/files";
+import { getNodeExecutionDescriptor, isBuiltinNodeExecutionTool } from "@/utils/plugins/nodeExecution";
 
 const apply = Reflect.apply;
 const mapGet = Map.prototype.get;
@@ -69,7 +70,7 @@ export function configureBuiltinNodes(nodesRoot?: string) {
 
 export function isBuiltinNodeTool(nodeId: unknown, name: string, context?: NodeToolContext) {
   if (typeof nodeId !== "string" || !nodeId || !context?.cwd || !context.canvasPath) return false;
-  // ACT: 候选本地调用和审批快照同步读取，成本随画布及单包大小增长；超过 16/8 MiB 保留审批，后续可改为异步批量鉴权。
+  // ACT: 候选本地调用和审批快照同步读取，成本随画布及后端单包大小增长；超过 16/20 MiB 保留审批，后续可改为异步批量鉴权。
   try {
     const content = readTrustFile(realpathSync(context.cwd), context.canvasPath, canvasTrustLimit);
     if (!content) return false;
@@ -82,10 +83,8 @@ export function isBuiltinNodeTool(nodeId: unknown, name: string, context?: NodeT
     const type = graphType.slice("remote-".length);
     const tools = apply(mapGet, builtinNodeTools, [type]);
     if (!tools || !apply(setHas, tools, [name])) return false;
-    const expected = apply(mapGet, builtinNodeHashes, [type]);
-    if (!expected || context.nodeRevision !== expected) return false;
-    const installed = readTrustFile(realpathSync(nodesDirectory), `${type}.umd.js`, nodePackageLimit);
-    return !!installed && createHash("sha256").update(installed).digest("hex") === expected;
+    // v2 审批证明必须绑定已加载的真实后端 handler；旧 UI 哈希不证明服务端执行来源。
+    return typeof context.nodeRevision === "string" && isBuiltinNodeExecutionTool(type, name, context.nodeRevision);
   } catch {
     return false;
   }
@@ -118,6 +117,22 @@ export async function readNode(name: string) {
   }
   const rules = configRulesSchema.safeParse(metadata.configRules ?? []);
   if (!rules.success) throw Object.assign(new Error("节点配置表单规则无效，请重新构建节点"), { status: 400 });
+  let executionStatus: "ready" | "needsMigration" | "loadError" | "disabled" = "needsMigration";
+  let executionError = "旧节点仅有 Vue 界面，需迁移后端执行模块";
+  let execution: Awaited<ReturnType<typeof getNodeExecutionDescriptor>>;
+  try {
+    execution = await getNodeExecutionDescriptor(name);
+    if (execution) {
+      if (metadata.protocolVersion !== 2 || metadata.executionRevision !== execution.executionRevision) throw new Error("节点界面与后端执行产物未配对，请安装同一构建的完整节点包");
+      executionStatus = "ready";
+      executionError = "";
+    }
+  } catch (error) {
+    const disabled = await lstat(resolve(nodesDirectory, `${name}.disabled`)).catch((err: NodeJS.ErrnoException) => { if (err.code !== "ENOENT") throw err; });
+    executionStatus = disabled ? "disabled" : "loadError";
+    executionError = error instanceof Error ? error.message : "节点后端无法加载";
+    execution = undefined;
+  }
   return {
     name,
     revision,
@@ -128,6 +143,9 @@ export async function readNode(name: string) {
     readme: typeof metadata.readme === "string" ? metadata.readme : "",
     github,
     configRules: rules.data,
+    ...execution,
+    executionStatus,
+    executionError,
   };
 }
 

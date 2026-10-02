@@ -18,7 +18,7 @@ export function createQuestionContext(
   cwd: string,
   send: (event: Extract<AgentEvent, { type: "question" }>) => void,
   onCancel?: () => void,
-  options?: { runId?: string },
+  options?: { runId?: string; sessionFile?: string },
 ) {
   const activeQuestions = new Set<string>();
   let disposed = false;
@@ -27,7 +27,7 @@ export function createQuestionContext(
       if (disposed) throw new Error("提问所属对话已结束");
       signal?.throwIfAborted();
       const callId = crypto.randomUUID();
-      if (options?.runId) insertPendingQuestion({ callId, runId: options.runId, cwd, toolCallId, request });
+      if (options?.runId) insertPendingQuestion({ callId, runId: options.runId, cwd, toolCallId, request, sessionFile: options.sessionFile });
       return new Promise((resolve, reject) => {
         const finish = (result: QuestionAnswer | Error) => {
           if (!pendingQuestions.delete(callId)) return;

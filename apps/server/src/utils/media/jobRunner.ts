@@ -35,13 +35,14 @@ async function linkCompletedMedia(job: MediaJobRow) {
   if (job.linkStatus !== "pending" || !job.canvasId || !job.canvasPath || !job.nodeId || !job.outputSlot || job.outputVersion === null || !job.resultJson) return;
   try {
     const { path } = await resolveWorkspacePath(job.workspaceDirectory, job.canvasPath);
-    const graph = await readGraph(path);
+    const graph = await readGraph(path, job.workspaceDirectory);
     const files = JSON.parse(job.resultJson) as { path: string; mimeType: string }[];
     if (!files[0]) throw new Error("任务没有可关联的文件");
     const value = { dataType: job.mediaType.toUpperCase(), value: { url: files[0].path, mimeType: files[0].mimeType } };
     const node = graph.nodes.find(item => item.id === job.nodeId);
-    if (graph.toonflowGraph?.receipts[job.jobId]
-      || (graph.toonflowGraph?.id === job.canvasId && JSON.stringify(node?.data?.outputs?.[job.outputSlot]) === JSON.stringify(value))) {
+    const pendingJobKey = (node?.data?.pendingMediaJob as { idempotencyKey?: unknown } | undefined)?.idempotencyKey;
+    if (graph.toonflowGraph?.id === job.canvasId && pendingJobKey !== job.idempotencyKey
+      && JSON.stringify(node?.data?.outputs?.[job.outputSlot]) === JSON.stringify(value)) {
       updateMediaJob(job.jobId, { linkStatus: "linked", errorMessage: null });
       return;
     }
@@ -51,7 +52,7 @@ async function linkCompletedMedia(job: MediaJobRow) {
       return;
     }
     await modifyGraph(path, job.jobId, [{ kind: "output", nodeId: job.nodeId, slot: job.outputSlot,
-      expectedVersion: job.outputVersion, pendingJobKey: job.idempotencyKey, value }]);
+      expectedVersion: job.outputVersion, pendingJobKey: job.idempotencyKey, value }], job.workspaceDirectory);
     updateMediaJob(job.jobId, { linkStatus: "linked", errorMessage: null });
   } catch (error) {
     const status = (error as { status?: number }).status;

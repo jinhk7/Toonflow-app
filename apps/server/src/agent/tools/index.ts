@@ -11,10 +11,18 @@ import conf from "@/utils/conf";
 import { isWithin, resolveWorkspacePath, writeWorkspaceFile, lockWorkspaceFiles, assertNoManagedGraph } from "@/utils/workspace/files";
 import { createPluginTools, listTools } from "@/utils/plugins/tools";
 import { createSkillContext } from "@/agent/skills";
+import { registerServerTool } from "@/agent/runtime/toolExecution";
+import { readVersionedContent, writeVersionedContent } from "@/utils/canvas/content";
+import { isManagedResource } from "@/utils/canvas/store";
 
 const apply = Reflect.apply;
 const freeze = Object.freeze;
 const clone = structuredClone;
+const builtinWorkspaceExecutions = new WeakSet<ToolDefinition["execute"]>();
+
+export function isBuiltinWorkspaceTool(tool: ToolDefinition) {
+  return builtinWorkspaceExecutions.has(tool.execute);
+}
 
 function createCanvasView(canvas?: CanvasContext): CanvasContext | undefined {
   if (!canvas) return;
@@ -33,13 +41,30 @@ function createCanvasView(canvas?: CanvasContext): CanvasContext | undefined {
 
 export function createAgentToolContext(cwd: string, config: Record<string, unknown> = {}, canvas?: CanvasContext, question?: QuestionContext): ToolContext {
   const skillsDirectory = join(dirname(conf.path), "skills");
-  const resolvePath = async (path: string, readOnly = false) => {
+  const contentRevisions = new Map<string, string>();
+  const resolveTarget = async (path: string, readOnly = false) => {
     const absolute = resolve(cwd, path);
     const root = readOnly && isWithin(skillsDirectory, absolute) ? skillsDirectory : cwd;
     return (await resolveWorkspacePath(root, relative(root, absolute), true)).path;
   };
+  const resolvePath = async (path: string, readOnly = false) => {
+    const target = await resolveTarget(path, readOnly);
+    const pathInWorkspace = relative(cwd, target).replaceAll("\\", "/");
+    if (isWithin(cwd, target) && isManagedResource(cwd, pathInWorkspace)) {
+      contentRevisions.set(target, (await readVersionedContent(cwd, pathInWorkspace)).revision);
+    }
+    return target;
+  };
   const writeFile = async (path: string, content: string) => {
-    const target = await resolvePath(path);
+    const target = await resolveTarget(path);
+    const pathInWorkspace = relative(cwd, target).replaceAll("\\", "/");
+    if (isManagedResource(cwd, pathInWorkspace)) {
+      const expectedRevision = contentRevisions.get(target);
+      if (!expectedRevision) throw Object.assign(new Error("请先读取节点正文或插件状态，再提交修改"), { status: 428 });
+      const result = await writeVersionedContent({ directory: cwd, path: pathInWorkspace, content, expectedRevision, commandId: crypto.randomUUID() });
+      contentRevisions.set(target, result.revision);
+      return;
+    }
     const release = lockWorkspaceFiles([target]);
     try { await assertNoManagedGraph(target); await writeWorkspaceFile(target, content); }
     finally { release(); }
@@ -73,13 +98,14 @@ export async function createAgentTools(cwd: string, canvas?: CanvasContext, ques
       if (!tool.name || typeof tool.execute !== "function") throw new Error(`${item.displayName} 返回了无效的工具`);
       if (names.has(tool.name)) throw new Error(`工具名称重复：${tool.name}`);
       names.add(tool.name);
-      tools.push({
+      if (item.builtin && item.name === "workspace") builtinWorkspaceExecutions.add(tool.execute);
+      tools.push(registerServerTool({
         ...tool,
         promptGuidelines: [
           ...(metadata.prompt ? [metadata.prompt] : []),
           ...(tool.promptGuidelines ?? []),
         ],
-      });
+      }, undefined, item.builtin && ["read", "ls", "skill", "question"].includes(tool.name)));
     }
   }
   return tools;

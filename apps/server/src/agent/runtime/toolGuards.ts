@@ -1,4 +1,5 @@
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
 import type { CanvasContext } from "@toonflow/tools-scaffold/runtime";
 import type { AgentRunControl } from "@/agent/runtime/types";
 import {
@@ -10,7 +11,7 @@ import {
   recordToolCallStart,
   requireSideEffectAuthorization,
 } from "@/agent/runtime/store";
-import { assertBackgroundToolAllowed, classifyToolExecutionMode } from "@/agent/runtime/toolExecution";
+import { assertBackgroundToolAllowed, classifyToolExecutionMode, isReadOnlyServerTool, registerServerTool } from "@/agent/runtime/toolExecution";
 import { readGraph } from "@/utils/workspace/graph";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
 import { isBuiltinCanvasTool } from "@/utils/plugins/tools";
@@ -23,7 +24,14 @@ export type ToolGuardContext = {
   canvasPath?: string;
   canvas?: CanvasContext;
   builtinCanvasTool?: boolean;
+  toolScope?: string;
+  builtinReadOnlyTool?: boolean;
 };
+
+export function getExecutionToolCallId(runId: string, scope: string, modelToolCallId: string) {
+  const hash = createHash("sha256").update(JSON.stringify([runId, scope, modelToolCallId])).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-5${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
 
 function parseStoredResult(resultJson: string | null): AgentToolResult<unknown> {
   if (!resultJson) return { content: [{ type: "text", text: "" }], details: undefined };
@@ -42,7 +50,7 @@ function parseStoredResult(resultJson: string | null): AgentToolResult<unknown> 
   }
 }
 async function nodeToolContext(toolName: string, args: unknown, context: ToolGuardContext, signal?: AbortSignal): Promise<ToolGuardContext & { nodeRevision?: string }> {
-  if (toolName !== "nodeTools") return context;
+  if (toolName !== "nodeTools" || !context.builtinCanvasTool) return context;
   if (!context.canvas || !args || typeof args !== "object" || Array.isArray(args) || !("nodeId" in args) || typeof args.nodeId !== "string") return context;
   const name = toolName === "nodeTools" && "name" in args ? args.name : toolName;
   if (typeof name !== "string") return context;
@@ -53,10 +61,10 @@ async function nodeToolContext(toolName: string, args: unknown, context: ToolGua
 }
 
 async function scopedInput(toolName: string, args: unknown, context: ToolGuardContext, needsAuthorization: boolean, nodeRevision?: string) {
-  if (classifyToolExecutionMode(toolName) !== "canvas" || !needsAuthorization) return args;
+  if (!context.builtinCanvasTool || !needsAuthorization) return args;
   if (!context.cwd || !context.canvasPath) throw Object.assign(new Error("缺少画布版本上下文，不能授权操作"), { status: 409 });
   const { path } = await resolveWorkspacePath(context.cwd, context.canvasPath);
-  const graph = await readGraph(path);
+  const graph = await readGraph(path, context.cwd);
   const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
   const nodes = new Set<string>();
   const edges = new Set<string>();
@@ -93,13 +101,17 @@ async function scopedInput(toolName: string, args: unknown, context: ToolGuardCo
     edges: Object.fromEntries([...edges].map(id => [id, graph.toonflowGraph!.edges[id] ?? 0])), outputs };
 }
 const activeToolCalls = new Set<string>();
+const originalTools = new WeakMap<ToolDefinition["execute"], ToolDefinition>();
 
 export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContext): ToolDefinition {
+  tool = originalTools.get(tool.execute) ?? tool;
   const execute = tool.execute;
   if (!execute) return tool;
-  return {
+  const mode = classifyToolExecutionMode(tool);
+  const wrapped: ToolDefinition = {
     ...tool,
-    execute: async (toolCallId, params, signal, onUpdate, extensionCtx) => {
+    execute: async (modelToolCallId, params, signal, onUpdate, extensionCtx) => {
+      const toolCallId = ctx.toolScope ? getExecutionToolCallId(ctx.runId, ctx.toolScope, modelToolCallId) : modelToolCallId;
       if (ctx.runControl?.shouldTerminate()) {
         throw Object.assign(new Error("本次流程已终止"), { status: 409 });
       }
@@ -107,7 +119,7 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
         throw Object.assign(new Error("运行已暂停"), { code: "AGENT_PAUSED", status: 409 });
       }
       if (ctx.canvas) ctx.canvasPath = ctx.canvas.id;
-      const toolContext = { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ name: tool.name, execute }) };
+      const toolContext = { ...ctx, builtinCanvasTool: isBuiltinCanvasTool({ name: tool.name, execute }), builtinReadOnlyTool: isReadOnlyServerTool(tool) };
       const sideEffect = isSideEffectTool(tool.name, toolContext);
       const key = ctx.runId + ":" + toolCallId;
       if (activeToolCalls.has(key)) throw Object.assign(new Error("工具调用仍在执行，不能重入"), { status: 409 });
@@ -126,24 +138,24 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       }
       if (previous?.status === "needsReview" || previous?.status === "skipped")
         throw Object.assign(new Error("该副作用步骤已核对，不会重新执行"), { code: "AGENT_NO_REPLAY", status: 409 });
-      assertBackgroundToolAllowed(tool.name, { canvasAttached: ctx.canvasAttached });
+      assertBackgroundToolAllowed(tool, { canvasAttached: ctx.canvasAttached });
       activeToolCalls.add(key);
       let started = false;
       try {
         const context = await nodeToolContext(tool.name, params, toolContext, signal);
         const needsAuthorization = requiresToolAuthorization(tool.name, params, context);
         const authorizationInput = await scopedInput(tool.name, params, context, needsAuthorization, context.nodeRevision);
-        if (classifyToolExecutionMode(tool.name) === "canvas" && ctx.canvas?.id !== context.canvasPath) {
+        if (mode === "canvas" && ctx.canvas?.id !== context.canvasPath) {
           throw Object.assign(new Error("画布已切换，请重新执行操作"), { status: 409 });
         }
         recordToolCallStart(ctx.runId, toolCallId, tool.name, authorizationInput, sideEffect, needsAuthorization ? "pendingAuthorization" : "started");
         if (needsAuthorization) requireSideEffectAuthorization(ctx.runId, tool.name, authorizationInput, toolCallId, context);
         started = true;
-        const input = tool.name === "nodeTools" && params && typeof params === "object" && !Array.isArray(params)
+        const input = context.builtinCanvasTool && tool.name === "nodeTools" && params && typeof params === "object" && !Array.isArray(params)
           ? { ...params, expectedCanvasId: context.canvasPath, ...(context.nodeRevision ? { expectedNodeRevision: context.nodeRevision } : {}) } : params;
         const result = await execute(toolCallId, input, signal, onUpdate, extensionCtx);
         recordToolCallFinish(toolCallId, "completed", result);
-        if (["addCanvas", "switchCanvas", "renameCanvas"].includes(tool.name)) {
+        if (context.builtinCanvasTool && ["addCanvas", "switchCanvas", "renameCanvas"].includes(tool.name)) {
           const details = result.details;
           ctx.canvasPath = details && typeof details === "object" && "id" in details && typeof details.id === "string" ? details.id : undefined;
         }
@@ -154,6 +166,8 @@ export function wrapToolWithRunGuards(tool: ToolDefinition, ctx: ToolGuardContex
       } finally { activeToolCalls.delete(key); }
     },
   };
+  originalTools.set(wrapped.execute, tool);
+  return registerServerTool(wrapped, mode, isReadOnlyServerTool(tool));
 }
 
 export function guardAgentTools(tools: ToolDefinition[], ctx?: ToolGuardContext) {

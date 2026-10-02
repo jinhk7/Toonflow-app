@@ -1,5 +1,4 @@
-import { getAgentRun, listWaitingQuestionsForRun } from "@/agent/runtime/store";
-import { applyAnsweredQuestionsToSession } from "@/agent/runtime/sessionRecovery";
+import { appendRunEvent, getAgentRun, listWaitingQuestionsForRun, updateAgentRun } from "@/agent/runtime/store";
 
 let continueRun: ((runId: string, canvas?: import("@toonflow/tools-scaffold/runtime").CanvasInfo) => Promise<unknown>) | undefined;
 let isHosted: ((runId: string) => boolean) | undefined;
@@ -20,6 +19,11 @@ export async function maybeContinueRunAfterQuestions(runId: string) {
   if (!record?.sessionFile) return;
   if (!["waitingApproval", "paused", "running"].includes(record.status)) return;
   if (record.intent === "pause" || record.intent === "terminate") return;
-  await applyAnsweredQuestionsToSession(record.cwd, record.sessionFile, runId);
-  await continueRun(runId);
+  if (record.status === "running") updateAgentRun(runId, { status: "paused" });
+  try { await continueRun(runId); }
+  catch (error) {
+    const message = `回答已保存，但恢复运行失败：${error instanceof Error ? error.message : "未知错误"}`;
+    updateAgentRun(runId, { errorMessage: message });
+    appendRunEvent(runId, { type: "error", message });
+  }
 }

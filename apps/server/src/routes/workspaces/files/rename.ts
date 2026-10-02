@@ -12,7 +12,13 @@ export default router.post("/", validateFields({ directory: z.string().min(1).ma
   u.workspaceFile.protectWorkspaceRoot(source.directory, source.path);
   u.workspaceFile.protectWorkspaceRoot(target.directory, target.path);
   const release = u.workspaceFile.lockWorkspaceFiles([source.path, target.path]);
-  try { await u.workspaceFile.assertNoManagedGraph(source.path); await u.workspaceFile.assertNoManagedGraph(target.path); await u.workspaceFile.renameWorkspaceFile(source.path, target.path); }
+  try {
+    await u.canvasContent.assertNoManagedResourceTree(source.directory, req.body.path);
+    await u.canvasContent.assertNoManagedResourceTree(target.directory, req.body.target);
+    await u.workspaceFile.assertNoManagedGraph(source.path);
+    await u.workspaceFile.assertNoManagedGraph(target.path);
+    await u.workspaceFile.renameWorkspaceFile(source.path, target.path);
+  }
   finally { release(); }
   res.json(success());
 });

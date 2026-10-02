@@ -1,41 +1,30 @@
-import { canvasOperations } from "@toonflow/tool-canvas/runtime";
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { isBuiltinCanvasTool } from "@/utils/plugins/tools";
 
-export type ToolExecutionMode = "server" | "canvas" | "page";
+export type ToolExecutionMode = "server" | "canvas" | "unregistered";
 
-const canvasTools = new Set<string>(canvasOperations.map(operation => operation.name));
-const serverBuiltinTools = new Set([
-  "read",
-  "write",
-  "edit",
-  "ls",
-  "writeFile",
-  "memory",
-  "report",
-  "subAgent",
-  "question",
-  "generateImage",
-  "generateVideo",
-  "generateAudio",
-  "skill",
-]);
+const executionModes = new WeakMap<ToolDefinition["execute"], ToolExecutionMode>();
+const readOnlyExecutions = new WeakSet<ToolDefinition["execute"]>();
 
-export function classifyToolExecutionMode(toolName: string): ToolExecutionMode {
-  if (canvasTools.has(toolName) || toolName.startsWith("node:")) return "canvas";
-  if (serverBuiltinTools.has(toolName)) return "server";
-  return "page";
+// ACT: 安装的工具本来就是可信服务端代码；执行位置依据加载函数，不按名称限制扩展。
+export function registerServerTool<T extends ToolDefinition>(tool: T, mode?: ToolExecutionMode, readOnly = false): T {
+  executionModes.set(tool.execute, mode ?? (isBuiltinCanvasTool(tool) ? "canvas" : "server"));
+  if (readOnly) readOnlyExecutions.add(tool.execute);
+  return tool;
 }
 
-export function describeToolExecutionBoundary(toolName: string) {
-  const mode = classifyToolExecutionMode(toolName);
-  if (mode === "server") return { mode, background: true, hint: "可在服务端后台执行" };
-  if (mode === "canvas") return { mode, background: false, hint: "需要画布页面在线并回传结果" };
-  return { mode, background: false, hint: "第三方或未适配工具需页面在线，后台不会自动执行" };
+export function isReadOnlyServerTool(tool: Pick<ToolDefinition, "execute">) {
+  return readOnlyExecutions.has(tool.execute);
 }
 
-export function assertBackgroundToolAllowed(toolName: string, options: { canvasAttached: boolean }) {
-  const mode = classifyToolExecutionMode(toolName);
-  if (mode === "server") return;
-  if (mode === "canvas" && options.canvasAttached) return;
-  const { hint } = describeToolExecutionBoundary(toolName);
-  throw Object.assign(new Error(hint), { code: "AGENT_TOOL_NEEDS_PAGE", status: 409 });
+export function classifyToolExecutionMode(tool: Pick<ToolDefinition, "execute">): ToolExecutionMode {
+  return executionModes.get(tool.execute) ?? "unregistered";
+}
+
+export function assertBackgroundToolAllowed(tool: ToolDefinition | undefined, options: { canvasAttached: boolean }) {
+  if (!tool) throw Object.assign(new Error("工具未在当前后台运行注册"), { code: "AGENT_TOOL_NOT_REGISTERED", status: 409 });
+  const mode = classifyToolExecutionMode(tool);
+  if (mode === "server" || mode === "canvas" && options.canvasAttached) return;
+  const message = mode === "canvas" ? "当前运行缺少后端画布上下文" : "工具未在当前后台运行注册";
+  throw Object.assign(new Error(message), { code: "AGENT_TOOL_NOT_REGISTERED", status: 409 });
 }
