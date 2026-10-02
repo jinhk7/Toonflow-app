@@ -1,4 +1,4 @@
-import { computed, getCurrentInstance, inject, readonly, ref, type Component, type Ref } from "vue";
+import { computed, getCurrentInstance, inject, readonly, type Component } from "vue";
 import { useNode as useFlowNode, useVueFlow } from "@vue-flow/core";
 import { isTypeCompatible, type NodeData, type NodeHandle } from "./connection";
 import { isNodeOutput, type NodeOutputs } from "./values";
@@ -8,6 +8,7 @@ import { useNodeFiles } from "./workspaceFiles";
 import { useNodeAi } from "./nodeAi";
 import { useNodeFfmpeg } from "./nodeFfmpeg";
 import { useNodePreviewReady } from "./useNodePreviewReady";
+import { useNodeExecution } from "./useNodeExecution";
 
 export type NodeOptions<T extends NodeOutputs = NodeOutputs> = {
   label?: string;
@@ -23,14 +24,15 @@ export function useNode<T extends NodeOutputs = NodeOutputs>(options: NodeOption
   const previewReady = useNodePreviewReady();
   const { updateNodeInternals } = useVueFlow();
   const defaults = getCurrentInstance()?.type as Pick<NodeOptions, "handles" | "icon"> | undefined;
-  const handles = ref<NodeHandle[]>(options.handles ?? structuredClone(defaults?.handles ?? []));
+  const execution = useNodeExecution(id);
+  const handles = computed<NodeHandle[]>(() => execution.descriptor.value?.handles ?? node.data.handles ?? options.handles ?? defaults?.handles ?? []);
   const savedOutputs = Object.fromEntries(Object.entries(node.data.outputs ?? {}).filter(([handleId, output]) => {
     const handle = handles.value.find(item => item.type === "source" && item.id === handleId);
     const defaultOutput = options.outputs?.[handleId];
     return handle && isNodeOutput(output) && isTypeCompatible(output.dataType, handle.dataType)
       && (!defaultOutput || defaultOutput.dataType === output.dataType);
   }));
-  const outputs = ref({ ...options.outputs, ...savedOutputs }) as Ref<T>;
+  const outputs = computed(() => (node.data.outputs ?? savedOutputs) as T);
   const nodeProps = computed(() => ({
     previewReady: previewReady.value,
     label: node.data.label ?? options.label,
@@ -51,6 +53,7 @@ export function useNode<T extends NodeOutputs = NodeOutputs>(options: NodeOption
     outputs,
     nodeEvent,
     nodeTools,
+    execution,
     ai: useNodeAi(),
     ffmpeg: useNodeFfmpeg(),
     files: {
