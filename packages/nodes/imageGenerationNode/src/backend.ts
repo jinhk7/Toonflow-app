@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { NodeExecutionContext, NodeExecutionDefinition } from "@toonflow/nodes-scaffold/execution";
 import type { NodeMediaModel } from "@toonflow/nodes-scaffold/nodeAi";
+import type { NodeOutputs } from "@toonflow/nodes-scaffold/values";
 
 const setConfigSchema = z.strictObject({ providerId: z.string().min(1).optional(), modelId: z.string().min(1).optional(), size: z.string().min(1).optional(), ratio: z.string().min(1).optional() })
   .refine(args => (args.providerId === undefined) === (args.modelId === undefined), "providerId 与 modelId 必须同时提供");
@@ -52,6 +54,7 @@ async function getConfig(context: NodeExecutionContext) {
   const sizes = choice?.imageSizes ?? [];
   const ratios = choice?.imageRatios ?? [];
   return {
+    nodeVersion: context.node.version,
     config: {
       providerId: choice?.providerId ?? "", modelId: choice?.modelId ?? "",
       size: typeof context.node.data.size === "string" && sizes.includes(context.node.data.size) ? context.node.data.size
@@ -85,6 +88,15 @@ const definition: NodeExecutionDefinition = {
       name: "setConfig",
       snapshotInputs: false,
       description: "修改此图片生成节点的模型、分辨率或比例；先用 getConfig 查询可选能力，providerId 与 modelId 必须同时提供；不修改提示词、不启动生成",
+      editor: {
+        label: "图片生成参数", readAction: "getConfig",
+        values: { providerId: { result: "config.providerId" }, modelId: { result: "config.modelId" }, size: { result: "config.size" }, ratio: { result: "config.ratio" } },
+        fields: {
+          providerId: { hidden: true }, modelId: { label: "模型", model: { sourcePath: "models", providerField: "providerId" } },
+          size: { label: "分辨率", choices: { sourcePath: "models", modelProperty: "imageSizes" } },
+          ratio: { label: "比例", choices: { sourcePath: "models", modelProperty: "imageRatios" } },
+        },
+      },
       parameters: setConfigSchema,
       async execute(args: z.output<typeof setConfigSchema>, context) {
         await requireAvailable(context);
@@ -103,10 +115,11 @@ const definition: NodeExecutionDefinition = {
       name: "setPrompt",
       snapshotInputs: false,
       description: "修改此节点的图片生成提示词，支持 {{ref 1}} 等参考标记；只修改提示词，不启动生成",
+      editor: { label: "生成提示词", values: { prompt: { node: "data.prompt" } }, fields: { prompt: { label: "提示词", multiline: true } } },
       parameters: z.strictObject({ prompt: z.string() }),
       async execute({ prompt }, context) {
         await context.patchData({ prompt, promptModel: prompt.split("\n").map((text: string) => [{ type: "Write", text }]) });
-        return { prompt };
+        return { prompt, nodeVersion: context.node.version };
       },
     },
     {
@@ -180,14 +193,16 @@ const definition: NodeExecutionDefinition = {
       name: "setImage",
       snapshotInputs: false,
       description: "选择工作区内已有的图片文件作为此节点的输出，保留生成历史",
-      parameters: z.strictObject({ path: z.string().min(1).max(4096), mimeType: z.string().regex(/^image\/[a-zA-Z0-9.+-]+$/) }),
-      async execute({ path, mimeType }, context) {
+      editor: { label: "图片素材", values: { path: { node: "data.outputs.image.value.url" }, mimeType: { node: "data.outputs.image.value.mimeType" }, expectedOutput: { node: "data.outputs.image" } }, fields: { path: { label: "工作区图片路径" }, mimeType: { label: "媒体类型" }, expectedOutput: { hidden: true } } },
+      parameters: z.strictObject({ path: z.string().min(1).max(4096), mimeType: z.string().regex(/^image\/[a-zA-Z0-9.+-]+$/), expectedOutput: z.json().optional().meta({ default: null }) }),
+      async execute({ path, mimeType, expectedOutput }, context) {
+        if (expectedOutput !== undefined && !isDeepStrictEqual(expectedOutput, (context.node.data.outputs as NodeOutputs | undefined)?.image ?? null)) throw Object.assign(new Error("图片输出已被其他操作修改，请保留草稿并核对当前输出"), { status: 409 });
         await requireAvailable(context);
         const content = await context.read(path);
         if (!content.byteLength || content.byteLength > 100 * 1024 * 1024) throw new Error("图片不能为空且不能超过 100 MB");
         const output = { dataType: "IMAGE" as const, value: { url: path, mimeType } };
         await context.setOutput("image", output);
-        return output;
+        return { ...output, nodeVersion: context.node.version };
       },
     },
     {
@@ -210,7 +225,7 @@ const definition: NodeExecutionDefinition = {
         context.signal.throwIfAborted();
         const output = { dataType: "IMAGE" as const, value: { url: path, mimeType } };
         await context.setOutput("image", output);
-        return output;
+        return { ...output, nodeVersion: context.node.version };
       },
     },
   ],

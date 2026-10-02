@@ -16,6 +16,7 @@
           </el-select>
         </el-form-item>
       </el-form>
+      <mobileNodeEditor ref="nodeEditor" :directory="directory" :canvasPath="canvasPath" :node="node" :graph="graph" :catalog="catalog" @changed="load" />
       <el-card shadow="never" class="section">
         <template #header>
           <div class="sectionHeader">
@@ -52,6 +53,8 @@
         :canvasPath="canvasPath"
         :node="node"
         :graph="graph"
+        @catalog="catalog = $event"
+        @nodeChanged="nodeEditor?.refresh()"
         @changed="load" />
     </el-main>
     <el-empty v-else-if="!loading" description="节点不存在" />
@@ -65,13 +68,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import type { Connection } from "@vue-flow/core";
 import mobileTopBar from "./components/mobileTopBar.vue";
 import mobileConnectionSheet from "./components/mobileConnectionSheet.vue";
 import mobileExecutePanel from "./components/mobileExecutePanel.vue";
+import mobileNodeEditor from "./components/mobileNodeEditor.vue";
+import type { NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
 import {
   listGroups,
   nodeLabel,
@@ -107,6 +112,8 @@ const refs = computed(() => (graph.value && nodeId.value ? nodeReferences(nodeId
 const labelDraft = ref("");
 const parentGroupId = ref("");
 const connectionVisible = ref(false);
+const catalog = ref<NodeCatalogEntry[]>([]);
+const nodeEditor = ref<InstanceType<typeof mobileNodeEditor>>();
 
 const title = computed(() => node.value ? nodeLabel(node.value) : "节点");
 const typeLabel = computed(() => String(node.value?.type ?? ""));
@@ -214,13 +221,12 @@ function jumpToPeer(peerId: string) {
   });
 }
 
-onMounted(async () => {
+watch([directory, canvasPath], async () => {
   if (!directory.value || !canvasPath.value) {
     await router.replace("/mobile");
     return;
   }
-  await load();
-});
+}, { immediate: true });
 </script>
 
 <style lang="scss" scoped>

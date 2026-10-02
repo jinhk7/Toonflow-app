@@ -70,22 +70,24 @@ const definition: NodeExecutionDefinition = {
       parameters: z.strictObject({}),
       async execute(_args, context) {
         await initialize(context);
-        return context.readText(textPath(context));
+        const current = await context.readText(textPath(context));
+        return { ...current, nodeVersion: context.node.version };
       },
     },
     {
       name: "setText",
       snapshotInputs: false,
       description: "修改此节点的文本输出",
-      parameters: z.strictObject({ text: z.string() }),
-      async execute({ text }, context) {
+      editor: { label: "文本正文", readAction: "getText", values: { text: { result: "content" }, expectedRevision: { result: "revision" } }, fields: { text: { label: "正文", multiline: true }, expectedRevision: { hidden: true } } },
+      parameters: z.strictObject({ text: z.string(), expectedRevision: z.string().regex(/^[a-f0-9]{64}$/).optional() }),
+      async execute({ text, expectedRevision }, context) {
         const job = await currentJob(context);
         if (job && ["accepted", "running"].includes(job.status)) throw new Error("文本生成中，请稍后修改");
         await initialize(context);
         const path = textPath(context);
         const current = await context.readText(path);
-        const result = await context.writeText(path, text, current.revision);
-        return { text, revision: result.revision };
+        const result = await context.writeText(path, text, expectedRevision ?? current.revision);
+        return { text, revision: result.revision, nodeVersion: context.node.version };
       },
     },
     {
@@ -94,29 +96,33 @@ const definition: NodeExecutionDefinition = {
       description: "读取文本节点的当前模型和可选文本模型，不含密钥",
       parameters: z.strictObject({}),
       async execute(_args, context) {
-        return { model: context.node.data.model ?? "", models: await context.getModels("text") };
+        const models = await context.getModels("text");
+        const selected = models.find(item => JSON.stringify([item.providerId, item.modelId]) === context.node.data.model);
+        return { nodeVersion: context.node.version, model: context.node.data.model ?? "", config: { providerId: selected?.providerId ?? "", modelId: selected?.modelId ?? "" }, models };
       },
     },
     {
       name: "setConfig",
       snapshotInputs: false,
       description: "修改文本节点模型；providerId 与 modelId 使用 getConfig 返回的值，不启动生成",
+      editor: { label: "文本模型", readAction: "getConfig", values: { providerId: { result: "config.providerId" }, modelId: { result: "config.modelId" } }, fields: { providerId: { hidden: true }, modelId: { label: "模型", model: { sourcePath: "models", providerField: "providerId" } } } },
       parameters: z.strictObject({ providerId: z.string().min(1), modelId: z.string().min(1) }),
       async execute({ providerId, modelId }, context) {
         const models = await context.getModels("text");
         if (!models.some(item => item.providerId === providerId && item.modelId === modelId)) throw new Error("请选择有效文本模型");
         await context.patchData({ model: JSON.stringify([providerId, modelId]) });
-        return { providerId, modelId };
+        return { providerId, modelId, nodeVersion: context.node.version };
       },
     },
     {
       name: "setPrompt",
       snapshotInputs: false,
       description: "修改文本生成提示词，不启动生成",
+      editor: { label: "生成提示词", values: { prompt: { node: "data.prompt" } }, fields: { prompt: { label: "提示词", multiline: true } } },
       parameters: z.strictObject({ prompt: z.string() }),
       async execute({ prompt }, context) {
         await context.patchData({ prompt, promptModel: prompt.split("\n").map((text: string) => [{ type: "Write", text }]) });
-        return { prompt };
+        return { prompt, nodeVersion: context.node.version };
       },
     },
     {

@@ -97,8 +97,8 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
     return JSON.parse(await readText(path));
   }
 
-  async function readGraph(path: string) {
-    const { data } = await client.get<{ data: WorkspaceGraph }>("/canvas/get", { params: { directory: getDirectory(), path } });
+  async function readGraph(path: string, signal?: AbortSignal) {
+    const { data } = await client.get<{ data: WorkspaceGraph }>("/canvas/get", { params: { directory: getDirectory(), path }, signal });
     return data.data;
   }
 

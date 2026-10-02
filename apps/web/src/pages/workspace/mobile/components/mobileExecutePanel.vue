@@ -1,7 +1,7 @@
 <template>
   <el-card class="mobileExecutePanel" shadow="never">
     <template #header>{{ node ? "后端节点动作与任务" : "后台任务" }}</template>
-    <el-alert v-if="error" :title="error" type="error" :closable="false" showIcon />
+    <el-alert v-if="error || mediaError" :title="error || mediaError" type="error" :closable="false" showIcon />
     <el-alert v-if="connectionError" :title="connectionError" type="warning" :closable="false" showIcon />
     <template v-if="node">
       <el-alert v-if="!descriptor && !loading" title="此节点尚未提供后端执行描述，请迁移插件后使用" type="warning" :closable="false" />
@@ -22,10 +22,10 @@
         <el-input v-if="!hasProperties" v-model="rawArgs" type="textarea" :autosize="{ minRows: 3, maxRows: 12 }" aria-label="动作 JSON 参数" />
         <div class="actions"><el-button type="primary" nativeType="submit" :loading="submitting" :disabled="!canvasPath || !!pendingCommand">执行</el-button></div>
       </el-form>
-      <div v-if="pendingCommand" class="actions"><el-button :loading="submitting" @click="reconcileCommand">查询待确认命令 {{ pendingCommand.commandId }}</el-button></div>
+      <div v-if="pendingCommand" class="actions"><el-button :loading="submitting" @click="reconcileCommand()">查询待确认命令 {{ pendingCommand.commandId }}</el-button></div>
       <pre v-if="result" class="json">{{ result }}</pre>
     </template>
-    <div class="actions"><el-button :loading="loading" @click="load">刷新任务</el-button></div>
+    <div class="actions"><el-button :loading="loading" @click="load()">刷新任务</el-button></div>
     <ul class="jobList">
       <li v-for="job in jobs" :key="job.jobId">
         <strong>{{ job.kind }} · {{ job.jobId }}</strong>
@@ -54,17 +54,17 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import axios from "axios";
 import { createExecutionClient, ExecutionRequestError, fetchNodeCatalog, getExecutionClientId, isExecutableNode, type NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
-import type { CanvasCommand, CanvasCommandResult, NodeJobView } from "@toonflow/nodes-scaffold/execution";
-import type { WorkspaceGraph } from "@/lib/workspaceFiles";
+import type { CanvasCommand, CanvasCommandResult, NodeJobView, WorkspaceEvent } from "@toonflow/nodes-scaffold/execution";
+import { graphValueJson, type WorkspaceGraph } from "@/lib/workspaceFiles";
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
 import { useWorkspaceEvents } from "@/lib/workspaceEvents";
 import saveFile from "@/lib/saveFile";
 import type { CanvasNode } from "../lib/mobileGraphModel";
 
 type ParameterSchema = { type?: string; title?: string; description?: string; default?: unknown; enum?: any[]; minimum?: number; maximum?: number; maxLength?: number; $ref?: string; oneOf?: unknown; anyOf?: unknown };
-type MediaJob = { jobId: string; mediaType?: string; status: string; linkStatus?: string; nodeId?: string; errorMessage?: string };
+type MediaJob = { jobId: string; mediaType?: string; status: string; linkStatus?: string; nodeId?: string; canvasPath?: string; errorMessage?: string };
 const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph }>();
-const emit = defineEmits<{ changed: [] }>();
+const emit = defineEmits<{ changed: []; catalog: [entries: NodeCatalogEntry[]]; nodeChanged: [event: WorkspaceEvent] }>();
 const route = useRoute();
 const router = useRouter();
 const catalog = ref<NodeCatalogEntry[]>([]);
@@ -73,6 +73,9 @@ const descriptor = computed(() => {
   return entry && isExecutableNode(entry) ? entry : undefined;
 });
 const actionName = ref("");
+watch(descriptor, current => {
+  if (current && !current.actions.some(item => item.name === actionName.value)) actionName.value = current.actions[0]?.name ?? "";
+});
 const action = computed(() => descriptor.value?.actions.find(item => item.name === actionName.value));
 const hasProperties = computed(() => action.value?.parameters.type === "object" && !!action.value.parameters.properties);
 const fields = computed(() => {
@@ -91,10 +94,21 @@ const mediaJobs = ref<MediaJob[]>([]);
 const pendingCommand = ref<CanvasCommand>();
 const result = ref("");
 const error = ref("");
+const mediaError = ref("");
 const loading = ref(false);
 const submitting = ref(false);
 let revision = 0;
+let mediaRevision = 0;
+let catalogRevision = 0;
+let catalogLoaded = false;
+let snapshotCursor = 0;
+let mediaTimer: ReturnType<typeof setTimeout> | undefined;
+let latestMedia: { revision: number; binding: string; task: Promise<boolean> } | undefined;
+let latestTasks: { revision: number; binding: string; task: Promise<boolean> } | undefined;
+const lifetime = new AbortController();
+const jobSequences = new Map<string, number>();
 let disposed = false;
+const taskBinding = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id]));
 const draftKey = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id, actionName.value]));
 let parameterBinding = "";
 function saveParameters() {
@@ -130,29 +144,91 @@ function commandFailed(command: CanvasCommand | undefined, reason: unknown) {
   if (!command || commandMatches(command)) error.value = reason instanceof Error ? reason.message : "命令结果待确认，参数草稿已保留";
 }
 
-async function load() {
+function matchesNode(job: { nodeId?: string; canvasPath?: string }) {
+  return !props.node || job.nodeId === props.node.id && job.canvasPath === props.canvasPath;
+}
+function requestSignal(signal?: AbortSignal) {
+  return AbortSignal.any([lifetime.signal, AbortSignal.timeout(20000), ...(signal ? [signal] : [])]);
+}
+function scheduleMedia() {
+  clearTimeout(mediaTimer);
+  if (!disposed && !document.hidden && mediaJobs.value.some(job => ["prepared", "submitting", "tracking", "collecting"].includes(job.status) || job.status === "completed" && job.linkStatus === "pending"))
+    mediaTimer = setTimeout(() => { void loadMedia(); }, 3000);
+}
+function loadMedia(signal?: AbortSignal) {
+  const task = readMedia(signal);
+  latestMedia = { revision: mediaRevision, binding: taskBinding.value, task };
+  return task;
+}
+async function readMedia(signal?: AbortSignal): Promise<boolean> {
+  const binding = taskBinding.value;
   const directory = props.directory;
-  const nodeId = props.node?.id;
+  const version = ++mediaRevision;
+  const current = () => !disposed && !signal?.aborted && version === mediaRevision && binding === taskBinding.value;
+  const newer = () => !disposed && !signal?.aborted && latestMedia && latestMedia.revision > version && latestMedia.binding === binding && binding === taskBinding.value ? latestMedia.task : false;
+  if (!directory) return false;
+  try {
+    const { data } = await axios.get<{ code: number; data: MediaJob[]; message?: string }>("/api/ai/media/list", { params: { directory }, signal: requestSignal(signal) });
+    if (!current()) return newer();
+    if (data.code !== 200 || !Array.isArray(data.data)) throw new Error(data.message || "媒体任务查询失败");
+    const next = data.data.filter(matchesNode);
+    if (graphValueJson(next) !== graphValueJson(mediaJobs.value)) mediaJobs.value = next;
+    mediaError.value = "";
+    return true;
+  } catch (reason) {
+    if (!current()) return newer();
+    mediaError.value = reason instanceof Error ? reason.message : "媒体任务查询失败";
+    return false;
+  } finally { if (current()) scheduleMedia(); }
+}
+async function loadCatalog(signal?: AbortSignal) {
+  if (!props.node) return true;
+  const version = ++catalogRevision;
+  try {
+    const entries = await fetchNodeCatalog(requestSignal(signal));
+    if (disposed || signal?.aborted || version !== catalogRevision) return false;
+    catalog.value = entries;
+    catalogLoaded = true;
+    emit("catalog", entries);
+    return true;
+  } catch (reason) {
+    if (!disposed && !signal?.aborted && version === catalogRevision) error.value = reason instanceof Error ? reason.message : "节点描述读取失败";
+    return false;
+  }
+}
+function load(signal?: AbortSignal) {
+  const task = readTasks(signal);
+  latestTasks = { revision, binding: taskBinding.value, task };
+  return task;
+}
+async function readTasks(signal?: AbortSignal): Promise<boolean> {
+  const directory = props.directory;
+  const binding = taskBinding.value;
   const currentRevision = ++revision;
-  const current = () => currentRevision === revision && directory === props.directory && nodeId === props.node?.id && !disposed;
-  if (!directory) return;
+  const current = () => !signal?.aborted && currentRevision === revision && binding === taskBinding.value && !disposed;
+  const newer = () => !disposed && !signal?.aborted && latestTasks && latestTasks.revision > currentRevision && latestTasks.binding === binding && binding === taskBinding.value ? latestTasks.task : false;
+  if (!directory) return false;
   loading.value = true;
   error.value = "";
   const results = await Promise.allSettled([
-    createExecutionClient(directory).listJobs(),
-    axios.get<{ code: number; data: MediaJob[]; message?: string }>("/api/ai/media/list", { params: { directory } }),
-    props.node ? fetchNodeCatalog() : Promise.resolve(catalog.value),
+    createExecutionClient(directory).listJobSnapshot(requestSignal(signal)),
+    loadMedia(signal),
   ]);
-  if (!current()) return;
-  const [local, media, nodes] = results;
-  if (local.status === "fulfilled") jobs.value = local.value.filter(job => !nodeId || job.nodeId === nodeId);
-  if (media.status === "fulfilled" && media.value.data.code === 200 && Array.isArray(media.value.data.data)) mediaJobs.value = media.value.data.data.filter(job => !nodeId || job.nodeId === nodeId);
-  if (nodes.status === "fulfilled") catalog.value = nodes.value;
+  if (!current()) return newer();
+  const [local, media] = results;
+  if (local.status === "fulfilled" && Array.isArray(local.value.jobs) && Number.isSafeInteger(local.value.cursor) && local.value.cursor >= 0) {
+    const snapshot = local.value;
+    const latest = new Map(jobs.value.map(job => [job.jobId, job]));
+    const next = snapshot.jobs.filter(matchesNode).map(job => (jobSequences.get(job.jobId) ?? 0) > snapshot.cursor ? latest.get(job.jobId) ?? job : job);
+    for (const job of jobs.value) if ((jobSequences.get(job.jobId) ?? 0) > snapshot.cursor && !next.some(item => item.jobId === job.jobId)) next.push(job);
+    next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (graphValueJson(next) !== graphValueJson(jobs.value)) jobs.value = next;
+    snapshotCursor = Math.max(snapshotCursor, snapshot.cursor);
+  } else if (local.status === "fulfilled") error.value = "任务快照缺少有效列表或游标";
   const failed = results.find(item => item.status === "rejected");
   if (failed?.status === "rejected") error.value = failed.reason instanceof Error ? failed.reason.message : "任务查询失败";
-  if (media.status === "fulfilled" && media.value.data.code !== 200) error.value = media.value.data.message || "媒体任务查询失败";
-  if (descriptor.value && !descriptor.value.actions.some(item => item.name === actionName.value)) actionName.value = descriptor.value.actions[0]?.name ?? "";
   loading.value = false;
+  return !error.value && !mediaError.value && media.status === "fulfilled" && media.value;
 }
 
 function argumentsFromDraft() {
@@ -187,45 +263,50 @@ async function executeAction() {
     saveWorkspaceDraft(command.directory, command.canvasPath, `command:${node.id}`, command);
     pendingCommand.value = command;
     const response = await createExecutionClient(command.directory).command(command);
-    displayCommand(response, command);
+    if (displayCommand(response, command)) await load();
   } catch (err) { commandFailed(command, err); }
   finally { submitting.value = false; }
 }
 
 function displayCommand(response: CanvasCommandResult, command: CanvasCommand) {
-  if (response.commandId !== command.commandId || !commandMatches(command)) return;
+  if (disposed || response.commandId !== command.commandId || !commandMatches(command) || pendingCommand.value?.commandId !== command.commandId) return false;
   result.value = JSON.stringify(response, null, 2);
   if (response.status === "completed" || response.status === "failed" || response.status === "needsReview") {
     clearCommand(command);
     if (response.status !== "completed") error.value = response.errorMessage || "执行失败，参数草稿已保留";
     emit("changed");
-    void load();
+    return true;
   }
+  return false;
 }
-async function reconcileCommand() {
+async function reconcileCommand(signal?: AbortSignal, refreshJobs = true) {
   const command = pendingCommand.value;
   if (!command || submitting.value) return;
   submitting.value = true;
   try {
     const client = createExecutionClient(command.directory);
-    const response = await client.getCommand(command.commandId) ?? await client.command(command);
-    displayCommand(response, command);
-  } catch (err) { commandFailed(command, err); }
+    const response = await client.getCommand(command.commandId, signal) ?? await client.command(command, signal);
+    if (displayCommand(response, command) && refreshJobs) await load(signal);
+  } catch (err) { if (!signal?.aborted && !disposed) commandFailed(command, err); }
   finally { submitting.value = false; }
 }
 async function cancelJob(job: NodeJobView) {
+  const binding = taskBinding.value;
   try {
     await ElMessageBox.confirm(job.kind === "media" ? "仅停止本地观察，已提交的媒体仍会生成、收取并可能计费。" : "取消该后台任务？已进入提交阶段的结果会继续保存。", job.kind === "media" ? "停止观察" : "取消任务", { confirmButtonText: job.kind === "media" ? "停止观察" : "取消任务", cancelButtonText: "继续执行" });
   } catch { return; }
-  try { await createExecutionClient(job.directory).cancelJob(job.jobId); await load(); }
-  catch (err) { ElMessage.error(err instanceof Error ? err.message : "取消失败"); }
+  if (disposed || binding !== taskBinding.value) return;
+  try { await createExecutionClient(job.directory).cancelJob(job.jobId); if (!disposed && binding === taskBinding.value) await load(); }
+  catch (err) { if (!disposed && binding === taskBinding.value) ElMessage.error(err instanceof Error ? err.message : "取消失败"); }
 }
 async function resumeJob(job: NodeJobView) {
+  const binding = taskBinding.value;
   try {
     await ElMessageBox.confirm("使用已保存的输入继续原任务。已写入的图和正文会按原命令核对，不会重新提交模型生成。", "恢复原任务", { confirmButtonText: "恢复", cancelButtonText: "取消" });
   } catch { return; }
-  try { await createExecutionClient(job.directory).resumeJob(job.jobId); await load(); }
-  catch (err) { ElMessage.error(err instanceof Error ? err.message : "恢复失败"); }
+  if (disposed || binding !== taskBinding.value) return;
+  try { await createExecutionClient(job.directory).resumeJob(job.jobId); if (!disposed && binding === taskBinding.value) await load(); }
+  catch (err) { if (!disposed && binding === taskBinding.value) ElMessage.error(err instanceof Error ? err.message : "恢复失败"); }
 }
 async function downloadResult(job: NodeJobView) {
   try { await saveFile(new Blob([JSON.stringify(job.result, null, 2)], { type: "application/json" }), `${job.kind}Result.json`); }
@@ -235,7 +316,14 @@ function openJobNode(job: NodeJobView) {
   void router.push({ path: `/mobile/node/${job.nodeId}`, query: { ...route.query, directory: job.directory, canvas: job.canvasPath } });
 }
 
-watch(() => [props.directory, props.canvasPath, props.node?.id], () => {
+watch(taskBinding, () => {
+  revision++; mediaRevision++;
+  snapshotCursor = 0;
+  jobSequences.clear();
+  jobs.value = [];
+  mediaJobs.value = [];
+  mediaError.value = "";
+  clearTimeout(mediaTimer);
   pendingCommand.value = undefined;
   result.value = "";
   try {
@@ -246,15 +334,43 @@ watch(() => [props.directory, props.canvasPath, props.node?.id], () => {
 const { error: connectionError } = useWorkspaceEvents({
   directory: () => props.directory,
   context: () => JSON.stringify([props.canvasPath, props.node?.id]),
-  refresh: async () => { await load(); if (pendingCommand.value) await reconcileCommand(); },
-  receive: async event => {
-    if (event.type !== "jobChanged" && event.type !== "graphChanged") return;
-    await load();
-    if (pendingCommand.value) await reconcileCommand();
+  cursor: () => snapshotCursor,
+  refresh: async signal => {
+    const [loaded, described] = await Promise.all([load(signal), catalogLoaded || !props.node ? Promise.resolve(true) : loadCatalog(signal)]);
+    if (pendingCommand.value) await reconcileCommand(signal, false);
+    return loaded && described;
+  },
+  receive: async (event, signal) => {
+    if (event.type === "pluginsChanged") return loadCatalog(signal);
+    if (event.type === "contentChanged" && props.node && (!event.canvasId || event.canvasId === props.canvasPath)) {
+      const path = typeof event.payload.path === "string" ? event.payload.path.replaceAll("\\", "/").toLowerCase() : "";
+      if (event.nodeId === props.node.id || path && [props.node.data?.textPath, props.node.data?.modelPath].some(value => typeof value === "string" && value.replaceAll("\\", "/").toLowerCase() === path)) emit("nodeChanged", event);
+      return;
+    }
+    if (event.type === "jobChanged") {
+      if (event.seq <= snapshotCursor) return;
+      const value = event.payload.job;
+      if (!value || typeof value !== "object") return; // 文本增量不改变任务状态，终态另有完整任务通知。
+      const job = value as NodeJobView;
+      if (![job.jobId, job.directory, job.commandId, job.kind, job.status, job.createdAt, job.updatedAt].every(value => typeof value === "string")) throw new Error("任务事件格式无效");
+      if (!matchesNode(job)) return;
+      const index = jobs.value.findIndex(item => item.jobId === job.jobId);
+      jobSequences.set(job.jobId, event.seq);
+      if (index < 0) jobs.value.unshift(job);
+      else if (graphValueJson(jobs.value[index]) !== graphValueJson(job)) jobs.value[index] = job;
+      if (pendingCommand.value && pendingCommand.value.commandId === event.commandId) await reconcileCommand(signal, false);
+      if (job.kind === "media") return loadMedia(signal);
+    }
+    if (event.type === "graphChanged" && (!event.canvasId || event.canvasId === props.canvasPath) && pendingCommand.value && pendingCommand.value.commandId === event.commandId) await reconcileCommand(signal, false);
   },
 });
+const stopHiddenMedia = () => { if (document.hidden) clearTimeout(mediaTimer); };
+document.addEventListener("visibilitychange", stopHiddenMedia);
 onUnmounted(() => {
   disposed = true; revision++;
+  lifetime.abort();
+  clearTimeout(mediaTimer);
+  document.removeEventListener("visibilitychange", stopHiddenMedia);
   saveParameters();
 });
 </script>
