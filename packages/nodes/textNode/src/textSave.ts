@@ -15,6 +15,7 @@ export function createTextSave(options: {
   // ACT: 保留一个待确认写入和最新草稿；先对账原命令，再使用确认版本保存后续编辑。
   let pending: TextWrite | undefined;
   let running: Promise<void> | undefined;
+  let contentVersion = 0;
 
   function persist() {
     try {
@@ -26,6 +27,7 @@ export function createTextSave(options: {
     }
   }
   function load(snapshot: TextSnapshot) {
+    contentVersion++;
     state.content = state.savedText = snapshot.content;
     state.revision = snapshot.revision;
     let raw: string | null;
@@ -45,6 +47,7 @@ export function createTextSave(options: {
   }
   function refresh(snapshot: TextSnapshot) {
     if (state.dirty || pending || state.saving) return;
+    if (state.content !== snapshot.content || state.revision !== snapshot.revision) contentVersion++;
     state.content = state.savedText = snapshot.content;
     state.revision = snapshot.revision;
   }
@@ -79,14 +82,19 @@ export function createTextSave(options: {
     return running;
   }
   function update(content: string) {
+    contentVersion++;
     state.content = content;
     state.dirty = !!pending || content !== state.savedText;
     persist();
     return state.error ? Promise.resolve() : flush();
   }
   async function retry() {
-    if (state.storageError && !state.dirty && !pending) {
-      load(await options.read());
+    if (state.storageError && !state.dirty && !pending && !running) {
+      const version = contentVersion;
+      const snapshot = await options.read();
+      // 等待读取期间的新编辑即使已经保存完成，也不能被旧快照覆盖。
+      if (version !== contentVersion || state.dirty || pending || running || state.saving) return;
+      load(snapshot);
       if (state.storageError) return;
     }
     state.error = "";
@@ -96,6 +104,7 @@ export function createTextSave(options: {
   }
   function resolveConflict(snapshot: TextSnapshot, content: string) {
     if (!state.conflict || state.saving) throw new Error("请先对账原保存，确认版本冲突后再处理");
+    contentVersion++;
     state.remote = snapshot;
     state.savedText = snapshot.content;
     state.revision = snapshot.revision;

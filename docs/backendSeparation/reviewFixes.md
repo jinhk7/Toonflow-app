@@ -77,6 +77,19 @@ UI 工作包的隔离验证证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowU
 
 修复后 server 类型检查和正式 Bun 构建通过，未修改前端或节点构建源码。待独立复审，不代表验收完成。
 
+## b6bd258f 文本恢复 UI 复审残余
+
+父线程复审确认 EBUSY、通用文本发布、canvas UUID 和 PR7 已独立通过；本轮仅修复两项文本恢复 UI 问题：
+
+- `retry()` 的异步读取使用内容版本，并在返回后再次检查脏状态、待确认命令和保存状态。期间发生的新编辑即使已经保存完成，也会使旧读取失效；其他恢复或刷新改变正文同样使旧结果失效，不重载或回写旧正文。
+- 组件同步观察保存控制器的正文，立即更新编辑框；使用原有 applying 标志避免同步反向触发保存。恢复完成后的继续输入以可见恢复稿为基础，恢复保存尚未完成时输入也保留最新内容，不依赖下一次轮询。
+
+修改前使用实际 `createTextSave`、SFC 的 `applyText`/watch/`retryTextSave`、Vue refs/watch 及正式正文 CAS/SQLite 复现两项问题（读取期间保存尚未完成和已完成两个分支均复现）：`C:\Users\jinhk\AppData\Local\Temp\toonflowTextRetryUiKaCG2S\evidence.json`。修改后五个时序全部通过：`C:\Users\jinhk\AppData\Local\Temp\toonflowTextRetryUi2S5VbL\evidence.json`。
+
+五个时序为：旧读取在新保存期间返回、在新保存完成后返回、恢复后轮询前继续输入、两次重试乱序返回后继续编辑、恢复稿保存期间继续输入。前两项都只写入一次新内容；后三项均只有恢复稿和后续编辑两次必要写入，组件、控制器和实际文件一致。存储异常及异步时序只在内存注入，未挂载 DOM，未创建测试文件或调用模型。
+
+textNode 的 Node/vue-tsc 类型检查与正式 Vite 构建通过。此次未改后端、SDK 或其他节点，待两项 UI 独立复审。
+
 ## 验证边界
 
 未调用真实模型、供应商或 R2，未做真实 Tailscale/物理锁屏验证；未部署或重启生产服务。原生桌面 `.hutch` SDK 与完整分发打包的既有边界不变。

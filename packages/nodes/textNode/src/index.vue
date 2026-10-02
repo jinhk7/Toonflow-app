@@ -106,6 +106,12 @@ watch(text, value => {
   void textSave.value?.update(value).catch(() => {});
 }, { flush: "sync" });
 watch(() => textSave.value?.state.savedText, value => { if (value !== undefined) savedText.value = value; });
+watch(() => textSave.value?.state.content, value => {
+  if (disposed || value === undefined || text.value === value) return;
+  applying = true;
+  text.value = value;
+  applying = false;
+}, { flush: "sync" });
 async function retryTextSave() {
   try { await textSave.value?.retry(); } catch (error) { showError(error); }
 }
