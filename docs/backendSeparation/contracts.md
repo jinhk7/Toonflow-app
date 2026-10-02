@@ -59,6 +59,8 @@ directorDraft 与 render 的持久输入为 `{payload,host}`：payload 是业务
 
 directorDraft 已保存 generated/contentPublished checkpoint 时可显式继续发布，不再调用模型；没有成果或处理器版本变化仍拒绝恢复。Graph 提交锁内校验全部声明的节点依赖。文本宿主在固定输入中持久保存 publication {path,nodeVersion}，nodeVersion 为绑定 generationJobId 后的节点版本；发布持 Graph 锁核对画布身份、执行版本、任务绑定及 publication，再完成正文 CAS。插件可使用 documentPath 或其他路径字段，不要求 textPath；节点在生成期间发生修改时保留成果供核对，不覆盖目标。旧任务缺少 publication 时不自动发布。
 
+文本最终发布与普通 Graph 读取/修改共用每画布串行队列，避免后台快速完成导致受理命令返回前读图误报 EBUSY。队列仅协调已有工作，不吞掉版本冲突、非法数据或其他文件操作产生的错误；原命令始终通过持久回执对账，不因作业完成速度重复提交。
+
 渲染 worker 输入 RenderJobInput：scene、plan、anchor、lighting、settings、aspect、width、height、frameRate、time、duration、format（image/video）、assets。所有资产都是后端预先校验的任务快照引用。
 
 worker 接口 execute(input,{signal,directory,reportProgress}) 返回 RenderJobResult {artifacts:[{path,mimeType}],metadata?}。directory 仅任务临时目录；worker 无权写图、正文、审批或会话。视频固定时间采样帧后交 FFmpeg，不使用实时 MediaRecorder。取消结束 worker/编码；在途远端作业以供应商能力为准。恢复复用输入，可安全重做临时产物，发布由核心按原 jobId/CAS 去重。

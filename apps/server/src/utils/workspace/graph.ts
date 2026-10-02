@@ -183,7 +183,7 @@ export async function readGraphUnlocked(path: string, directory = dirname(path),
 const receiptLimit = 1000;
 // 同一画布的独立节点写入等待前一次落盘，真正的实体冲突仍由版本号判断。
 const pendingGraphs = new Map<string, Promise<void>>();
-async function serializeGraph<T>(path: string, action: () => Promise<T>): Promise<T> {
+export async function serializeGraph<T>(path: string, action: () => Promise<T>): Promise<T> {
   const key = process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
   const previous = pendingGraphs.get(key);
   let done!: () => void;

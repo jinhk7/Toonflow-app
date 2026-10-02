@@ -58,9 +58,24 @@ UI 工作包的隔离验证证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowU
 
 本次改变文本发布的宿主绑定方式：生成期间任何节点版本变化都会进入 needsReview，结果保留；不会猜测第三方插件哪个字段代表路径。旧任务缺少新绑定时也不直接覆盖正文。此前通过的其余项目没有扩大修改范围。
 
-额外发现、尚未修改：替代文本流立即完成时，`nodeTools` 动作返回前的 `refresh()` 与文本发布的 Graph 锁可能竞争，调用方得到 EBUSY，但后台作业最终完成。补充复现等待了作业终态，证据 `C:\Users\jinhk\AppData\Local\Temp\toonflowTextTargetFixUH2E6B\evidence.json` 中 `fastCompletionError` 与 `fastCompletionJob.status=completed` 同时存在。此边界超出本次指定四项，交回父线程安排后续处理；常规受理后再完成的流使用前述 ENNpQa 证据。
+额外发现：替代文本流立即完成时，`nodeTools` 动作返回前的 `refresh()` 与文本发布的 Graph 锁可能竞争，调用方得到 EBUSY，但后台作业最终完成。补充复现等待了作业终态，证据 `C:\Users\jinhk\AppData\Local\Temp\toonflowTextTargetFixUH2E6B\evidence.json` 中 `fastCompletionError` 与 `fastCompletionJob.status=completed` 同时存在。父线程随后明确要求纳入本次受理/完成一致性修复，处理结果见下节。
 
 残余修复后 server、Web、nodeScaffold、textNode 类型检查通过，server 及 textNode 正式构建通过；保留合并时六包检查和四包构建证据。所有检查均使用既有命令或 inline 验证。
+
+## 快速文本完成与命令回执一致性
+
+根因是两套调度边界：`readGraph`、`readGraphSnapshot` 和 `modifyGraph` 通过现有每画布 `serializeGraph` 队列后获取文件锁；文本最终发布此前绕开队列，直接取得相同文件锁。作业快速完成时，命令返回前的读图或另一个节点发布会遇到 EBUSY。命令把已受理作业误记为 failed，作业自身可能仍然完成。
+
+修复复用现有 `serializeGraph`：文本发布的目标核验和正文 CAS 排入同一画布队列，并保持整个发布期间的文件锁。没有删除命令后的刷新，也没有吞掉或无条件重试异常。未绑定节点的普通文本作业仍按原正文 CAS 路径执行。
+
+原立即完成场景及通用文本保护回归通过：`C:\Users\jinhk\AppData\Local\Temp\toonflowTextTargetFixgRWhzF\evidence.json`。正式应用启动后端执行器、官方 textNode、HTTP/SQLite/文件链路的并发证据：`C:\Users\jinhk\AppData\Local\Temp\toonflowFastTextHttpKpUZah\evidence.json`。仅 AI 输出在内存替代，未调用模型或供应商。首次 HTTP 验证遗漏独立入口执行的 `initializeBackendExecution()`，发现未注册 text handler 后按正式入口补齐，没有为验证环境问题修改业务代码。
+
+- 八个节点同时提交且文本流立即完成，八条命令和八个作业全部 completed。
+- 丢弃第一个真实受理响应后，客户端 GET 原命令对账，不重发 POST；每个原命令再提交两次，仍只有八次流调用和八个文本作业。
+- 相同命令 ID 改变参数仍明确冲突；正文 CAS 冲突保留产物并进入 needsReview；非法动作参数仍记录 failed。
+- 损坏 Graph 仍返回 HTTP 500；队列之外的真实文件锁仍返回 EBUSY；这些错误不阻塞后续读图或快速作业。
+
+修复后 server 类型检查和正式 Bun 构建通过，未修改前端或节点构建源码。待独立复审，不代表验收完成。
 
 ## 验证边界
 

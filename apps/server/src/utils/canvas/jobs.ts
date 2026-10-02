@@ -8,7 +8,7 @@ import { writeVersionedContent } from "@/utils/canvas/content";
 import { appendWorkspaceEvent, requestDigest } from "@/utils/canvas/store";
 import { loadNodeExecution } from "@/utils/plugins/nodeExecution";
 import { registerDirectorNodeJobHandlers } from "@/utils/canvas/directorJobs";
-import { readGraphUnlocked } from "@/utils/workspace/graph";
+import { readGraphUnlocked, serializeGraph } from "@/utils/workspace/graph";
 import { lockWorkspaceFiles, resolveWorkspacePath } from "@/utils/workspace/files";
 
 const textInput = z.object({
@@ -50,30 +50,37 @@ export function registerBuiltinNodeJobHandlers() {
     context.saveResult({ text, path: input.path });
     if (input.path) {
       if (!input.expectedRevision) throw Object.assign(new Error("缺少正文版本，未覆盖文件"), { status: 409 });
-      let release: (() => void) | undefined;
+      async function publish() {
+        context.beginCommit();
+        const saved = await writeVersionedContent({ directory: context.directory, path: input.path!, content: text, expectedRevision: input.expectedRevision!, commandId: input.commandId });
+        return { text, path: input.path, revision: saved.revision };
+      }
       try {
         if (input.nodeId || input.nodeType || input.canvasPath) {
           if (!input.nodeId || !input.nodeType || !input.canvasPath || !input.canvasId || !input.pluginRevision) {
             throw Object.assign(new Error("文本任务缺少固定目标身份，生成结果保留供核对"), { code: "JOB_NEEDS_REVIEW" });
           }
           const canvas = await resolveWorkspacePath(context.directory, input.canvasPath);
-          // 图修改和正文发布共用现有工作区锁，目标检查与正文 CAS 之间不能删除或替换节点。
-          release = lockWorkspaceFiles([canvas.path]);
-          const graph = await readGraphUnlocked(canvas.path, context.directory);
-          const node = graph.nodes.find(item => item.id === input.nodeId);
-          if (graph.toonflowGraph!.id !== input.canvasId || node?.type?.replace(/^remote-/, "") !== input.nodeType
-            || node.data?.executionRevision !== input.pluginRevision || node.data?.generationJobId !== context.jobId
-            || input.publication?.path !== input.path || graph.toonflowGraph!.nodes[input.nodeId] !== input.publication.nodeVersion) {
-            throw Object.assign(new Error("文本目标节点或任务绑定已变化，生成结果保留供核对"), { code: "JOB_NEEDS_REVIEW" });
-          }
+          // 与读图/修改排同一队列，避免快速发布把命令完成后的刷新误判为文件忙碌。
+          return await serializeGraph(canvas.path, async () => {
+            const release = lockWorkspaceFiles([canvas.path]);
+            try {
+              const graph = await readGraphUnlocked(canvas.path, context.directory);
+              const node = graph.nodes.find(item => item.id === input.nodeId);
+              if (!node || !input.publication || graph.toonflowGraph!.id !== input.canvasId || node.type?.replace(/^remote-/, "") !== input.nodeType
+                || node.data?.executionRevision !== input.pluginRevision || node.data?.generationJobId !== context.jobId
+                || input.publication.path !== input.path || graph.toonflowGraph!.nodes[input.nodeId!] !== input.publication.nodeVersion) {
+                throw Object.assign(new Error("文本目标节点或任务绑定已变化，生成结果保留供核对"), { code: "JOB_NEEDS_REVIEW" });
+              }
+              return await publish();
+            } finally { release(); }
+          });
         }
-        context.beginCommit();
-        const saved = await writeVersionedContent({ directory: context.directory, path: input.path, content: text, expectedRevision: input.expectedRevision, commandId: input.commandId });
-        return { text, path: input.path, revision: saved.revision };
+        return await publish();
       } catch (error) {
         if ((error as { status?: number }).status === 409 || (error as NodeJS.ErrnoException).code === "ENOENT") throw Object.assign(new Error("正文或目标画布已变化，生成结果保留在任务中，请核对后保存"), { code: "JOB_NEEDS_REVIEW" });
         throw error;
-      } finally { release?.(); }
+      }
     }
     return { text };
   }, "review");
