@@ -1,7 +1,10 @@
 <template>
   <section class="mobileNodeDetail" v-loading="loading">
     <mobileTopBar :title="title" :subtitle="typeLabel" :backTo="workspaceLink" />
+    <el-alert v-if="graphError || connectionError" :title="graphError || connectionError" type="warning" :closable="false" showIcon />
     <el-main v-if="node && graph" class="content">
+      <el-alert v-if="conflict" :title="conflict.message" type="warning" :closable="false" showIcon />
+      <details v-if="conflict?.changes" class="draftPreview"><summary>查看保留的修改草稿</summary><pre>{{ JSON.stringify(conflict.changes, null, 2) }}</pre></details>
       <el-form labelPosition="top">
         <el-form-item label="名称">
           <el-input v-model="labelDraft" @blur="saveLabel" />
@@ -13,20 +16,6 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <el-card v-if="isMediaNode" shadow="never" class="section">
-        <template #header>生成设置</template>
-        <el-form labelPosition="top">
-          <el-form-item label="模型">
-            <el-select v-model="modelDraft" filterable placeholder="选择已安装模型" style="width: 100%">
-              <el-option v-for="model in mediaModels" :key="`${model.providerId}:${model.modelId}`" :label="`${model.providerLabel} / ${model.label}`" :value="JSON.stringify([model.providerId, model.modelId])" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="提示词">
-            <el-input v-model="promptDraft" type="textarea" :autosize="{ minRows: 3, maxRows: 10 }" :maxlength="8000" />
-          </el-form-item>
-          <el-button type="primary" @click="saveMediaSettings">保存生成设置</el-button>
-        </el-form>
-      </el-card>
       <el-card shadow="never" class="section">
         <template #header>
           <div class="sectionHeader">
@@ -44,7 +33,7 @@
             <el-button text type="danger" aria-label="删除连接" @click="removeConnection(link.edgeId)">删除</el-button>
           </li>
         </ul>
-        <el-empty v-if="!refs.length" description="暂无连接" :image-size="64" />
+        <el-empty v-if="!refs.length" description="暂无连接" :imageSize="64" />
       </el-card>
       <el-card v-if="outputPreview" shadow="never" class="section">
         <template #header>输出预览</template>
@@ -63,7 +52,7 @@
         :canvasPath="canvasPath"
         :node="node"
         :graph="graph"
-        :persistNode="changes => applyChanges(changes)" />
+        @changed="load" />
     </el-main>
     <el-empty v-else-if="!loading" description="节点不存在" />
     <mobileConnectionSheet
@@ -79,7 +68,6 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import axios from "axios";
 import type { Connection } from "@vue-flow/core";
 import mobileTopBar from "./components/mobileTopBar.vue";
 import mobileConnectionSheet from "./components/mobileConnectionSheet.vue";
@@ -107,7 +95,7 @@ const directory = computed(() => String(route.query.directory ?? ""));
 const canvasPath = computed(() => String(route.query.canvas ?? ""));
 const projectName = computed(() => String(route.query.name ?? "项目"));
 
-const { graph, loading, load, applyChanges } = useMobileGraph(
+const { graph, loading, error: graphError, connectionError, conflict, load, applyChanges } = useMobileGraph(
   () => directory.value,
   () => canvasPath.value,
 );
@@ -116,10 +104,6 @@ const node = computed(() => (graph.value?.nodes as CanvasNode[] | undefined)?.fi
 const groups = computed(() => (graph.value ? listGroups(graph.value.nodes as CanvasNode[]) : []));
 const refs = computed(() => (graph.value && nodeId.value ? nodeReferences(nodeId.value, graph.value) : []));
 
-const modelDraft = ref("");
-const promptDraft = ref("");
-const mediaModels = ref<{ providerId: string; providerLabel: string; modelId: string; label: string; type: string }[]>([]);
-const isMediaNode = computed(() => node.value?.type === "remote-imageGenerationNode" || node.value?.type === "remote-videoGenerationNode");
 const labelDraft = ref("");
 const parentGroupId = ref("");
 const connectionVisible = ref(false);
@@ -167,12 +151,16 @@ watch([mediaOutputs, directory], async ([outputs, currentDirectory], _, onCleanu
   }));
 }, { immediate: true });
 
+let previousNodeId = "";
+let previousLabel = "";
+let previousParent = "";
 watch(node, current => {
   if (!current) return;
-  labelDraft.value = nodeLabel(current);
-  parentGroupId.value = current.parentNode ?? "";
-  modelDraft.value = typeof current.data?.model === "string" ? current.data.model : "";
-  promptDraft.value = typeof current.data?.prompt === "string" ? current.data.prompt : "";
+  if (current.id !== previousNodeId || labelDraft.value === previousLabel) labelDraft.value = nodeLabel(current);
+  if (current.id !== previousNodeId || parentGroupId.value === previousParent) parentGroupId.value = current.parentNode ?? "";
+  previousNodeId = current.id;
+  previousLabel = nodeLabel(current);
+  previousParent = current.parentNode ?? "";
 }, { immediate: true });
 
 async function saveLabel() {
@@ -199,14 +187,6 @@ async function saveParent() {
   }
 }
 
-async function saveMediaSettings() {
-  if (!graph.value || !node.value || !isMediaNode.value) return;
-  if (node.value.data?.model === modelDraft.value && node.value.data?.prompt === promptDraft.value) return;
-  try {
-    await applyChanges([changeForNode(graph.value, { ...node.value, data: { ...node.value.data, model: modelDraft.value, prompt: promptDraft.value } }, node.value.id)]);
-    ElMessage.success("已保存生成设置");
-  } catch (error) { ElMessage.error(error instanceof Error ? error.message : "保存失败"); }
-}
 async function addConnection(connection: Connection) {
   if (!graph.value) return;
   try {
@@ -240,10 +220,6 @@ onMounted(async () => {
     return;
   }
   await load();
-  try {
-    const { data } = await axios.get<{ code: number; data: typeof mediaModels.value }>("/api/ai/media/models");
-    if (data.code === 200) mediaModels.value = data.data.filter(model => model.type === (node.value?.type === "remote-videoGenerationNode" ? "video" : "image"));
-  } catch { /* 已有节点仍可查看；无可用模型时不提交新任务 */ }
 });
 </script>
 
@@ -252,6 +228,7 @@ onMounted(async () => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  .draftPreview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
 
 .content {

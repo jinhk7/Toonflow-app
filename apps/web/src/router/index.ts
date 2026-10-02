@@ -32,6 +32,7 @@ const router = createRouter({
         { path: "workspace", component: () => import("@/pages/workspace/mobile/mobileWorkspace.vue") },
         { path: "node/:nodeId", component: () => import("@/pages/workspace/mobile/mobileNodeDetail.vue") },
         { path: "tasks", component: () => import("@/pages/workspace/mobile/mobileTasks.vue") },
+        { path: "agent", component: () => import("@/pages/workspace/mobile/mobileAgent.vue") },
       ],
     },
   ],

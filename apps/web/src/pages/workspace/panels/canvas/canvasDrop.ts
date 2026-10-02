@@ -1,8 +1,7 @@
 import axios from "axios";
 import { ElMessage } from "element-plus";
 import type { useVueFlow } from "@vue-flow/core";
-import { uploadNodeFile } from "@toonflow/nodes-scaffold/workspaceFiles";
-import type { NodeOutput } from "@toonflow/nodes-scaffold/values";
+import type { NodeExecutionDescriptor } from "@toonflow/nodes-scaffold/execution";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
 
 const assetDragType = "application/toonflow-asset";
@@ -27,9 +26,11 @@ export function isCanvasFileDrag(event: DragEvent) {
 
 type CanvasFileContext = {
   directory: string;
-  availableNodes: { type: string }[];
+  availableNodes: (NodeExecutionDescriptor & { type: string })[];
   signal: AbortSignal;
-  flow: Pick<ReturnType<typeof useVueFlow>, "addNodes" | "screenToFlowCoordinate">;
+  flow: Pick<ReturnType<typeof useVueFlow>, "screenToFlowCoordinate">;
+  addNode(type: string, label: string, position: { x: number; y: number }): Promise<string>;
+  execute(nodeId: string, action: string, args: Record<string, unknown>, revision: string): Promise<unknown>;
 };
 
 export async function dropCanvasFiles(event: DragEvent, context: CanvasFileContext) {
@@ -52,12 +53,10 @@ export async function dropCanvasFiles(event: DragEvent, context: CanvasFileConte
 }
 
 export async function importCanvasFiles(droppedFiles: File[], position: { x: number; y: number }, context: CanvasFileContext) {
-  const { signal, flow, availableNodes } = context;
+  const { signal, availableNodes } = context;
   const files = useWorkspaceFiles(context.directory);
   for (const [index, file] of droppedFiles.entries()) {
     if (signal.aborted) break;
-    const id = crypto.randomUUID();
-    let copiedPath: string | undefined;
     try {
       const fileType = file.type.split(";")[0]!.trim().toLowerCase();
       const extension = file.name.split(".").pop()!.toLowerCase();
@@ -65,21 +64,35 @@ export async function importCanvasFiles(droppedFiles: File[], position: { x: num
       const kind = mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video"
         : mimeType.startsWith("text/") || /^application\/(json|xml|javascript|x-ndjson)$/.test(mimeType) ? "text" : undefined;
       if (!kind) throw new Error(`${file.name}：该文件类型暂不支持导入画布`);
-      const type = `remote-${kind}Node`;
-      if (!availableNodes.some(node => node.type === type)) throw new Error(`${file.name}：请先安装并启用对应的基础节点`);
-      let output: NodeOutput | undefined;
-      let textSnapshot: string | undefined;
+      const dataType = kind === "text" ? "STRING" : kind.toUpperCase();
+      const keys = kind === "text" ? ["text"] : ["stagedPath", "name", "mimeType"];
+      // ACT: 文件拖入优先选端口较少的匹配节点；插件需同时声明对应输出和上传/正文参数，不能从节点名称猜能力。
+      const candidates = availableNodes.filter(node => node.handles.some(handle => handle.type === "source" && handle.dataType === dataType))
+        .flatMap(node => node.actions.filter(action => {
+          const properties = action.parameters.properties as Record<string, unknown> | undefined;
+          const required = action.parameters.required;
+          return properties && keys.every(key => key in properties) && (!Array.isArray(required) || required.every(key => keys.includes(String(key))));
+        }).map(action => ({ node, action })))
+        .sort((left, right) => left.node.handles.length - right.node.handles.length || left.node.actions.length - right.node.actions.length);
+      const target = candidates[0];
+      if (!target) throw new Error(`${file.name}：没有启用支持此文件的后端节点动作`);
+      let args: Record<string, unknown>;
       if (kind === "text") {
-        textSnapshot = await file.text();
+        args = { text: await file.text() };
       } else {
-        copiedPath = await uploadNodeFile(files, id, file);
-        output = { dataType: kind === "image" ? "IMAGE" : kind === "audio" ? "AUDIO" : "VIDEO", value: { url: copiedPath, mimeType } };
+        for (const path of ["assets", "assets/uploads"]) {
+          await files.mkdir(path).catch(error => { if (error?.response?.data?.data?.code !== "EEXIST") throw error; });
+        }
+        const stagedPath = `assets/uploads/${crypto.randomUUID()}`;
+        await files.write(stagedPath, file, true, signal);
+        args = { stagedPath, name: file.name, mimeType };
       }
       signal.throwIfAborted();
-      flow.addNodes({ id, type, position: { x: position.x + index * 32, y: position.y + index * 32 },
-        data: kind === "text" ? { label: file.name, textSnapshot } : { label: file.name, outputs: { [kind]: output } } });
+      const id = await context.addNode(target.node.type, file.name, { x: position.x + index * 32, y: position.y + index * 32 });
+      signal.throwIfAborted();
+      await context.execute(id, target.action.name, args, target.node.executionRevision);
     } catch (error) {
-      if (copiedPath) await files.remove(copiedPath).catch(showError);
+      // 结果未知时保留暂存文件与已创建节点，页面离开不能删掉后台可能仍在读取的输入。
       if (!signal.aborted) showError(error);
     }
   }

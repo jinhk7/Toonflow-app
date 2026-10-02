@@ -1,15 +1,7 @@
-import { inject, onScopeDispose } from "vue";
-import { createBrowserFfmpeg } from "@toonflow/ffmpeg/browser";
+import type { BrowserFfmpegFactory } from "@toonflow/ffmpeg/browser";
 
 export type { BrowserFfmpegFactory, BrowserFfmpegCommand, BrowserFfmpegOptions, FfprobeData } from "@toonflow/ffmpeg/browser";
 
-export function useNodeFfmpeg() {
-  const getDirectory = inject<(() => string) | undefined>("workspaceDirectory", undefined);
-  const lifetime = new AbortController();
-  onScopeDispose(() => lifetime.abort());
-
-  return (signal?: AbortSignal) => {
-    if (!getDirectory) throw new Error("当前画布未提供工作区目录");
-    return createBrowserFfmpeg(getDirectory(), signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal);
-  };
+export function useNodeFfmpeg(): (signal?: AbortSignal) => BrowserFfmpegFactory {
+  return () => { throw new Error("旧客户端 FFmpeg 入口已停用，请使用节点后端注册动作"); };
 }

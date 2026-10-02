@@ -5,7 +5,6 @@ import { dirname, resolve } from "node:path";
 import conf from "@/utils/conf";
 import type { AgentEvent } from "@/agent/runtime/types";
 import type { QuestionAnswer, QuestionRequest } from "@toonflow/tools-scaffold/runtime";
-import { classifyToolExecutionMode } from "@/agent/runtime/toolExecution";
 import { isBuiltinNodeTool, type NodeToolContext } from "@/utils/plugins/nodes";
 
 export type AgentRunStatus =
@@ -36,6 +35,18 @@ export type AgentRunRecord = {
   errorMessage?: string;
 };
 
+export type AgentAcceptanceRecord = {
+  cwd: string;
+  clientMessageId: string;
+  requestHash: string;
+  runId: string;
+  sessionFile: string;
+  mode: "run" | "steer";
+  inputJson: string;
+  createdAt: string;
+  messageId?: string | null;
+};
+
 export type PendingQuestionRecord = {
   callId: string;
   runId: string;
@@ -45,6 +56,7 @@ export type PendingQuestionRecord = {
   status: "waiting" | "answered" | "cancelled";
   answer?: QuestionAnswer;
   createdAt: string;
+  sessionFile?: string;
 };
 
 let database: Database | undefined;
@@ -80,6 +92,18 @@ export function getAgentRunDatabase() {
       createdAt TEXT NOT NULL,
       PRIMARY KEY (runId, seq)
     );
+    CREATE TABLE IF NOT EXISTS agent_acceptances (
+      cwd TEXT NOT NULL,
+      clientMessageId TEXT NOT NULL,
+      requestHash TEXT NOT NULL,
+      runId TEXT NOT NULL,
+      sessionFile TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      inputJson TEXT NOT NULL,
+      messageId TEXT,
+      createdAt TEXT NOT NULL,
+      PRIMARY KEY (cwd, clientMessageId)
+    );
     CREATE TABLE IF NOT EXISTS agent_pending_questions (
       callId TEXT PRIMARY KEY,
       runId TEXT NOT NULL,
@@ -113,7 +137,37 @@ export function getAgentRunDatabase() {
     CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(cwd, sessionFile, updatedAt);
     CREATE INDEX IF NOT EXISTS idx_agent_pending_run ON agent_pending_questions(runId, status);
   `);
+  const acceptanceColumns = database.prepare("PRAGMA table_info(agent_acceptances)").all() as { name: string }[];
+  if (!acceptanceColumns.some(column => column.name === "messageId")) database.exec("ALTER TABLE agent_acceptances ADD COLUMN messageId TEXT;");
+  const questionColumns = database.prepare("PRAGMA table_info(agent_pending_questions)").all() as { name: string }[];
+  if (!questionColumns.some(column => column.name === "sessionFile")) database.exec("ALTER TABLE agent_pending_questions ADD COLUMN sessionFile TEXT;");
+  const db = database;
+  const hasSessionIndex = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_run_sessions'").get();
+  if (!hasSessionIndex) db.transaction(() => {
+    db.exec(`
+      CREATE TABLE agent_run_sessions (
+        runId TEXT NOT NULL,
+        sessionFile TEXT NOT NULL,
+        PRIMARY KEY (runId, sessionFile)
+      );
+    `);
+    // ACT: 首次升级从既有委派事件回填归属，扫描量与历史事件数成正比；不按父会话最新 run 猜测旧子会话归属。
+    for (const row of db.prepare("SELECT runId, payload FROM agent_run_events WHERE payload LIKE '%\"subAgent%'").iterate() as Iterable<{ runId: string; payload: string }>) {
+      indexRunEventSessions(db, row.runId, JSON.parse(row.payload) as AgentEvent);
+    }
+  })();
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agent_run_sessions_file ON agent_run_sessions(sessionFile, runId);");
   return database;
+}
+
+function indexRunEventSessions(db: Database, runId: string, event: AgentEvent) {
+  if (event.type !== "subAgentEvent" && event.type !== "subAgent") return;
+  const insert = db.prepare("INSERT OR IGNORE INTO agent_run_sessions (runId, sessionFile) VALUES (?, ?)");
+  while (event.type === "subAgentEvent") {
+    insert.run(runId, event.file);
+    event = event.event;
+  }
+  if (event.type === "subAgent") insert.run(runId, event.agent.file);
 }
 
 export async function ensureAgentRunStore() {
@@ -151,14 +205,14 @@ export function insertAgentRun(record: Omit<AgentRunRecord, "createdAt" | "updat
   return createdAt;
 }
 
-export function updateAgentRun(runId: string, patch: Partial<Pick<AgentRunRecord, "status" | "intent" | "sessionFile" | "errorMessage">>) {
+export function updateAgentRun(runId: string, patch: Partial<Pick<AgentRunRecord, "status" | "intent" | "sessionFile" | "errorMessage" | "inputJson">>) {
   const db = getAgentRunDatabase();
   const fields: string[] = [];
   const values: unknown[] = [];
-  for (const key of ["status", "intent", "sessionFile", "errorMessage"] as const) {
-    if (patch[key] !== undefined) {
+  for (const key of ["status", "intent", "sessionFile", "errorMessage", "inputJson"] as const) {
+    if (Object.hasOwn(patch, key)) {
       fields.push(`${key} = ?`);
-      values.push(patch[key]);
+      values.push(patch[key] ?? null);
     }
   }
   if (!fields.length) return;
@@ -170,6 +224,48 @@ export function updateAgentRun(runId: string, patch: Partial<Pick<AgentRunRecord
 
 export function getAgentRun(runId: string) {
   return getAgentRunDatabase().prepare("SELECT * FROM agent_runs WHERE runId = ?").get(runId) as AgentRunRecord | undefined;
+}
+
+export function getLatestRunForSession(cwd: string, sessionFile: string) {
+  return getAgentRunDatabase().prepare(`
+    SELECT * FROM agent_runs
+    WHERE cwd = ? AND (sessionFile = ? OR EXISTS (
+      SELECT 1 FROM agent_run_sessions WHERE agent_run_sessions.runId = agent_runs.runId AND agent_run_sessions.sessionFile = ?
+    ))
+    ORDER BY createdAt DESC, rowid DESC LIMIT 1
+  `).get(cwd, sessionFile, sessionFile) as AgentRunRecord | undefined;
+}
+
+export function getAgentAcceptance(cwd: string, clientMessageId: string) {
+  return getAgentRunDatabase().prepare("SELECT * FROM agent_acceptances WHERE cwd = ? AND clientMessageId = ?")
+    .get(cwd, clientMessageId) as AgentAcceptanceRecord | undefined;
+}
+
+export function insertAgentAcceptance(record: Omit<AgentAcceptanceRecord, "createdAt" | "messageId">, run?: Parameters<typeof insertAgentRun>[0]) {
+  return getAgentRunDatabase().transaction(() => {
+    if (run) insertAgentRun(run);
+    getAgentRunDatabase().prepare(`
+      INSERT INTO agent_acceptances (cwd, clientMessageId, requestHash, runId, sessionFile, mode, inputJson, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(record.cwd, record.clientMessageId, record.requestHash, record.runId, record.sessionFile, record.mode, record.inputJson, nowIso());
+    return getAgentAcceptance(record.cwd, record.clientMessageId)!;
+  })();
+}
+
+export function listUndeliveredAgentInputs(cwd: string, sessionFile: string) {
+  return getAgentRunDatabase().prepare(`
+    SELECT * FROM agent_acceptances WHERE cwd = ? AND sessionFile = ? AND messageId IS NULL ORDER BY createdAt, rowid
+  `).all(cwd, sessionFile) as AgentAcceptanceRecord[];
+}
+
+export function listRunUndeliveredInputs(runId: string) {
+  return getAgentRunDatabase().prepare("SELECT * FROM agent_acceptances WHERE runId = ? AND messageId IS NULL ORDER BY createdAt, rowid")
+    .all(runId) as AgentAcceptanceRecord[];
+}
+
+export function recordAgentInputDelivery(cwd: string, clientMessageId: string, messageId: string) {
+  getAgentRunDatabase().prepare("UPDATE agent_acceptances SET messageId = ? WHERE cwd = ? AND clientMessageId = ? AND messageId IS NULL")
+    .run(messageId, cwd, clientMessageId);
 }
 
 export function getActiveRunForSession(cwd: string, sessionFile: string) {
@@ -202,6 +298,7 @@ export function appendRunEvent(runId: string, event: AgentEvent) {
     const seq = Math.max(run.lastEventSeq, maximum.seq ?? 0) + 1;
     const createdAt = nowIso();
     db.prepare("INSERT INTO agent_run_events (runId, seq, payload, createdAt) VALUES (?, ?, ?, ?)").run(runId, seq, JSON.stringify(event), createdAt);
+    indexRunEventSessions(db, runId, event);
     db.prepare("UPDATE agent_runs SET lastEventSeq = ?, updatedAt = ? WHERE runId = ?").run(seq, createdAt, runId);
     return { seq, event, createdAt };
   })();
@@ -217,16 +314,16 @@ export function insertPendingQuestion(record: Omit<PendingQuestionRecord, "statu
   const db = getAgentRunDatabase();
   const createdAt = nowIso();
   db.prepare(`
-    INSERT INTO agent_pending_questions (callId, runId, cwd, toolCallId, requestJson, status, answerJson, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
-  `).run(record.callId, record.runId, record.cwd, record.toolCallId, JSON.stringify(record.request), record.status ?? "waiting", createdAt);
+    INSERT INTO agent_pending_questions (callId, runId, cwd, toolCallId, requestJson, status, answerJson, createdAt, sessionFile)
+    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+  `).run(record.callId, record.runId, record.cwd, record.toolCallId, JSON.stringify(record.request), record.status ?? "waiting", createdAt, record.sessionFile ?? null);
   updateAgentRun(record.runId, { status: "waitingApproval" });
   return createdAt;
 }
 
 export function getPendingQuestion(callId: string) {
   const row = getAgentRunDatabase().prepare("SELECT * FROM agent_pending_questions WHERE callId = ?").get(callId) as {
-    callId: string; runId: string; cwd: string; toolCallId: string; requestJson: string; status: string; answerJson: string | null; createdAt: string;
+    callId: string; runId: string; cwd: string; toolCallId: string; requestJson: string; status: string; answerJson: string | null; createdAt: string; sessionFile?: string;
   } | undefined;
   if (!row) return undefined;
   return {
@@ -238,13 +335,14 @@ export function getPendingQuestion(callId: string) {
     status: row.status as PendingQuestionRecord["status"],
     answer: row.answerJson ? JSON.parse(row.answerJson) as QuestionAnswer : undefined,
     createdAt: row.createdAt,
+    sessionFile: row.sessionFile,
   } satisfies PendingQuestionRecord;
 }
 
 export function listWaitingQuestionsForRun(runId: string) {
   const rows = getAgentRunDatabase().prepare(`
     SELECT * FROM agent_pending_questions WHERE runId = ? AND status = 'waiting' ORDER BY createdAt ASC
-  `).all(runId) as { callId: string; runId: string; cwd: string; toolCallId: string; requestJson: string; status: string; answerJson: string | null; createdAt: string }[];
+  `).all(runId) as { callId: string; runId: string; cwd: string; toolCallId: string; requestJson: string; status: string; answerJson: string | null; createdAt: string; sessionFile?: string }[];
   return rows.map(row => ({
     callId: row.callId,
     runId: row.runId,
@@ -254,6 +352,7 @@ export function listWaitingQuestionsForRun(runId: string) {
     status: row.status as PendingQuestionRecord["status"],
     answer: row.answerJson ? JSON.parse(row.answerJson) as QuestionAnswer : undefined,
     createdAt: row.createdAt,
+    sessionFile: row.sessionFile,
   }));
 }
 
@@ -295,8 +394,8 @@ export function getToolCallRecord(toolCallId: string) {
   } | undefined;
 }
 
-const readOnlyTools = new Set(["read", "ls", "report", "skill", "question"]);
 const readOnlyCanvasTools = new Set(["getCanvas", "findCanvasNodes", "getCanvasNodes", "getCanvasEdges", "getNodeTools", "selectNodes", "fitCanvas"]);
+type ToolTrustContext = NodeToolContext & { builtinReadOnlyTool?: boolean };
 function isScopedToolInput(value: unknown): value is { args: unknown; canvasId: string; canvasPath: string; nodeRevision?: unknown } {
   return !!value && typeof value === "object" && !Array.isArray(value) && "args" in value
     && "canvasId" in value && typeof value.canvasId === "string" && !!value.canvasId
@@ -310,13 +409,12 @@ export function getToolCallInput(value: unknown): unknown {
   return isScopedToolInput(value) ? value.args : value;
 }
 
-export function isSideEffectTool(name: string, context?: NodeToolContext) {
-  return !readOnlyTools.has(name) && !(readOnlyCanvasTools.has(name) && context?.builtinCanvasTool);
+export function isSideEffectTool(name: string, context?: ToolTrustContext) {
+  return !context?.builtinReadOnlyTool && !(readOnlyCanvasTools.has(name) && context?.builtinCanvasTool);
 }
 
-export function requiresToolAuthorization(name: string, args?: unknown, context?: NodeToolContext) {
-  if (readOnlyTools.has(name)) return false;
-  if (classifyToolExecutionMode(name) !== "canvas") return true;
+export function requiresToolAuthorization(name: string, args?: unknown, context?: ToolTrustContext) {
+  if (context?.builtinReadOnlyTool) return false;
   if (!context?.builtinCanvasTool) return true;
   if (readOnlyCanvasTools.has(name)) return false;
   // 审批与防重播分别判断：本地修改免逐次审批，执行结果未知时仍需核对。
@@ -349,12 +447,20 @@ export function listPendingAuthorizations(runId: string) {
   const run = getAgentRun(runId);
   if (!run) return [];
   const rows = getAgentRunDatabase().prepare("SELECT toolCallId, name, argsJson FROM agent_tool_calls WHERE runId = ? AND status = 'pendingAuthorization' ORDER BY createdAt").all(runId) as { toolCallId: string; name: string; argsJson: string }[];
-  const grants = new Map((getAgentRunDatabase().prepare("SELECT scopeKey, remaining FROM agent_authorizations WHERE runId = ?").all(runId) as { scopeKey: string; remaining: number }[])
-    .map(row => [row.scopeKey, row.remaining]));
-  return rows.map(row => {
+  const grants = new Map((getAgentRunDatabase().prepare("SELECT scopeKey, remaining, scopeJson FROM agent_authorizations WHERE runId = ?").all(runId) as { scopeKey: string; remaining: number; scopeJson: string }[])
+    .map(row => [row.scopeKey, { remaining: row.remaining, sourceToolCallId: (JSON.parse(row.scopeJson) as { sourceToolCallId?: string }).sourceToolCallId }]));
+  const calls = rows.map(row => {
     const args = JSON.parse(row.argsJson) as unknown;
     return { toolCallId: row.toolCallId, toolName: row.name, args, modelId: run.modelId, scopeKey: authorizationScopeKey(row.name, args, run.modelId) };
-  }).filter(call => requiresToolAuthorization(call.toolName, call.args, storedToolContext(run, call.args)) && (grants.get(call.scopeKey) ?? 0) < 1);
+  });
+  const counts = new Map<string, number>();
+  for (const call of calls) counts.set(call.scopeKey, (counts.get(call.scopeKey) ?? 0) + 1);
+  return calls.filter(call => {
+    if (!requiresToolAuthorization(call.toolName, call.args, storedToolContext(run, call.args))) return false;
+    const grant = grants.get(call.scopeKey);
+    if (!grant || grant.remaining < 1) return true;
+    return grant.sourceToolCallId ? grant.sourceToolCallId !== call.toolCallId : counts.get(call.scopeKey) !== 1;
+  });
 }
 
 export function grantAuthorization(runId: string, toolCallId: string, remaining = 1) {
@@ -367,7 +473,7 @@ export function grantAuthorization(runId: string, toolCallId: string, remaining 
     throw Object.assign(new Error("没有可授权的待执行工具调用"), { status: 409 });
   if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 1000) throw Object.assign(new Error("授权次数无效"), { status: 400 });
   const scopeKey = authorizationScopeKey(call.name, args, run.modelId);
-  const scope = { toolName: call.name, modelId: run.modelId, inputDigest: scopeKey.slice(5) };
+  const scope = { toolName: call.name, modelId: run.modelId, inputDigest: scopeKey.slice(5), sourceToolCallId: toolCallId };
   getAgentRunDatabase().prepare(`
     INSERT INTO agent_authorizations (id, runId, scopeKey, scopeJson, remaining, createdAt)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -376,18 +482,34 @@ export function grantAuthorization(runId: string, toolCallId: string, remaining 
   return scope;
 }
 
-export function requireSideEffectAuthorization(runId: string, toolName: string, args: unknown, toolCallId: string, context?: NodeToolContext) {
+export function requireSideEffectAuthorization(runId: string, toolName: string, args: unknown, toolCallId: string, context?: ToolTrustContext) {
   const run = getAgentRun(runId);
   if (!requiresToolAuthorization(toolName, args, context ?? storedToolContext(run, args))) return;
   if (!run) throw Object.assign(new Error("运行不存在"), { status: 404 });
   const scopeKey = authorizationScopeKey(toolName, args, run.modelId);
   getAgentRunDatabase().transaction(() => {
     const db = getAgentRunDatabase();
-    const authorization = db.prepare("SELECT remaining FROM agent_authorizations WHERE runId = ? AND scopeKey = ?").get(runId, scopeKey) as { remaining: number } | undefined;
+    const authorization = db.prepare("SELECT remaining, scopeJson FROM agent_authorizations WHERE runId = ? AND scopeKey = ?").get(runId, scopeKey) as { remaining: number; scopeJson: string } | undefined;
     if (!authorization || authorization.remaining < 1)
       throw Object.assign(new Error(`工具 ${toolName} 尚未授权，请核对精确输入和模型`), { code: "AGENT_NEEDS_AUTHORIZATION", status: 403, toolCallId });
+    const scope = JSON.parse(authorization.scopeJson) as { sourceToolCallId?: string };
+    if (!scope.sourceToolCallId) {
+      const candidates = (db.prepare("SELECT toolCallId, argsJson FROM agent_tool_calls WHERE runId = ? AND name = ? AND status = 'pendingAuthorization' AND toolCallId <> ?")
+        .all(runId, toolName, toolCallId) as { toolCallId: string; argsJson: string }[])
+        .filter(call => authorizationScopeKey(toolName, JSON.parse(call.argsJson), run.modelId) === scopeKey);
+      if (candidates.length > 1) throw Object.assign(new Error("旧授权对应多个待执行调用，请重新批准具体调用"), { code: "AGENT_NEEDS_AUTHORIZATION", status: 403, toolCallId });
+      scope.sourceToolCallId = candidates[0]?.toolCallId ?? toolCallId;
+      db.prepare("UPDATE agent_authorizations SET scopeJson = ? WHERE runId = ? AND scopeKey = ?").run(JSON.stringify(scope), runId, scopeKey);
+    }
+    const source = getToolCallRecord(scope.sourceToolCallId);
+    if (!source || source.runId !== runId || source.name !== toolName || authorizationScopeKey(toolName, JSON.parse(source.argsJson ?? "null"), run.modelId) !== scopeKey)
+      throw Object.assign(new Error("授权来源调用已变化，请重新批准"), { code: "AGENT_NEEDS_AUTHORIZATION", status: 403, toolCallId });
+    const started = db.prepare("UPDATE agent_tool_calls SET status = 'started', updatedAt = ? WHERE toolCallId = ? AND runId = ? AND status = 'pendingAuthorization'").run(nowIso(), toolCallId, runId);
+    if (!started.changes) throw Object.assign(new Error("待执行调用已变化"), { status: 409 });
     db.prepare("UPDATE agent_authorizations SET remaining = remaining - 1 WHERE runId = ? AND scopeKey = ?").run(runId, scopeKey);
-    db.prepare("UPDATE agent_tool_calls SET status = 'started', updatedAt = ? WHERE toolCallId = ? AND runId = ? AND status = 'pendingAuthorization'").run(nowIso(), toolCallId, runId);
+    if (source.toolCallId !== toolCallId && source.status === "pendingAuthorization") {
+      recordToolCallFinish(source.toolCallId, "skipped", { supersededBy: toolCallId, noReplay: true, reason: "authorizationConsumed" });
+    }
   })();
 }
 

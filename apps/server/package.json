@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     "./app": "./src/app.ts",
+    "./execution": "./src/utils/canvas/runtime.ts",
     "./desktop": "./src/types/desktop.ts",
     "./mcp": "./src/utils/mcp/runtime.ts",
     "./agent/types": "./src/agent/runtime/types.ts",
@@ -17,12 +18,14 @@
     "typecheck": "tsc"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.1.1",
     "@babel/parser": "^7.29.8",
     "@breezystack/lamejs": "^1.2.7",
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "^0.85.1",
     "@toonflow/ffmpeg": "workspace:*",
     "@toonflow/mcp": "workspace:*",
+    "@toonflow/node-director3d": "workspace:*",
     "@toonflow/providers": "workspace:*",
     "@toonflow/teams-scaffold": "workspace:*",
     "@toonflow/tool-canvas": "workspace:*",

@@ -31,6 +31,9 @@ export default router.delete("/", validateFields({ name: z.string().regex(/^[a-z
   await unlink(markerPath).catch((err: NodeJS.ErrnoException) => {
     if (err.code !== "ENOENT") throw err;
   });
+  await unlink(resolve(nodesDirectory, `${req.body.name}.node.js`)).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== "ENOENT") throw err;
+  });
   const configs = u.conf.get("nodeConfigs", {});
   delete configs[req.body.name];
   u.conf.set("nodeConfigs", configs);

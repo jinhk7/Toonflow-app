@@ -14,7 +14,8 @@
           @change="openOutput">
           <el-option v-for="output in nodeOutputs" :key="output.id" :label="output.label" :value="output.id" />
         </el-select>
-        <el-button v-if="saveError" text type="danger" size="small" :title="saveError" @click="flushSave().catch(() => {})">保存失败，重试</el-button>
+        <el-button v-if="saveError" text type="danger" size="small" :title="saveError" @click="retrySave">保存失败，草稿已保留；重试</el-button>
+        <el-button v-if="savedDraft" text type="warning" size="small" @click="restoreDraft">恢复本地草稿</el-button>
         <span v-else class="saveStatus" role="status">{{ dirty ? "保存中…" : "已保存" }}</span>
       </div>
       <div v-if="editor" class="editorToolbar" role="group" aria-label="文档格式">
@@ -243,6 +244,8 @@ import { Editor, EditorContent, useEditor } from "@tiptap/vue-3";
 import type { ChainedCommands, EditorOptions } from "@tiptap/core";
 import { useWorkspaceStore } from "@/stores/workspace";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
+import { createExecutionClient } from "@toonflow/nodes-scaffold/runtime";
+import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
 import { writeClipboardText } from "@/lib/clipboard";
 import fileTree, { type TreeSelection } from "./components/fileTree.vue";
 import markdownExtensions, { serializeMarkdown } from "./markdownExtensions";
@@ -278,10 +281,10 @@ import {
   IconAlignJustified,
 } from "@tabler/icons-vue";
 
-type TextOutput = { id: string; label: string; text: string };
+type TextOutput = { id: string; label: string; text: string; revision?: string };
 const props = defineProps<{
   readNode: (directory: string, canvasPath: string, nodeId: string) => Promise<{ label: string; outputs: TextOutput[] }>;
-  saveNode: (directory: string, canvasPath: string, nodeId: string, handleId: string, text: string) => Promise<void>;
+  saveNode: (directory: string, canvasPath: string, nodeId: string, handleId: string, text: string, expectedRevision?: string) => Promise<string>;
 }>();
 const workspaceStore = useWorkspaceStore();
 const selectedNode = ref<TreeSelection>();
@@ -296,19 +299,40 @@ const selectedPath = computed(() => {
   return "filePath" in selection ? selection.filePath : selection.canvasPath;
 });
 let openRequest = 0;
-let draft: { directory: string; selection: TreeSelection; handleId: string; text: string } | undefined;
+let draft: { directory: string; selection: TreeSelection; handleId: string; text: string; revision?: string; commandId: string } | undefined;
+const savedDraft = ref<NonNullable<typeof draft>>();
+const revisionByTarget = new Map<string, string>();
+function resourceKey(change: Pick<NonNullable<typeof draft>, "directory" | "selection" | "handleId">) {
+  return JSON.stringify([change.directory, change.selection, change.handleId]);
+}
+function resourcePath(selection: TreeSelection) { return "filePath" in selection ? selection.filePath : selection.canvasPath; }
+function draftKind(selection: TreeSelection, handleId: string) { return `document:${"nodeId" in selection ? selection.nodeId : "file"}:${handleId}`; }
 let saving = Promise.resolve();
 const saveDocument = debounce((change: NonNullable<typeof draft>) => {
   // ACT: 同一面板顺序落盘；每次保存固定目录、文件或画布节点，不随当前选择漂移。
   saving = saving
     .catch(() => {})
-    .then(() => ("filePath" in change.selection
-      ? useWorkspaceFiles(change.directory).write(change.selection.filePath, change.text)
-      : props.saveNode(change.directory, change.selection.canvasPath, change.selection.nodeId, change.handleId, change.text)))
+    .then(async () => {
+      if (saveError.value) throw new Error(saveError.value);
+      const key = resourceKey(change);
+      const expected = revisionByTarget.get(key) ?? change.revision;
+      if (expected === undefined) throw new Error("正文缺少版本，请重新读取；本地草稿已保留");
+      const revision = "filePath" in change.selection
+        ? (await createExecutionClient(change.directory).writeContent(change.selection.filePath, change.text, expected, change.commandId)).revision
+        : await props.saveNode(change.directory, change.selection.canvasPath, change.selection.nodeId, change.handleId, change.text, expected);
+      revisionByTarget.set(key, revision);
+      const output = nodeOutputs.value.find(output => output.id === change.handleId);
+      if (output && selectedNode.value && resourceKey({ directory: workspaceStore.project?.directory ?? "", selection: selectedNode.value, handleId: change.handleId }) === key) {
+        output.revision = revision;
+        if (draft === change) output.text = change.text;
+      }
+    })
     .then(() => {
       if (draft === change) {
         dirty.value = false;
         saveError.value = "";
+        savedDraft.value = undefined;
+        removeWorkspaceDraft(change.directory, resourcePath(change.selection), draftKind(change.selection, change.handleId));
       }
     })
     .catch((error) => {
@@ -330,10 +354,11 @@ const editorOptions: Partial<EditorOptions> = {
     const text = serializeMarkdown(editor);
     const output = nodeOutputs.value.find((output) => output.id === outputId.value);
     if (output) output.text = text;
-    draft = { directory, selection: selectedNode.value, handleId: outputId.value, text };
+    draft = { directory, selection: selectedNode.value, handleId: outputId.value, text, revision: output?.revision, commandId: crypto.randomUUID() };
     dirty.value = true;
-    saveError.value = "";
-    saveDocument(draft);
+    try { saveWorkspaceDraft(directory, resourcePath(draft.selection), draftKind(draft.selection, draft.handleId), draft); }
+    catch (error) { saveError.value = error instanceof Error ? error.message : "本地草稿保存失败"; return; }
+    if (!saveError.value) saveDocument(draft);
   },
   editorProps: {
     attributes: { role: "textbox", "aria-label": "Markdown 文档", "aria-multiline": "true" },
@@ -349,9 +374,25 @@ const editorOptions: Partial<EditorOptions> = {
 const editor = useEditor(editorOptions);
 
 async function flushSave() {
-  if (saveError.value && draft) saveDocument(draft);
+  if (saveError.value) throw new Error(saveError.value);
   saveDocument.flush();
   await saving;
+}
+
+async function retrySave() {
+  if (!draft) return;
+  saveError.value = "";
+  saveDocument(draft);
+  try { await flushSave(); } catch { /* 错误已保留在正文状态中 */ }
+}
+function restoreDraft() {
+  if (!savedDraft.value || !editor.value) return;
+  draft = savedDraft.value;
+  if (draft.revision !== undefined) revisionByTarget.set(resourceKey(draft), draft.revision);
+  else revisionByTarget.delete(resourceKey(draft));
+  editor.value.commands.setContent(draft.text, { contentType: "markdown", emitUpdate: false });
+  dirty.value = true;
+  saveError.value = "本地草稿已恢复，请核对版本后重试保存";
 }
 
 function showOutput(id: string) {
@@ -362,6 +403,10 @@ function showOutput(id: string) {
   draft = undefined;
   dirty.value = false;
   saveError.value = "";
+  const directory = workspaceStore.project?.directory;
+  const selection = selectedNode.value;
+  savedDraft.value = directory && selection ? readWorkspaceDraft<NonNullable<typeof draft>>(directory, resourcePath(selection), draftKind(selection, id)) : undefined;
+  if (directory && selection && output.revision !== undefined) revisionByTarget.set(resourceKey({ directory, selection, handleId: id }), output.revision);
   // 每个节点/输出重新建立编辑器，避免撤销跨文档修改。
   editor.value?.destroy();
   editor.value = new Editor({ ...editorOptions, content: output.text });
@@ -378,11 +423,11 @@ async function openNode(selection: TreeSelection, reportError = true, signal?: A
     await flushSave();
     signal?.throwIfAborted();
     if ("filePath" in selection) {
-      const text = await useWorkspaceFiles(directory).readText(selection.filePath);
+      const { content: text, revision } = await createExecutionClient(directory).readContent(selection.filePath);
       signal?.throwIfAborted();
       if (request !== openRequest || directory !== workspaceStore.project?.directory) return;
       selectedNode.value = selection;
-      nodeOutputs.value = [{ id: "text", label: selection.label, text }];
+      nodeOutputs.value = [{ id: "text", label: selection.label, text, revision }];
       showOutput("text");
       return;
     }

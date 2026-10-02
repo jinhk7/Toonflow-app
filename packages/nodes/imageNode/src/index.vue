@@ -50,14 +50,13 @@
 import { computed, nextTick, ref } from "vue";
 import { IconPhoto, IconUpload, IconTransfer } from "@tabler/icons-vue";
 import { ElButton, ElImageViewer, ElMessage } from "element-plus";
-import { nodeSkeleton, nodeTools, useNode, z, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { nodeSkeleton, useNode } from "@toonflow/nodes-scaffold/runtime";
 
 defineOptions({
   inheritAttrs: false,
   icon: IconPhoto,
-  handles: [{ id: "image", type: "source", dataType: "IMAGE", label: "图片输出" }] satisfies NodeHandle[],
 });
-const { node, nodeProps, outputs, nodeEvent, files, updateNodeInternals } = useNode({
+const { node, nodeProps, outputs, execution, files, updateNodeInternals } = useNode({
   label: "图片",
 });
 const fileInput = ref<HTMLInputElement>();
@@ -70,40 +69,6 @@ const previewUrl = files.useFileUrl(
   outputFile,
   (error) => showError(error, "图片读取失败")
 );
-
-nodeEvent.on("save", () => {
-  if (uploading.value) throw new Error("图片处理中，请完成后再切换或刷新节点");
-});
-nodeEvent.on("delete", () => {
-  if (uploading.value) throw new Error("图片上传中，请稍后删除节点");
-  uploading.value = true;
-  return files.removeNodeFiles().finally(() => {
-    uploading.value = false;
-  });
-});
-
-nodeTools.register({
-  name: "setImage",
-  description: "选择工作区内已有的图片文件作为此节点的输出，path 使用工作区相对路径",
-  parameters: z.strictObject({
-    path: z.string().min(1).max(4096),
-    mimeType: z.string().regex(/^image\/[a-zA-Z0-9.+-]+$/),
-  }),
-  async execute({ path, mimeType }, { signal }) {
-    signal?.throwIfAborted();
-    if (uploading.value) throw new Error("图片处理中，请稍后重试");
-    uploading.value = true;
-    try {
-      const content = await files.getWorkspaceFiles().read(path);
-      signal?.throwIfAborted();
-      if (!content.byteLength || content.byteLength > 100 * 1024 * 1024) throw new Error("图片不能为空且不能超过 100 MB");
-      outputs.value.image = { dataType: "IMAGE", value: { url: path, mimeType } };
-      return outputs.value.image;
-    } finally {
-      uploading.value = false;
-    }
-  },
-});
 
 async function resizeImage(event: Event) {
   const image = event.currentTarget as HTMLImageElement;
@@ -120,11 +85,17 @@ async function uploadImage(event: Event) {
   if (!file || uploading.value) return;
   if (!file.type.startsWith("image/")) return void ElMessage.error("请选择图片文件");
   if (!file.size || file.size > 100 * 1024 * 1024) return void ElMessage.error("图片不能为空且不能超过 100 MB");
+  const stagedPath = `assets/uploads/${crypto.randomUUID()}`;
   uploading.value = true;
   try {
-    const url = await files.uploadFile(file);
-    // ACT: 复制节点可能仍引用旧图片，替换输出不删除共享文件。
-    outputs.value.image = { dataType: "IMAGE", value: { url, mimeType: file.type } };
+    const workspaceFiles = files.getWorkspaceFiles();
+    for (const path of ["assets", "assets/uploads"]) {
+      await workspaceFiles.mkdir(path).catch((error: { response?: { data?: { data?: { code?: string } } } }) => {
+        if (error.response?.data?.data?.code !== "EEXIST") throw error;
+      });
+    }
+    await workspaceFiles.write(stagedPath, file, true);
+    await execution.call("uploadImage", { stagedPath, name: file.name, mimeType: file.type });
   } catch (error) {
     showError(error, "图片替换失败");
   } finally {

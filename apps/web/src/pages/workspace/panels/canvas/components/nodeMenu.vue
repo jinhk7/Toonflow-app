@@ -103,8 +103,9 @@ import {
   IconLayoutGrid,
 } from "@tabler/icons-vue";
 
-const { remoteNodes = [], pasteNode, uploadFiles, canUndo = false, canRedo = false, selectionBusy = false, batchHistory } = defineProps<{
-  remoteNodes?: { type: string; label: string }[];
+const { remoteNodes = [], addNode, pasteNode, uploadFiles, canUndo = false, canRedo = false, selectionBusy = false, batchHistory } = defineProps<{
+  remoteNodes?: { type: string; label: string; handles?: NodeHandle[] }[];
+  addNode?: (type: string, label: string, position: { x: number; y: number }) => Promise<string>;
   pasteNode?: (position: { x: number; y: number }) => Promise<boolean>;
   uploadFiles?: (position: { x: number; y: number }) => void;
   canUndo?: boolean;
@@ -122,7 +123,7 @@ const pasting = ref(false);
 const directNodes = ref(false);
 const menuAnchor = shallowRef({ getBoundingClientRect: () => new DOMRect() });
 const flow = useVueFlow();
-const { addNodes, screenToFlowCoordinate, onPaneContextMenu, onSelectionContextMenu, onPaneClick, onMoveStart } = flow;
+const { screenToFlowCoordinate, onPaneContextMenu, onSelectionContextMenu, onPaneClick, onMoveStart } = flow;
 let nodePosition = { x: 0, y: 0 };
 type DraggedHandle = { node: GraphNode; id: string; type: HandleType; start: ConnectingHandle };
 const pendingHandle = shallowRef<DraggedHandle>();
@@ -147,7 +148,7 @@ const filteredNodes = computed(() => {
   if (pendingGroup.value.length) {
     if (!flow.nodesConnectable.value || pendingGroup.value.some(node => flow.findNode(node.id) !== node || node.connectable === false)) return [];
     return nodes.filter(node => {
-      const targets = (flow.nodeTypes?.value?.[node.type] as { handles?: NodeHandle[] } | undefined)?.handles?.filter(handle => handle.type === "target") ?? [];
+      const targets = node.handles?.filter(handle => handle.type === "target") ?? [];
       return pendingGroup.value.every(source => (source.data.handles as NodeHandle[] | undefined)?.some(output =>
         output.type === "source" && targets.some(input => isTypeCompatible(output.dataType, input.dataType))));
     });
@@ -158,7 +159,7 @@ const filteredNodes = computed(() => {
   const port = (handle.node.data.handles as NodeHandle[] | undefined)?.find((item) => item.id === handle.id && item.type === handle.type);
   if (!port) return [];
   return nodes.filter((node) => {
-    const handles = (flow.nodeTypes?.value?.[node.type] as { handles?: NodeHandle[] } | undefined)?.handles;
+    const handles = node.handles;
     return handles?.some((item) => item.type !== port.type && isTypeCompatible(port.dataType, item.dataType));
   });
 });
@@ -305,8 +306,8 @@ async function runCommand(command: unknown) {
   const group = pendingGroup.value;
   if (handle && flow.findNode(handle.node.id) !== handle.node) return;
   if (group.some(source => flow.findNode(source.id) !== source)) return;
-  const id = crypto.randomUUID();
-  addNodes({ id, type: node.type, position: { ...nodePosition }, data: { label: node.label } });
+  if (!addNode) throw new Error("当前画布未提供后端新增节点能力");
+  const id = await addNode(node.type, node.label, { ...nodePosition });
   if (!handle && !group.length) {
     flow.removeSelectedElements();
     flow.nodesSelectionActive.value = false;
@@ -314,7 +315,7 @@ async function runCommand(command: unknown) {
     if (created) flow.addSelectedNodes([created]);
     return menu.value?.handleClose();
   }
-  // ACT: 远端节点挂载后才注册端口，沿用画布工具的 nextTick 等待方式。
+  // 端口来自后端描述；等待 Vue Flow 应用返回快照后连接。
   await nextTick();
   const created = flow.findNode(id);
   if (group.length) {

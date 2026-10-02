@@ -5,7 +5,7 @@ import type { AgentEvent } from "@/agent/runtime/types";
 import { run } from "@/agent/runtime";
 import { createAgentConversation, getToolResultText, trackAgentEvent, updateSubAgent } from "@/agent/runtime/sessions";
 import { addUsage, emptyUsage, type SubAgentResult } from "@/agent/runtime/subAgent";
-import { createCanvasContext } from "@/agent/bridge/canvas";
+import { createBackendCanvasContext } from "@/utils/canvas/context";
 import { createQuestionContext } from "@/agent/bridge/question";
 import { resolveWorkspacePath } from "@/utils/workspace/files";
 
@@ -13,6 +13,7 @@ export async function runDelegatedAgent(options: {
   cwd: string; parentFile: string; name: string; task: string;
   providerId: string; modelId: string; thinkingLevel: "off" | "low" | "medium" | "high";
   canvas?: CanvasContext; signal?: AbortSignal; send: (event: AgentEvent) => void; onProgress?: (text: string) => void; parentRunId?: string;
+  modelRevision?: string;
 }) {
   const { cwd, parentFile, name, task, providerId, modelId, thinkingLevel, canvas, signal, onProgress, parentRunId } = options;
   const child = await createAgentConversation(cwd, { parentFile, name, task, providerId, modelId, thinkingLevel });
@@ -26,15 +27,16 @@ export async function runDelegatedAgent(options: {
   const controller = new AbortController();
   const childSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   // ACT: 子 Agent 不单独登记 runId，随父运行存活；重启后仅能从子会话 JSONL 查看，不能自动续跑委派任务。
-  const bridge = canvas ? createCanvasContext(cwd, canvas, send, parentRunId ? { runId: parentRunId } : undefined) : undefined;
-  const questions = createQuestionContext(cwd, send, () => controller.abort(), parentRunId ? { runId: parentRunId } : undefined);
+  const backendCanvas = await createBackendCanvasContext(cwd, canvas && canvas.id !== "unselected" ? { canvasPath: canvas.id } : undefined, { runId: parentRunId });
+  const questions = createQuestionContext(cwd, send, () => controller.abort(), parentRunId ? { runId: parentRunId, sessionFile: child.file } : undefined);
   const result: SubAgentResult = { name, status: "running", result: "准备执行" };
   try {
     await run({
       prompt: task, cwd, sessionFile: child.file, providerId, modelId, thinkingLevel,
-      canvas: bridge?.context, question: questions.context, signal: childSignal,
-      onCancel: () => { controller.abort(); bridge?.dispose(); questions.dispose(); },
-      runId: parentRunId, canvasAttached: Boolean(canvas),
+      canvas: backendCanvas, question: questions.context, signal: childSignal,
+      onCancel: () => { controller.abort(); questions.dispose(); },
+      runId: parentRunId, canvasAttached: true,
+      modelRevision: options.modelRevision,
     }, send);
     result.status = childSignal.aborted ? "cancelled" : "completed";
   } catch (error) {
@@ -43,7 +45,6 @@ export async function runDelegatedAgent(options: {
     if (result.status !== "limited") await updateSubAgent(cwd, parentFile, { ...agent, status: result.status, result: result.result });
     send({ type: "error", message: result.result });
   } finally {
-    bridge?.dispose();
     questions.dispose();
     send({ type: "done" });
   }

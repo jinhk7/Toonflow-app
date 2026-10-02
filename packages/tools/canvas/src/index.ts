@@ -28,7 +28,7 @@ const plugin: ToolPlugin = {
         parameters: z.toJSONSchema(operation.parameters, { io: "input", target: "draft-07" }),
         executionMode: "sequential",
         async execute(_id, params, signal) {
-          const result = await canvas.call({ name: operation.name, args: operation.parameters.parse(params) }, signal);
+          const result = await canvas.call({ name: operation.name, args: operation.parameters.parse(params), commandId: _id }, signal);
           return { content: [{ type: "text", text: JSON.stringify(result ?? null) }], details: result };
         },
       };

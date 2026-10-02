@@ -1,11 +1,14 @@
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { realpath, stat, mkdir, readdir, lstat, rm, rmdir, readFile } from "node:fs/promises";
 import { z } from "zod";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createReadToolDefinition, createWriteToolDefinition, createEditToolDefinition, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { CanvasContext } from "@toonflow/tools-scaffold/runtime";
 import type { McpTool } from "@toonflow/mcp";
-import { createAgentTools } from "@/agent/tools";
-import { run as runAgent } from "@/agent";
+import { createAgentTools, isBuiltinWorkspaceTool } from "@/agent/tools";
+import { startAgentRun, subscribeAgentRun, controlAgentRun, getAgentRunSnapshot } from "@/agent/runtime/runHost";
+import { createBackendCanvasContext } from "@/utils/canvas/context";
+import { readVersionedContent, writeVersionedContent, assertNoManagedResourceTree } from "@/utils/canvas/content";
+import { isManagedResource } from "@/utils/canvas/store";
 import conf from "@/utils/conf";
 import { callControl, getConnection, listConnections } from "@/utils/mcp/control";
 import { appOperations, runAppOperation } from "@/utils/mcp/operations";
@@ -32,11 +35,11 @@ async function resolveDirectory(directory?: string) {
   return path;
 }
 
-async function resolveTarget(target: z.infer<typeof targetSchema> = {}, requireDirectory = true) {
+async function resolveTarget(target: z.infer<typeof targetSchema> = {}, requireDirectory = true, requireUi = false) {
   const requestedDirectory = target.directory ? await resolveDirectory(target.directory) : undefined;
-  const connection = getConnection(target.connectionId, requestedDirectory);
-  if (target.connectionId && requestedDirectory && connection?.state.directory !== requestedDirectory) throw new Error("目标页面的工作区已切换，请重新获取 getAppState");
-  if (target.canvasId && connection?.state.canvasId !== target.canvasId) throw new Error("目标画布已切换，请重新获取 getAppState");
+  const connection = requireUi || !requestedDirectory ? getConnection(target.connectionId, requestedDirectory) : undefined;
+  if (requireUi && target.connectionId && requestedDirectory && connection?.state.directory !== requestedDirectory) throw new Error("目标页面的工作区已切换，请重新获取 getAppState");
+  if (requireUi && target.canvasId && connection?.state.canvasId !== target.canvasId) throw new Error("目标画布已切换，请重新获取 getAppState");
   const directory = requireDirectory ? requestedDirectory ?? await resolveDirectory(connection?.state.directory ?? undefined) : undefined;
   return { connection, directory };
 }
@@ -90,6 +93,37 @@ function assertFileNotOpen(directory: string, path: string) {
   }
 }
 
+async function executeManagedFile(name: string, args: Record<string, unknown>, directory: string, signal: AbortSignal, context: ExtensionContext) {
+  if (typeof args.path !== "string") return;
+  const absolute = resolve(directory, args.path);
+  if (!isWithin(directory, absolute)) return;
+  const source = await resolveWorkspacePath(directory, relative(directory, absolute), true);
+  const path = relative(directory, source.path).replaceAll("\\", "/");
+  if (!isManagedResource(directory, path)) return;
+  const expectedRevision = z.string().regex(/^[a-f0-9]{64}$/).optional().parse(args.expectedRevision);
+  let revision: string | undefined;
+  const read = async () => {
+    const snapshot = await readVersionedContent(directory, path);
+    if (expectedRevision && expectedRevision !== snapshot.revision) throw Object.assign(new Error("正文版本冲突，请保留草稿并刷新后重试"), { status: 409, currentRevision: snapshot.revision });
+    revision = snapshot.revision;
+    return Buffer.from(snapshot.content);
+  };
+  const write = async (_path: string, content: string) => {
+    const before = expectedRevision ?? (name === "edit" ? revision : undefined);
+    if (!before) throw Object.assign(new Error("请先读取节点正文或插件状态，并携带 expectedRevision 提交修改"), { status: 428 });
+    signal.throwIfAborted();
+    const result = await writeVersionedContent({ directory, path, content, expectedRevision: before, commandId: crypto.randomUUID() });
+    revision = result.revision;
+  };
+  // ACT: Pi 保留现有截断、替换和换行处理；正文接口负责目录创建及版本化落盘。
+  const operations = { readFile: read, access: async () => {}, writeFile: write };
+  const fileTool = name === "read" ? createReadToolDefinition(directory, { operations })
+    : name === "write" ? createWriteToolDefinition(directory, { operations: { writeFile: write, mkdir: async () => {} } })
+    : createEditToolDefinition(directory, { operations });
+  const result = await (fileTool.execute as ToolDefinition["execute"])(crypto.randomUUID(), { ...args, path: source.path }, signal, undefined, context);
+  return { ...result, details: { ...(result.details && typeof result.details === "object" ? result.details : {}), revision } };
+}
+
 export async function getMcpTools(): Promise<McpTool[]> {
   const authorizationSignal = authorizationController.signal;
   let pluginError: string | undefined;
@@ -105,7 +139,7 @@ export async function getMcpTools(): Promise<McpTool[]> {
   for (const [name, schema] of Object.entries(uiSchemas)) {
     tools.push(wrapTool(name, uiDescriptions[name as keyof typeof uiSchemas], z.toJSONSchema(schema), async (input, target, signal) => {
       const args = schema.parse(input);
-      const { connection, directory } = await resolveTarget(target, !["openProject", "getSettings", "updateSettings"].includes(name));
+      const { connection, directory } = await resolveTarget(target, !["openProject", "getSettings", "updateSettings"].includes(name), true);
       if (!connection) throw new Error("请先打开 Toonflow 桌面或网页");
       if (name === "openProject") await resolveDirectory((args as { directory: string }).directory);
       const result = await callControl(connection.id, name, args, signal, directory);
@@ -120,19 +154,27 @@ export async function getMcpTools(): Promise<McpTool[]> {
   });
   for (const definition of definitions) {
     if (tools.some(tool => tool.name === definition.name)) throw new Error(`MCP 工具名称重复：${definition.name}`);
-    tools.push(wrapTool(definition.name, [definition.description, ...(definition.promptGuidelines ?? [])].join("\n"), definition.parameters, async (args, target, signal) => {
+    const versionedFileTool = isBuiltinWorkspaceTool(definition) && ["read", "write", "edit"].includes(definition.name);
+    const parameters = versionedFileTool && definition.name !== "read" ? {
+      ...definition.parameters,
+      properties: { ...("properties" in definition.parameters ? definition.parameters.properties as object : {}), expectedRevision: z.toJSONSchema(z.string().regex(/^[a-f0-9]{64}$/).optional()) },
+    } : definition.parameters;
+    const description = [definition.description, ...(definition.promptGuidelines ?? []), ...(versionedFileTool ? ["节点正文或插件状态读取结果 details.revision 是版本；write 必须携带该值作为 args.expectedRevision，edit 可携带它核对读取基线。"] : [])].join("\n");
+    tools.push(wrapTool(definition.name, description, parameters, async (args, target, signal) => {
       const { connection, directory } = await resolveTarget(target);
-      if (["write", "edit"].includes(definition.name) && typeof args.path === "string") assertFileNotOpen(directory!, args.path);
-      const canvas: CanvasContext | undefined = connection ? {
-        id: connection.state.canvasId ?? "mcp", tools: connection.state.tools,
-        call: (request, callSignal) => callControl(connection.id, request.name, request.args, callSignal ?? signal, directory),
-      } : undefined;
+      const canvasId = target.canvasId ?? connection?.state.canvasId ?? undefined;
+      const canvas = await createBackendCanvasContext(directory!, canvasId ? { id: canvasId } : undefined);
       const current = (await createAgentTools(directory!, canvas)).find(tool => tool.name === definition.name);
-      if (!current) throw new Error("工具已禁用，或所需 Toonflow 页面未连接，请重新读取工具列表");
+      if (!current) throw new Error("工具已禁用或加载失败，请重新读取工具列表");
       // ACT: 现有插件依赖 createTools 注入的宿主能力；MCP 没有 Pi 对话，访问会话能力时明确报错。
       const context = new Proxy({ cwd: directory, mode: "rpc", hasUI: false, model: undefined, signal }, {
         get(value, key) { if (Reflect.has(value, key)) return Reflect.get(value, key); throw new Error(`MCP 不提供内置 Agent 会话能力：${String(key)}`); },
       }) as unknown as ExtensionContext;
+      if (versionedFileTool && isBuiltinWorkspaceTool(current)) {
+        const result = await executeManagedFile(definition.name, args, directory!, signal, context);
+        if (result) return result;
+      }
+      if (["write", "edit"].includes(definition.name) && typeof args.path === "string") assertFileNotOpen(directory!, args.path);
       return current.execute(crypto.randomUUID(), args, signal, undefined, context);
     }));
   }
@@ -163,8 +205,12 @@ export async function getMcpTools(): Promise<McpTool[]> {
     const release = lockWorkspaceFiles([source.path, ...(destination ? [destination.path] : [])]);
     try {
       if (["writeBinary", "rename", "remove"].includes(args.action)) {
+        await assertNoManagedResourceTree(directory!, relative(directory!, source.path));
         await assertNoManagedGraph(source.path);
-        if (destination) await assertNoManagedGraph(destination.path);
+        if (destination) {
+          await assertNoManagedResourceTree(directory!, relative(directory!, destination.path));
+          await assertNoManagedGraph(destination.path);
+        }
       }
       if (args.action === "writeBinary") {
         if (args.base64 === undefined) throw new Error("写入二进制文件需要 base64");
@@ -210,21 +256,32 @@ export async function getMcpTools(): Promise<McpTool[]> {
   const runAgentSchema = z.strictObject({
     prompt: z.string().trim().min(1), providerId: z.string().min(1), modelId: z.string().min(1),
     sessionFile: z.string().regex(/^[\w-]+\.jsonl$/).optional(), thinkingLevel: z.enum(["off", "low", "medium", "high"]).optional(),
+    clientMessageId: z.string().min(1).max(128).optional(),
   });
   tools.push(wrapTool("runAgent", "按用户请求调用 Toonflow 内置 Agent，等待本轮完成并返回对话文件与回复；会使用配置的模型。外部 Agent 可直接操作其他工具，仅需要委托内置 Agent 时调用。支持 MCP 取消，历史保存到工作区。", z.toJSONSchema(runAgentSchema), async (input, target, signal) => {
     const args = runAgentSchema.parse(input);
     const { directory, connection } = await resolveTarget(target);
-    const canvas: CanvasContext | undefined = connection ? {
-      id: connection.state.canvasId ?? "mcp", tools: connection.state.tools,
-      call: (request, callSignal) => callControl(connection.id, request.name, request.args, callSignal ?? signal, directory),
-    } : undefined;
+    const canvasId = target.canvasId ?? connection?.state.canvasId ?? undefined;
+    signal.throwIfAborted();
+    const hosted = await startAgentRun({ ...args, cwd: directory!, canvas: canvasId ? { id: canvasId } : undefined });
     const blocks = new Map<string, string>();
-    let sessionFile = args.sessionFile;
-    await runAgent({ ...args, cwd: directory!, canvas, signal }, event => {
+    let sessionFile = hosted.sessionFile;
+    const unsubscribe = subscribeAgentRun(hosted.runId, event => {
       if (event.type === "session") sessionFile = event.file;
       if (event.type === "text") blocks.set(event.blockId, event.content ?? (blocks.get(event.blockId) ?? "") + (event.delta ?? ""));
     });
-    return { sessionFile, text: [...blocks.values()].join("\n") };
+    const cancel = () => { void controlAgentRun(hosted.runId, "terminate").catch(() => {}); };
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    try {
+      await hosted.done;
+      signal.throwIfAborted();
+      const snapshot = getAgentRunSnapshot(hosted.runId);
+      return { runId: hosted.runId, sessionFile, status: snapshot?.status, errorMessage: snapshot?.errorMessage, text: [...blocks.values()].join("\n") };
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      unsubscribe();
+    }
   }));
   return tools.map(tool => ({
     ...tool,

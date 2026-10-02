@@ -1,6 +1,5 @@
-import { z, type NodeAiTool } from "@toonflow/nodes-scaffold/runtime";
-import { sceneSchema, type SceneDocument } from "./scene";
-import { directorPlanSchema, type DirectorPlan, type DirectorPlanItem } from "./sceneAnimation";
+import { z } from "zod";
+import { sceneSchema, directorPlanSchema, type SceneDocument, type DirectorPlan, type DirectorPlanItem } from "./document";
 
 const pathSchema = z.array(z.union([
   z.string().max(100).refine(value => !["__proto__", "constructor", "prototype"].includes(value), "路径不允许访问原型"),
@@ -110,11 +109,11 @@ export function createDirectorDraft(scene: SceneDocument, plan?: DirectorPlan, p
   const originalScene = JSON.stringify(draft.scene);
   let edited = false;
 
-  const tools: NodeAiTool[] = [{
+  const tools = [{
     name: "readDocument",
     description: "读取本轮独立草稿的 scene / plan；objectId 选择场景物体或方案轨道，joint 选择人偶关节轨道，path 为相对字段路径。history 只读且必须提供 planId。schema 可用 path ['scene'] / ['plan'] 读取 JSON Schema。按需读取，避免反复读取完整文档。",
     parameters: z.toJSONSchema(readSchema),
-    execute(args, signal) {
+    execute(args: Record<string, unknown>, signal?: AbortSignal) {
       signal?.throwIfAborted();
       const { section, objectId, joint, planId, path = [] } = readSchema.parse(args);
       if (section === "schema") {
@@ -133,7 +132,7 @@ export function createDirectorDraft(scene: SceneDocument, plan?: DirectorPlan, p
     name: "editDocument",
     description: "原子批量修改本轮 scene / plan 草稿，不修改历史和磁盘。objectId / joint 按稳定 ID 选择现有物体/轨道，path 为相对路径。add 添加新字段或插入数组，数组下标 '-' 表示追加；replace / remove 必须命中已有路径。添加物体用 scene 的 ['objectList','-']，添加轨道用 plan 的 ['tracks','-']。任何非法操作整批撤销。返回 valid=false 时只保存了未完成草稿，必须依据 issues 补齐，直到 valid=true。",
     parameters: z.toJSONSchema(editSchema),
-    execute(args, signal) {
+    execute(args: Record<string, unknown>, signal?: AbortSignal) {
       signal?.throwIfAborted();
       checkSize(args);
       const { operations } = editSchema.parse(args);

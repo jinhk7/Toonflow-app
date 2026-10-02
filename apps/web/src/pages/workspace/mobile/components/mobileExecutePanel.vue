@@ -1,468 +1,278 @@
 <template>
   <el-card class="mobileExecutePanel" shadow="never">
-    <template #header>执行与任务</template>
-    <p class="note">媒体生成需手动提交；Agent 运行与待确认由项目账本读取。</p>
-
-    <template v-if="isMediaNode && node && graph && canvasPath">
-      <el-alert v-if="pendingJob" type="warning" :closable="false" showIcon :title="pendingStatus === 'unknown' ? '任务结果未知，节点仍被占用' : '节点有未完成任务'">
-        <p>幂等键：{{ pendingJob.idempotencyKey }}</p>
-        <p>状态：{{ pendingStatus || "未知（可查询）" }}</p>
-        <p v-if="pendingError">原因：{{ pendingError }}</p>
-        <p v-if="pendingStatus === 'unknown'">服务可能仍在生成或已计费；核对服务端后可放弃该任务，再重新提交。</p>
-        <p v-if="pendingStatus === 'missing'">未找到任务记录；请核对服务端，确认放弃这次提交后可解除占用。</p>
-      </el-alert>
-      <el-descriptions :column="1" size="small" border class="summary">
-        <el-descriptions-item label="节点类型">{{ mediaTypeLabel }}</el-descriptions-item>
-        <el-descriptions-item label="模型">{{ modelSummary }}</el-descriptions-item>
-        <el-descriptions-item label="提示词">{{ promptPreview || "（空）" }}</el-descriptions-item>
-        <el-descriptions-item label="参考素材">{{ referenceSummary }}</el-descriptions-item>
-      </el-descriptions>
-      <div class="actions">
-        <el-button type="primary" :loading="submitLoading" :disabled="!canSubmitMedia" @click="submitMediaGeneration">
-          提交{{ mediaTypeLabel }}生成
-        </el-button>
-        <el-button :loading="mediaLoading" :disabled="!directory || !queryKey" @click="queryMediaJob()">查询媒体任务</el-button>
-        <el-button v-if="pendingJob && ['unknown', 'missing'].includes(pendingStatus)" type="danger" plain :loading="abandonLoading" :disabled="submitLoading" @click="abandonUnknownJob">
-          放弃该任务并解锁
-        </el-button>
-        <el-button :loading="listLoading" :disabled="!directory" @click="listMediaJobs">列出工作区媒体任务</el-button>
-      </div>
-      <p v-if="submitHint" class="hint">{{ submitHint }}</p>
+    <template #header>{{ node ? "后端节点动作与任务" : "后台任务" }}</template>
+    <el-alert v-if="error" :title="error" type="error" :closable="false" showIcon />
+    <el-alert v-if="connectionError" :title="connectionError" type="warning" :closable="false" showIcon />
+    <template v-if="node">
+      <el-alert v-if="!descriptor && !loading" title="此节点尚未提供后端执行描述，请迁移插件后使用" type="warning" :closable="false" />
+      <el-select v-if="descriptor?.actions.length" v-model="actionName" class="actionSelect" placeholder="选择节点动作" aria-label="节点动作">
+        <el-option v-for="item in descriptor.actions" :key="item.name" :label="item.description || item.name" :value="item.name" />
+      </el-select>
+      <el-form v-if="action" labelPosition="top" class="parameterForm" @submit.prevent="executeAction">
+        <el-form-item v-for="field in fields" :key="field.name" :label="field.schema.title || field.name" :required="field.required">
+          <el-select v-if="field.schema.enum" v-model="values[field.name]" clearable>
+            <el-option v-for="(value, index) in field.schema.enum" :key="index" :label="String(value)" :value="value" />
+          </el-select>
+          <el-switch v-else-if="field.schema.type === 'boolean'" v-model="values[field.name]" />
+          <el-input-number v-else-if="['number', 'integer'].includes(field.schema.type || '')" v-model="values[field.name]" :min="field.schema.minimum" :max="field.schema.maximum" :precision="field.schema.type === 'integer' ? 0 : undefined" />
+          <el-input v-else-if="field.schema.type === 'object' || field.schema.type === 'array' || field.schema.$ref || field.schema.oneOf || field.schema.anyOf" v-model="jsonValues[field.name]" type="textarea" :autosize="{ minRows: 2, maxRows: 12 }" />
+          <el-input v-else v-model="values[field.name]" :maxlength="field.schema.maxLength" :type="field.schema.maxLength && field.schema.maxLength > 200 ? 'textarea' : 'text'" />
+          <p v-if="field.schema.description" class="fieldDescription">{{ field.schema.description }}</p>
+        </el-form-item>
+        <el-input v-if="!hasProperties" v-model="rawArgs" type="textarea" :autosize="{ minRows: 3, maxRows: 12 }" aria-label="动作 JSON 参数" />
+        <div class="actions"><el-button type="primary" nativeType="submit" :loading="submitting" :disabled="!canvasPath || !!pendingCommand">执行</el-button></div>
+      </el-form>
+      <div v-if="pendingCommand" class="actions"><el-button :loading="submitting" @click="reconcileCommand">查询待确认命令 {{ pendingCommand.commandId }}</el-button></div>
+      <pre v-if="result" class="json">{{ result }}</pre>
     </template>
-
-    <el-form v-else labelPosition="top" size="small" class="genericForm">
-      <el-form-item label="媒体任务幂等键（可选，查询用）">
-        <el-input v-model="idempotencyKey" placeholder="节点 pendingMediaJob 或手动输入" />
-      </el-form-item>
-      <el-button :loading="mediaLoading" :disabled="!directory || !idempotencyKey" @click="queryMediaJob()">查询媒体任务</el-button>
-      <el-button :loading="listLoading" :disabled="!directory" @click="listMediaJobs">列出工作区媒体任务</el-button>
-    </el-form>
-
-    <el-button v-if="pendingStatus === 'collectionFailed' && queriedJobId" :loading="retryLoading" :disabled="mediaLoading" @click="retryCollection">
-      重试收取原结果（不重新生成）
-    </el-button>
-
-    <mobileAgentPanel :directory="directory" />
-
-    <el-alert v-if="mediaResult" class="result" type="info" :closable="false" :title="mediaTitle">
-      <pre class="json">{{ mediaResult }}</pre>
-    </el-alert>
+    <div class="actions"><el-button :loading="loading" @click="load">刷新任务</el-button></div>
+    <ul class="jobList">
+      <li v-for="job in jobs" :key="job.jobId">
+        <strong>{{ job.kind }} · {{ job.jobId }}</strong>
+        <p>{{ job.status }}<span v-if="job.errorMessage"> · {{ job.errorMessage }}</span></p>
+        <el-progress v-if="job.progress !== undefined" :percentage="Math.max(0, Math.min(100, job.progress <= 1 ? job.progress * 100 : job.progress))" />
+        <div class="actions">
+          <el-button v-if="job.nodeId && job.canvasPath" text @click="openJobNode(job)">查看节点</el-button>
+          <el-button v-if="job.result !== undefined" text @click="downloadResult(job)">下载任务结果</el-button>
+          <el-button v-if="job.canResume" text @click="resumeJob(job)">恢复原任务</el-button>
+          <el-button v-if="job.status === 'accepted' || job.status === 'running'" text type="danger" @click="cancelJob(job)">{{ job.kind === "media" ? "停止观察" : "取消任务" }}</el-button>
+        </div>
+      </li>
+    </ul>
+    <ul class="jobList">
+      <li v-for="job in mediaJobs" :key="job.jobId">
+        <strong>{{ job.mediaType || "媒体" }} · {{ job.jobId }}</strong>
+        <p>{{ job.status }}<span v-if="job.linkStatus"> · {{ job.linkStatus }}</span><span v-if="job.errorMessage"> · {{ job.errorMessage }}</span></p>
+      </li>
+    </ul>
   </el-card>
 </template>
 
 <script setup lang="ts">
-import { computed, onScopeDispose, ref, watch } from "vue";
-import axios from "axios";
+import { computed, onUnmounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import type { WorkspaceGraph, GraphChange } from "@/lib/workspaceFiles";
-import mobileAgentPanel from "./mobileAgentPanel.vue";
+import axios from "axios";
+import { createExecutionClient, ExecutionRequestError, fetchNodeCatalog, getExecutionClientId, isExecutableNode, type NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
+import type { CanvasCommand, CanvasCommandResult, NodeJobView } from "@toonflow/nodes-scaffold/execution";
+import type { WorkspaceGraph } from "@/lib/workspaceFiles";
+import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
+import { useWorkspaceEvents } from "@/lib/workspaceEvents";
+import saveFile from "@/lib/saveFile";
 import type { CanvasNode } from "../lib/mobileGraphModel";
-import { changeForNode } from "../lib/mobileGraphOps";
-import { retryMediaCollection, type PendingMediaJobState } from "@toonflow/nodes-scaffold/nodeAi";
-import useWorkspaceFiles from "@/lib/workspaceFiles";
-import type { NodeMediaModel } from "@toonflow/nodes-scaffold/nodeAi";
 
-const props = defineProps<{
-  directory: string;
-  canvasPath?: string;
-  node?: CanvasNode | null;
-  graph?: WorkspaceGraph | null;
-  persistNode?: (changes: GraphChange[]) => Promise<unknown>;
-}>();
-
-const idempotencyKey = ref("");
-const mediaLoading = ref(false);
-const listLoading = ref(false);
-const submitLoading = ref(false);
-const mediaResult = ref("");
-const mediaTitle = ref("");
-const pendingStatus = ref("");
-const pendingError = ref("");
-const abandonLoading = ref(false);
-const retryLoading = ref(false);
-const queriedJobId = ref("");
-let queryRevision = 0;
-let queryTimer: ReturnType<typeof setTimeout> | undefined;
+type ParameterSchema = { type?: string; title?: string; description?: string; default?: unknown; enum?: any[]; minimum?: number; maximum?: number; maxLength?: number; $ref?: string; oneOf?: unknown; anyOf?: unknown };
+type MediaJob = { jobId: string; mediaType?: string; status: string; linkStatus?: string; nodeId?: string; errorMessage?: string };
+const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph }>();
+const emit = defineEmits<{ changed: [] }>();
+const route = useRoute();
+const router = useRouter();
+const catalog = ref<NodeCatalogEntry[]>([]);
+const descriptor = computed(() => {
+  const entry = catalog.value.find(item => `remote-${item.name}` === props.node?.type);
+  return entry && isExecutableNode(entry) ? entry : undefined;
+});
+const actionName = ref("");
+const action = computed(() => descriptor.value?.actions.find(item => item.name === actionName.value));
+const hasProperties = computed(() => action.value?.parameters.type === "object" && !!action.value.parameters.properties);
+const fields = computed(() => {
+  const properties = action.value?.parameters.properties;
+  const required = action.value?.parameters.required;
+  return properties && typeof properties === "object" ? Object.entries(properties).map(([name, schema]) => ({
+    name, schema: schema as ParameterSchema, required: Array.isArray(required) && required.includes(name),
+  })) : [];
+});
+const values = ref<Record<string, any>>({});
+const jsonValues = ref<Record<string, string>>({});
+const rawArgs = ref("{}");
+type ParameterDraft = { values: Record<string, any>; jsonValues: Record<string, string>; rawArgs: string };
+const jobs = ref<NodeJobView[]>([]);
+const mediaJobs = ref<MediaJob[]>([]);
+const pendingCommand = ref<CanvasCommand>();
+const result = ref("");
+const error = ref("");
+const loading = ref(false);
+const submitting = ref(false);
+let revision = 0;
 let disposed = false;
-onScopeDispose(() => { disposed = true; queryRevision++; clearTimeout(queryTimer); });
-
-const isImageNode = computed(() => props.node?.type === "remote-imageGenerationNode");
-const isVideoNode = computed(() => props.node?.type === "remote-videoGenerationNode");
-const isMediaNode = computed(() => isImageNode.value || isVideoNode.value);
-const mediaType = computed(() => (isVideoNode.value ? "video" : "image"));
-const mediaTypeLabel = computed(() => (isVideoNode.value ? "视频" : "图片"));
-const outputSlot = computed(() => (isVideoNode.value ? "video" : "image"));
-
-const nodeData = computed(() => (props.node?.data ?? {}) as Record<string, unknown>);
-const pendingJob = computed(() => {
-  const pending = nodeData.value.pendingMediaJob;
-  if (!pending || typeof pending !== "object") return undefined;
-  const state = pending as Partial<PendingMediaJobState>;
-  if (typeof state.idempotencyKey !== "string") return undefined;
-  return state as PendingMediaJobState;
-});
-
-type MediaJobSummary = { jobId: string; status?: string; linkStatus?: string; idempotencyKey: string; canvasId: string | null; nodeId: string | null; outputSlot: string | null; errorMessage?: string | null };
-
-const queryKey = computed(() => idempotencyKey.value || pendingJob.value?.idempotencyKey || "");
-
-watch([() => props.directory, () => props.canvasPath, () => props.node?.id, () => pendingJob.value?.idempotencyKey], () => {
-  clearTimeout(queryTimer);
-  queryRevision++;
-  mediaLoading.value = false;
-  pendingStatus.value = "";
-  queriedJobId.value = "";
-  pendingError.value = "";
-  idempotencyKey.value = pendingJob.value?.idempotencyKey ?? "";
-  if (idempotencyKey.value) void queryMediaJob();
+const draftKey = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id, actionName.value]));
+let parameterBinding = "";
+function saveParameters() {
+  if (!parameterBinding) return;
+  const [directory, path, nodeId, name] = JSON.parse(parameterBinding) as string[];
+  if (!directory || !path || !nodeId || !name) return;
+  try { saveWorkspaceDraft(directory, path, `parameters:${nodeId}:${name}`, { values: values.value, jsonValues: jsonValues.value, rawArgs: rawArgs.value }); }
+  catch (reason) { error.value = reason instanceof Error ? reason.message : "参数草稿保存失败"; }
+}
+watch(draftKey, key => {
+  saveParameters();
+  parameterBinding = "";
+  try {
+    const saved = props.canvasPath && props.node && actionName.value ? readWorkspaceDraft<ParameterDraft>(props.directory, props.canvasPath, `parameters:${props.node.id}:${actionName.value}`) : undefined;
+    values.value = saved?.values ?? Object.fromEntries(fields.value.filter(field => field.schema.default !== undefined).map(field => [field.name, JSON.parse(JSON.stringify(field.schema.default))]));
+    jsonValues.value = saved?.jsonValues ?? Object.fromEntries(fields.value.filter(field => field.schema.type === "object" || field.schema.type === "array").filter(field => field.schema.default !== undefined).map(field => [field.name, JSON.stringify(field.schema.default, null, 2)]));
+    rawArgs.value = saved?.rawArgs ?? "{}";
+  } catch (reason) { error.value = reason instanceof Error ? reason.message : "参数草稿读取失败"; }
+  parameterBinding = key;
 }, { immediate: true });
+watch([values, jsonValues, rawArgs], saveParameters, { deep: true, flush: "sync" });
 
-const promptPreview = computed(() => {
-  const prompt = nodeData.value.prompt;
-  return typeof prompt === "string" ? prompt.trim() : "";
-});
-
-const parsedModel = computed(() => {
-  const raw = nodeData.value.model;
-  if (typeof raw !== "string" || !raw) return undefined;
-  try {
-    const [providerId, modelId] = JSON.parse(raw) as [string, string];
-    if (!providerId || !modelId) return undefined;
-    return { providerId, modelId };
-  } catch {
-    return undefined;
-  }
-});
-
-const modelSummary = computed(() => parsedModel.value ? `${parsedModel.value.providerId} / ${parsedModel.value.modelId}` : "未选择");
-
-type RefOutput = { dataType?: string; value?: unknown };
-
-function incomingReferences() {
-  if (!props.graph || !props.node) return [] as { edgeId: string; output?: RefOutput }[];
-  const byId = new Map(props.graph.nodes.map(item => [item.id, item]));
-  const refs: { edgeId: string; output?: RefOutput }[] = [];
-  for (const edge of props.graph.edges) {
-    if (edge.target !== props.node.id || edge.targetHandle !== "in") continue;
-    const peer = byId.get(edge.source);
-    const output = peer?.data?.outputs?.[edge.sourceHandle ?? ""] as RefOutput | undefined;
-    refs.push({ edgeId: edge.id, output });
-  }
-  return refs;
+function commandMatches(command: CanvasCommand) {
+  return command.directory === props.directory && command.canvasPath === props.canvasPath && command.args.nodeId === props.node?.id;
+}
+function clearCommand(command: CanvasCommand) {
+  const saved = readWorkspaceDraft<CanvasCommand>(command.directory, command.canvasPath, `command:${String(command.args.nodeId)}`);
+  if (saved?.commandId === command.commandId) removeWorkspaceDraft(command.directory, command.canvasPath, `command:${String(command.args.nodeId)}`);
+  if (pendingCommand.value?.commandId === command.commandId) pendingCommand.value = undefined;
+}
+function commandFailed(command: CanvasCommand | undefined, reason: unknown) {
+  if (command && reason instanceof ExecutionRequestError && reason.status >= 400 && reason.status < 500) clearCommand(command);
+  if (!command || commandMatches(command)) error.value = reason instanceof Error ? reason.message : "命令结果待确认，参数草稿已保留";
 }
 
-const referenceSummary = computed(() => {
-  const refs = incomingReferences();
-  if (!refs.length) return "无连接引用";
-  const missing = refs.filter(item => item.output?.value === undefined).length;
-  const images = refs.filter(item => item.output?.dataType === "IMAGE" && item.output.value).length;
-  const videos = refs.filter(item => item.output?.dataType === "VIDEO" && item.output.value).length;
-  const audios = refs.filter(item => item.output?.dataType === "AUDIO" && item.output.value).length;
-  const texts = refs.filter(item => item.output?.dataType === "STRING" && typeof item.output.value === "string" && item.output.value.trim()).length;
-  return `共 ${refs.length} 条入边；图片 ${images}、视频 ${videos}、音频 ${audios}、文本 ${texts}${missing ? `；缺失 ${missing} 项` : ""}`;
-});
-
-const submitHint = computed(() => {
-  if (!isMediaNode.value) return "";
-  if (!parsedModel.value) return "请先在上方生成设置中选择并保存有效模型。";
-  if (!promptPreview.value) return "请填写提示词后再提交。";
-  if (incomingReferences().some(item => item.output?.value === undefined)) return "存在未就绪的引用素材，请补充上游节点输出。";
-  if (!props.canvasPath || !props.persistNode) return "缺少画布路径或保存能力，无法写入 pendingMediaJob。";
-  return "";
-});
-
-const canSubmitMedia = computed(() => isMediaNode.value && !submitHint.value && !pendingJob.value && !submitLoading.value && !!props.directory);
-
-function buildGenerationPrompt() {
-  const refs = incomingReferences();
-  const strings = refs.flatMap((item, index) => {
-    const value = item.output;
-    if (value?.dataType === "STRING" && typeof value.value === "string" && value.value.trim()) {
-      return [`参考 ${index + 1}：\n${value.value.trim()}`];
-    }
-    return [];
-  });
-  return [promptPreview.value, ...strings].filter(Boolean).join("\n\n");
-}
-
-function buildReferencePayload() {
-  const refs = incomingReferences();
-  const images = refs.flatMap(item => item.output?.dataType === "IMAGE" && item.output.value && typeof item.output.value === "object"
-    ? [{ path: (item.output.value as { url: string; mimeType: string }).url, mimeType: (item.output.value as { url: string; mimeType: string }).mimeType }]
-    : []);
-  const videos = refs.flatMap(item => item.output?.dataType === "VIDEO" && item.output.value && typeof item.output.value === "object"
-    ? [{ path: (item.output.value as { url: string; mimeType: string }).url, mimeType: (item.output.value as { url: string; mimeType: string }).mimeType }]
-    : []);
-  const audios = refs.flatMap(item => item.output?.dataType === "AUDIO" && item.output.value && typeof item.output.value === "object"
-    ? [{ path: (item.output.value as { url: string; mimeType: string }).url, mimeType: (item.output.value as { url: string; mimeType: string }).mimeType }]
-    : []);
-  return { images, videos, audios };
-}
-
-async function persistPendingJob(key: string) {
-  if (!props.node || !props.graph || !props.canvasPath || !props.persistNode) throw new Error("无法保存节点状态");
+async function load() {
   const directory = props.directory;
-  const canvasPath = props.canvasPath;
-  const nodeId = props.node.id;
-  const expectedVersion = props.graph.toonflowGraph.nodes[props.node.id] ?? 0;
-  const pendingMediaJob: PendingMediaJobState = {
-    idempotencyKey: key,
-    outputSlot: outputSlot.value,
-    canvasPath: props.canvasPath,
-    expectedNodeVersion: expectedVersion + 1,
-    startedAt: Date.now(),
-  };
-  const value = {
-    ...props.node,
-    data: {
-      ...props.node.data,
-      pendingMediaJob,
-    },
-  };
-  await props.persistNode([changeForNode(props.graph, value, props.node.id)]);
-  if (!disposed && props.directory === directory && props.canvasPath === canvasPath && props.node?.id === nodeId) idempotencyKey.value = key;
-  return expectedVersion + 1;
-}
-
-async function submitMediaGeneration() {
-  if (!canSubmitMedia.value || !props.node || !parsedModel.value) return;
-  const directory = props.directory;
-  const canvasPath = props.canvasPath;
-  const nodeId = props.node.id;
-  const model = parsedModel.value;
-  const image = isImageNode.value;
-  const nodeDataSnapshot = { ...nodeData.value };
-  const { images, videos, audios } = buildReferencePayload();
-  const prompt = buildGenerationPrompt();
-  const current = () => !disposed && props.directory === directory && props.canvasPath === canvasPath && props.node?.id === nodeId;
-  submitLoading.value = true;
-  mediaResult.value = "";
-  const key = crypto.randomUUID();
-  try {
-    const body: Record<string, unknown> = {
-      directory, mediaType: image ? "image" : "video", idempotencyKey: key, wait: false,
-      providerId: model.providerId, modelId: model.modelId, prompt,
-      outputDirectory: `assets/${nodeId}`, canvasPath, nodeId, outputSlot: image ? "image" : "video",
-    };
-    if (image) {
-      const { data } = await axios.get<{ code: number; data: NodeMediaModel[]; message?: string }>("/api/ai/media/models");
-      if (data.code !== 200) throw new Error(data.message || "读取模型失败");
-      const choice = data.data.find(item => item.providerId === model.providerId && item.modelId === model.modelId && item.type === "image");
-      if (!choice) throw new Error("所选图片模型已变化，请重新选择");
-      // 未声明的选项不替供应商猜默认值，也不沿用旧模型的比例或尺寸。
-      Object.assign(body, {
-        size: choice.imageSizes?.includes(String(nodeDataSnapshot.size)) ? nodeDataSnapshot.size : undefined,
-        ratio: choice.imageRatios?.includes(String(nodeDataSnapshot.ratio)) ? nodeDataSnapshot.ratio : undefined,
-        images,
-      });
-    } else {
-      const modeRaw = nodeDataSnapshot.mode;
-      let mode: unknown;
-      if (typeof modeRaw === "string" && modeRaw) {
-        try { mode = JSON.parse(modeRaw); } catch { mode = modeRaw; }
-      }
-      Object.assign(body, { mode, duration: nodeDataSnapshot.duration,
-        resolution: nodeDataSnapshot.resolution || undefined, ratio: nodeDataSnapshot.ratio,
-        generateAudio: nodeDataSnapshot.generateAudio, images, videos, audios });
-    }
-    if (!current()) return;
-    body.expectedNodeVersion = await persistPendingJob(key);
-    const { data } = await axios.post<{ code: number; data?: MediaJobSummary; message?: string }>("/api/ai/media/generate", body, {
-    });
-    if (!current()) return;
-    if (data.code !== 200 && data.code !== 202) throw new Error(data.message || "提交失败");
-    mediaTitle.value = "已提交媒体任务";
-    mediaResult.value = JSON.stringify(data.data, null, 2);
-    pendingStatus.value = data.data?.status ?? "prepared";
-    ElMessage.success("已提交，正在跟踪任务进度");
-    await queryMediaJob();
-  } catch (err) {
-    if (!current()) return;
-    const message = axios.isAxiosError(err) ? err.response?.data?.message || err.message : err instanceof Error ? err.message : String(err);
-    mediaTitle.value = "提交失败";
-    mediaResult.value = message;
-    ElMessage.error(message);
-    if (axios.isAxiosError(err) && err.response && pendingJob.value?.idempotencyKey === key) await queryMediaJob(message);
-  } finally {
-    submitLoading.value = false;
-  }
-}
-
-async function queryMediaJob(rejection?: string) {
-  const directory = props.directory;
-  const canvasPath = props.canvasPath;
   const nodeId = props.node?.id;
-  const key = queryKey.value;
-  if (!directory || !key) return;
-  clearTimeout(queryTimer);
-  const revision = ++queryRevision;
-  let continueQuery = false;
-  const current = () => revision === queryRevision && props.directory === directory && props.canvasPath === canvasPath && props.node?.id === nodeId;
-  mediaLoading.value = true;
-  mediaResult.value = "";
-  try {
-    const { data } = await axios.get<{ code: number; data?: MediaJobSummary; message?: string }>("/api/ai/media/getJob", {
-      params: { directory, idempotencyKey: key },
-    });
-    if (!current()) return;
-    if (data.code !== 200) throw new Error(data.message || "查询失败");
-    const job = data.data;
-    continueQuery = !!job && (["prepared", "submitting", "tracking", "collecting"].includes(job.status ?? "") || (job.status === "completed" && job.linkStatus === "pending"));
-    pendingStatus.value = job?.status ?? "missing";
-    queriedJobId.value = job?.jobId ?? "";
-    pendingError.value = job?.errorMessage ?? "";
-    mediaTitle.value = "媒体任务";
-    mediaResult.value = job ? JSON.stringify(job, null, 2) : rejection ?? "未找到媒体任务";
-    // 服务端在建任务前拒绝的提交没有记录；只有确认已完成、已失败或被拒绝才解除占用，结果由服务端写回节点。
-    const released = job
-      ? ((job.status === "completed" && job.linkStatus !== "pending") || job.status === "failed") && job.idempotencyKey === key && job.canvasId === props.graph?.toonflowGraph.id
-        && job.nodeId === props.node?.id && job.outputSlot === pendingJob.value?.outputSlot
-      : rejection !== undefined;
-    if (released && await clearPendingMarker(key) && props.directory === directory && props.canvasPath === canvasPath && props.node?.id === nodeId) {
-      mediaTitle.value = !job ? "提交被拒绝且未创建任务，已解除占用；可修正后重新提交"
-        : job.status === "completed" ? "媒体任务已完成，已解除占用" : "媒体任务已失败，已解除占用；可手动重新提交";
-    }
-  } catch (err) {
-    if (!current()) return;
-    mediaTitle.value = "查询或更新节点失败";
-    mediaResult.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    if (current()) {
-      mediaLoading.value = false;
-      if (pendingJob.value?.idempotencyKey === key && continueQuery) {
-        queryTimer = setTimeout(() => { void queryMediaJob(); }, 3000);
-      }
-    }
-  }
-}
-
-async function retryCollection() {
-  const directory = props.directory;
-  const key = queryKey.value;
-  const jobId = queriedJobId.value;
-  if (!directory || !jobId || retryLoading.value) return;
-  retryLoading.value = true;
-  try {
-    await retryMediaCollection(directory, jobId);
-    if (!disposed && props.directory === directory && queryKey.value === key) await queryMediaJob();
-  } catch (error) {
-    if (!disposed && props.directory === directory && queryKey.value === key) ElMessage.error(error instanceof Error ? error.message : "重试收取失败");
-  } finally { retryLoading.value = false; }
-}
-
-async function clearPendingMarker(key: string) {
-  const directory = props.directory;
-  const canvasPath = props.canvasPath;
-  const nodeId = props.node?.id;
-  if (pendingJob.value?.idempotencyKey !== key || !props.graph || !nodeId || !canvasPath || !props.persistNode) return false;
-  const graph = await useWorkspaceFiles(directory).readGraph(canvasPath);
-  if (props.directory !== directory || props.canvasPath !== canvasPath || props.node?.id !== nodeId || graph.toonflowGraph.id !== props.graph?.toonflowGraph.id) return false;
-  const node = graph.nodes.find(item => item.id === nodeId);
-  if (!node || (node.data?.pendingMediaJob as PendingMediaJobState | undefined)?.idempotencyKey !== key) return false;
-  const value = { ...node, data: { ...node.data } };
-  delete value.data.pendingMediaJob;
-  await props.persistNode([changeForNode(graph, value, nodeId)]);
-  return true;
-}
-
-// 结果未知的任务不会再写回节点；只有用户确认后才解除占用，账本保留 unknown 记录供核对。
-async function abandonUnknownJob() {
-  const directory = props.directory;
-  const key = pendingJob.value?.idempotencyKey;
-  const canvasPath = props.canvasPath;
-  const canvasId = props.graph?.toonflowGraph.id;
-  const nodeId = props.node?.id;
-  const slot = pendingJob.value?.outputSlot;
-  const current = () => !disposed && props.directory === directory && props.canvasPath === canvasPath && props.node?.id === nodeId && pendingJob.value?.idempotencyKey === key;
-  if (!directory || !key || submitLoading.value || abandonLoading.value) return;
-  try {
-    await ElMessageBox.confirm(
-      "原任务结果未知，服务可能仍在生成或已计费。请先在服务端核对；放弃后原任务的结果不会写回节点，重新提交会产生新的生成请求。",
-      "放弃该任务？",
-      { type: "warning", confirmButtonText: "放弃并解锁", cancelButtonText: "取消" },
-    );
-  } catch { return; }
+  const currentRevision = ++revision;
+  const current = () => currentRevision === revision && directory === props.directory && nodeId === props.node?.id && !disposed;
+  if (!directory) return;
+  loading.value = true;
+  error.value = "";
+  const results = await Promise.allSettled([
+    createExecutionClient(directory).listJobs(),
+    axios.get<{ code: number; data: MediaJob[]; message?: string }>("/api/ai/media/list", { params: { directory } }),
+    props.node ? fetchNodeCatalog() : Promise.resolve(catalog.value),
+  ]);
   if (!current()) return;
-  abandonLoading.value = true;
-  try {
-    const { data } = await axios.get<{ code: number; data?: MediaJobSummary; message?: string }>("/api/ai/media/getJob", {
-      params: { directory, idempotencyKey: key },
-    });
-    if (!current()) return;
-    if (data.code !== 200) throw new Error(data.message || "查询失败");
-    if (data.data && (data.data.status !== "unknown" || data.data.idempotencyKey !== key || data.data.canvasId !== canvasId || data.data.nodeId !== nodeId || data.data.outputSlot !== slot)) throw new Error("任务状态已变化，请重新查询后再操作");
-    if (!await clearPendingMarker(key)) throw new Error("节点已变化，请刷新后重试");
-    mediaTitle.value = "已解除原任务占用；可重新提交";
-    mediaResult.value = `原任务幂等键：${key}（${data.data ? "账本记录保留" : "未找到任务记录"}）`;
-    ElMessage.success("已解除占用");
-  } catch (err) {
-    ElMessage.error(axios.isAxiosError(err) ? err.response?.data?.message || err.message : err instanceof Error ? err.message : String(err));
-  } finally {
-    abandonLoading.value = false;
-  }
+  const [local, media, nodes] = results;
+  if (local.status === "fulfilled") jobs.value = local.value.filter(job => !nodeId || job.nodeId === nodeId);
+  if (media.status === "fulfilled" && media.value.data.code === 200 && Array.isArray(media.value.data.data)) mediaJobs.value = media.value.data.data.filter(job => !nodeId || job.nodeId === nodeId);
+  if (nodes.status === "fulfilled") catalog.value = nodes.value;
+  const failed = results.find(item => item.status === "rejected");
+  if (failed?.status === "rejected") error.value = failed.reason instanceof Error ? failed.reason.message : "任务查询失败";
+  if (media.status === "fulfilled" && media.value.data.code !== 200) error.value = media.value.data.message || "媒体任务查询失败";
+  if (descriptor.value && !descriptor.value.actions.some(item => item.name === actionName.value)) actionName.value = descriptor.value.actions[0]?.name ?? "";
+  loading.value = false;
 }
 
-async function listMediaJobs() {
-  if (!props.directory) return;
-  listLoading.value = true;
-  mediaResult.value = "";
-  try {
-    const { data } = await axios.get<{ code: number; data?: unknown; message?: string }>("/api/ai/media/list", {
-      params: { directory: props.directory },
-    });
-    if (data.code !== 200) throw new Error(data.message || "列表查询失败");
-    mediaTitle.value = "媒体任务列表";
-    mediaResult.value = JSON.stringify(data.data, null, 2);
-  } catch (err) {
-    const message = axios.isAxiosError(err) && err.response?.status === 404
-      ? "媒体任务列表接口尚未就绪（服务端待实现）"
-      : err instanceof Error ? err.message : String(err);
-    mediaTitle.value = "列表查询失败";
-    mediaResult.value = message;
-  } finally {
-    listLoading.value = false;
+function argumentsFromDraft() {
+  if (!hasProperties.value) {
+    const args: unknown = JSON.parse(rawArgs.value);
+    if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("动作参数必须为 JSON 对象");
+    return args as Record<string, unknown>;
   }
+  const args: Record<string, unknown> = { ...values.value };
+  for (const field of fields.value) {
+    const json = jsonValues.value[field.name]?.trim();
+    if (json) args[field.name] = JSON.parse(json);
+    if (field.required && (args[field.name] === undefined || args[field.name] === "")) throw new Error(`请填写 ${field.schema.title || field.name}`);
+  }
+  return args;
 }
 
+async function executeAction() {
+  const node = props.node;
+  const definition = descriptor.value;
+  if (!node || !definition || !action.value || !props.canvasPath || submitting.value || pendingCommand.value) return;
+  submitting.value = true;
+  error.value = "";
+  let command: CanvasCommand | undefined;
+  try {
+    command = {
+      directory: props.directory, canvasPath: props.canvasPath, commandId: crypto.randomUUID(), name: "nodeTools",
+      args: { nodeId: node.id, name: action.value.name.startsWith("node:") ? action.value.name : `node:${action.value.name}`, args: argumentsFromDraft(), expectedNodeRevision: definition.executionRevision },
+      expectedVersions: { [node.id]: props.graph?.toonflowGraph.nodes[node.id] ?? 0 },
+      clientContext: { clientId: getExecutionClientId() },
+    };
+    saveWorkspaceDraft(command.directory, command.canvasPath, `command:${node.id}`, command);
+    pendingCommand.value = command;
+    const response = await createExecutionClient(command.directory).command(command);
+    displayCommand(response, command);
+  } catch (err) { commandFailed(command, err); }
+  finally { submitting.value = false; }
+}
+
+function displayCommand(response: CanvasCommandResult, command: CanvasCommand) {
+  if (response.commandId !== command.commandId || !commandMatches(command)) return;
+  result.value = JSON.stringify(response, null, 2);
+  if (response.status === "completed" || response.status === "failed" || response.status === "needsReview") {
+    clearCommand(command);
+    if (response.status !== "completed") error.value = response.errorMessage || "执行失败，参数草稿已保留";
+    emit("changed");
+    void load();
+  }
+}
+async function reconcileCommand() {
+  const command = pendingCommand.value;
+  if (!command || submitting.value) return;
+  submitting.value = true;
+  try {
+    const client = createExecutionClient(command.directory);
+    const response = await client.getCommand(command.commandId) ?? await client.command(command);
+    displayCommand(response, command);
+  } catch (err) { commandFailed(command, err); }
+  finally { submitting.value = false; }
+}
+async function cancelJob(job: NodeJobView) {
+  try {
+    await ElMessageBox.confirm(job.kind === "media" ? "仅停止本地观察，已提交的媒体仍会生成、收取并可能计费。" : "取消该后台任务？已进入提交阶段的结果会继续保存。", job.kind === "media" ? "停止观察" : "取消任务", { confirmButtonText: job.kind === "media" ? "停止观察" : "取消任务", cancelButtonText: "继续执行" });
+  } catch { return; }
+  try { await createExecutionClient(job.directory).cancelJob(job.jobId); await load(); }
+  catch (err) { ElMessage.error(err instanceof Error ? err.message : "取消失败"); }
+}
+async function resumeJob(job: NodeJobView) {
+  try {
+    await ElMessageBox.confirm("使用已保存的输入继续原任务。已写入的图和正文会按原命令核对，不会重新提交模型生成。", "恢复原任务", { confirmButtonText: "恢复", cancelButtonText: "取消" });
+  } catch { return; }
+  try { await createExecutionClient(job.directory).resumeJob(job.jobId); await load(); }
+  catch (err) { ElMessage.error(err instanceof Error ? err.message : "恢复失败"); }
+}
+async function downloadResult(job: NodeJobView) {
+  try { await saveFile(new Blob([JSON.stringify(job.result, null, 2)], { type: "application/json" }), `${job.kind}Result.json`); }
+  catch (err) { ElMessage.error(err instanceof Error ? err.message : "结果下载失败"); }
+}
+function openJobNode(job: NodeJobView) {
+  void router.push({ path: `/mobile/node/${job.nodeId}`, query: { ...route.query, directory: job.directory, canvas: job.canvasPath } });
+}
+
+watch(() => [props.directory, props.canvasPath, props.node?.id], () => {
+  pendingCommand.value = undefined;
+  result.value = "";
+  try {
+    const saved = props.canvasPath && props.node ? readWorkspaceDraft<CanvasCommand>(props.directory, props.canvasPath, `command:${props.node.id}`) : undefined;
+    if (saved?.commandId && saved.name === "nodeTools" && commandMatches(saved)) pendingCommand.value = saved;
+  } catch (reason) { error.value = reason instanceof Error ? reason.message : "命令草稿读取失败"; }
+}, { immediate: true });
+const { error: connectionError } = useWorkspaceEvents({
+  directory: () => props.directory,
+  context: () => JSON.stringify([props.canvasPath, props.node?.id]),
+  refresh: async () => { await load(); if (pendingCommand.value) await reconcileCommand(); },
+  receive: async event => {
+    if (event.type !== "jobChanged" && event.type !== "graphChanged") return;
+    await load();
+    if (pendingCommand.value) await reconcileCommand();
+  },
+});
+onUnmounted(() => {
+  disposed = true; revision++;
+  saveParameters();
+});
 </script>
 
-<style lang="scss" scoped>
+<style scoped lang="scss">
 .mobileExecutePanel {
   margin-top: 12px;
-
-  .note {
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--el-text-color-secondary);
-  }
-
-  .summary {
-    margin-bottom: 12px;
-  }
-
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .hint {
-    margin: 0 0 12px;
-    font-size: 12px;
-    color: var(--el-color-warning);
-  }
-
-  .genericForm,
-  .result {
+  .actionSelect { width: 100%; margin-top: 12px; }
+  .parameterForm {
     margin-top: 12px;
+    .el-select { width: 100%; }
+    .fieldDescription { width: 100%; margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
   }
-
-  .json {
-    margin: 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-size: 12px;
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .json { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+  .jobList {
+    padding: 0; list-style: none;
+    li { padding: 8px 0; border-bottom: 1px solid var(--el-border-color-lighter); overflow-wrap: anywhere; }
   }
 }
 </style>

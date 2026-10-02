@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { createApp } from "./app";
 
 const startTime = Date.now();
-const realPort = 3000;
+const realPort = Number(process.env.PORT ?? "3000");
 // 源码位于 apps/server/src，生产构建位于 build/server，均从文件位置定位根目录。
 const fromSource = import.meta.path.endsWith(".ts");
 const appDirectory = resolve(import.meta.dirname, fromSource ? "../../.." : "../..");
@@ -18,6 +18,8 @@ const app = await createApp({
   skillsRoot: resolve(appDirectory, fromSource ? "packages/skills" : "build/skills"),
 });
 const { initializeMcpRuntime } = await import("./utils/mcp/runtime");
+const { initializeBackendExecution } = await import("./utils/canvas/runtime");
+await initializeBackendExecution();
 app.listen(realPort, "0.0.0.0", async () => {
   await initializeMcpRuntime(app, `http://127.0.0.1:${realPort}`, resolve(appDirectory, fromSource ? "packages/mcp/src/stdio.ts" : "build/mcp/stdio.js"));
   console.log(`[服务启动成功]: http://0.0.0.0:${realPort}（本机访问 http://localhost:${realPort}）`);

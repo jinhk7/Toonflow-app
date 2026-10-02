@@ -22,6 +22,12 @@ import * as teams from "@/utils/teams";
 import * as a2aSettings from "@/agent/a2a/settings";
 import * as personalization from "@/utils/personalization";
 import * as mentionFiles from "@/agent/mentionFiles";
+import * as backendCanvas from "@/utils/canvas/context";
+import * as canvasContent from "@/utils/canvas/content";
+import * as canvasStore from "@/utils/canvas/store";
+import * as canvasLifecycle from "@/utils/canvas/lifecycle";
+import * as nodeExecution from "@/utils/plugins/nodeExecution";
+import * as jobs from "@/utils/jobs";
 
 export default {
   assets,
@@ -49,4 +55,10 @@ export default {
   a2aSettings,
   personalization,
   mentionFiles,
+  backendCanvas,
+  canvasContent,
+  canvasStore,
+  canvasLifecycle,
+  nodeExecution,
+  jobs,
 };

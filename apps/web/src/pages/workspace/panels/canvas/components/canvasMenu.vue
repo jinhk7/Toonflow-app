@@ -141,6 +141,18 @@ function errorMessage(err: unknown, fallback: string) {
 function getCanvases() {
   return canvases.value.map(({ id, name }) => ({ id, name }));
 }
+async function refreshCanvases(rename?: { previous: string; target: string }) {
+  const directory = props.directory;
+  if (!directory) return;
+  const loaded = await listCanvases(directory);
+  checkCanvasDirectory(directory);
+  if (rename && loaded.some(canvas => canvas.id === rename.target)) {
+    const previous = canvases.value.find(canvas => canvas.id === rename.previous);
+    if (previous) { previous.id = rename.target; previous.name = rename.target.replace(/\.json$/i, ""); props.onGraphRenamed?.(rename.previous, rename.target); }
+  }
+  const existing = new Map(canvases.value.map(canvas => [canvas.id, canvas]));
+  canvases.value = loaded.map(canvas => existing.get(canvas.id) ?? canvas);
+}
 
 function getCanvasDirectory(signal?: AbortSignal) {
   signal?.throwIfAborted();
@@ -399,7 +411,7 @@ function syncDocumentNode(canvasId: string, nodeId: string, handleId: string, te
   else if (inline) (data.outputs ??= {})[handleId] = { dataType: "STRING", value: text };
 }
 
-defineExpose({ getCanvases, addCanvas, switchCanvas, renameCanvas, syncDocumentNode, loadError });
+defineExpose({ getCanvases, refreshCanvases, addCanvas, switchCanvas, renameCanvas, syncDocumentNode, loadError });
 </script>
 
 <style lang="scss" scoped>

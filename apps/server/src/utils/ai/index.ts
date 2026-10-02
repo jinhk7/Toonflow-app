@@ -119,20 +119,25 @@ export function referenceContent(protocol: string, prompt: string, references: A
   return content;
 }
 
-export function streamAi(
-  configured: ReturnType<typeof getConfiguredModel>,
-  context: Context,
-  signal: AbortSignal,
-  references: Awaited<ReturnType<typeof readAiReferences>> = [],
-) {
+export function createConfiguredAiModel(configured: ReturnType<typeof getConfiguredModel>): Model<typeof configured.provider.protocol> {
   const { provider, model: configuredModel, baseUrl } = configured;
-  const model: Model<typeof provider.protocol> = {
+  return {
     id: configuredModel.id, name: configuredModel.label, provider: "toonflow", api: provider.protocol, baseUrl,
     reasoning: false, input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: configuredModel.contextWindow,
     maxTokens: configuredModel.maxOutputTokens,
   };
+}
+
+export function streamAi(
+  configured: ReturnType<typeof getConfiguredModel>,
+  context: Context,
+  signal: AbortSignal,
+  references: Awaited<ReturnType<typeof readAiReferences>> = [],
+) {
+  const { provider } = configured;
+  const model = createConfiguredAiModel(configured);
   // ACT: 不按模型名预判附件能力；按供应商协议传递，是否支持由上游接口决定。
   return aiApis[provider.protocol].streamSimple(model, context, {
     apiKey: provider.apiKey,

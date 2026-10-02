@@ -3,8 +3,13 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./backend": "./src/backend.ts",
+    "./document": "./src/document.ts",
+    "./render": "./src/renderJob.ts"
+  },
   "scripts": {
-    "build": "vite build",
+    "build": "bun scripts/build.ts",
     "dev": "vite build --watch",
     "typecheck": "vue-tsc --noEmit"
   },
@@ -14,11 +19,14 @@
     "element-plus": "^2.14.5"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
     "@tabler/icons-vue": "^3.46.0",
     "@tweenjs/tween.js": "25.0.0",
     "html2canvas-pro": "2.0.2",
     "three": "0.184.0",
     "threejson": "0.1.0-alpha.9",
+    "zod": "^4.6.2",
     "vue-draggable-plus": "^0.6.1"
   },
   "devDependencies": {

@@ -69,6 +69,7 @@ const settingsVisible = ref(false);
 const canvasPanelRef = ref<InstanceType<typeof canvasPanel>>();
 const documentPanelRef = ref<InstanceType<typeof documentPanel>>();
 provide("canvas", () => canvasPanelRef.value?.getCanvasContext());
+provide("agentCanvasContext", () => canvasPanelRef.value?.canvasId ? { id: canvasPanelRef.value.canvasId, selectedNodeIds: canvasPanelRef.value.getSelectedNodeIds() } : undefined);
 provide("mentionCanvas", () => canvasPanelRef.value?.mentionSource);
 provide("activateCanvasPanel", () => switchPanel("canvas"));
 
@@ -173,9 +174,9 @@ function readDocumentNode(directory: string, canvasPath: string, nodeId: string)
   return canvasPanelRef.value.readDocumentNode(directory, canvasPath, nodeId);
 }
 
-function saveDocumentNode(directory: string, canvasPath: string, nodeId: string, handleId: string, text: string) {
+function saveDocumentNode(directory: string, canvasPath: string, nodeId: string, handleId: string, text: string, expectedRevision?: string) {
   if (!canvasPanelRef.value) throw new Error("画布尚未就绪");
-  return canvasPanelRef.value.saveDocumentNode(directory, canvasPath, nodeId, handleId, text);
+  return canvasPanelRef.value.saveDocumentNode(directory, canvasPath, nodeId, handleId, text, expectedRevision);
 }
 </script>
 

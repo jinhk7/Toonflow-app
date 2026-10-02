@@ -1,8 +1,8 @@
-import { computed, type ComputedRef } from "vue";
+import { computed, shallowReactive, type ComputedRef } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import type { Connection, Node } from "@vue-flow/core";
 import { isTypeCompatible, type NodeData, type NodeHandle } from "./connection";
-import { isNodeOutput, type NodeInputValue, type NodeOutput } from "./values";
+import { isNodeOutput, type NodeInputValue, type NodeOutput, type NodeOutputs } from "./values";
 
 type Nodes = Node<NodeData>[] | ReadonlyMap<string, Node<NodeData>>;
 
@@ -21,8 +21,8 @@ export function getTargetSources(targetId: string, targetHandleId: string, nodes
   });
 }
 
-function readSourceValue(node: Node<NodeData>, handle: NodeHandle): NodeOutput | undefined {
-  const outputs = node.data?.outputs;
+function readSourceValue(node: Node<NodeData>, handle: NodeHandle, presentation?: Map<string, NodeOutputs>): NodeOutput | undefined {
+  const outputs = presentation?.get(node.id) ?? node.data?.outputs;
   if (!outputs) return;
   // 先读取 key，让端口首次新增输出时也能触发监听。
   const output = outputs[handle.id];
@@ -33,18 +33,18 @@ function readSourceValue(node: Node<NodeData>, handle: NodeHandle): NodeOutput |
   return output;
 }
 
-export function getSourceValue(sourceId: string, sourceHandleId: string, nodes: Nodes): NodeOutput | undefined {
+export function getSourceValue(sourceId: string, sourceHandleId: string, nodes: Nodes, presentation?: Map<string, NodeOutputs>): NodeOutput | undefined {
   const node = findNode(nodes, sourceId);
   const handle = node?.data?.handles?.find(handle => handle.type === "source" && handle.id === sourceHandleId);
-  return node && handle ? readSourceValue(node, handle) : undefined;
+  return node && handle ? readSourceValue(node, handle, presentation) : undefined;
 }
 
-export function getTargetValues(targetId: string, targetHandleId: string, nodes: Nodes, edges: Connection[]): NodeInputValue[] {
+export function getTargetValues(targetId: string, targetHandleId: string, nodes: Nodes, edges: Connection[], presentation?: Map<string, NodeOutputs>): NodeInputValue[] {
   const target = findNode(nodes, targetId)?.data?.handles?.find(handle => handle.type === "target" && handle.id === targetHandleId);
   if (!target) return [];
 
   return getTargetSources(targetId, targetHandleId, nodes, edges).flatMap<NodeInputValue>(({ node, handle }) => {
-    const output = readSourceValue(node, handle);
+    const output = readSourceValue(node, handle, presentation);
     if (!output) return [{ source: node.id, sourceHandle: handle.id, dataType: handle.dataType, value: undefined }];
     if (!isTypeCompatible(output.dataType, target.dataType)) return [];
     return [{ ...output, source: node.id, sourceHandle: handle.id }];
@@ -52,17 +52,25 @@ export function getTargetValues(targetId: string, targetHandleId: string, nodes:
 }
 
 const targetEdgesKey = Symbol.for("toonflow.targetEdges");
+const presentationOutputsKey = Symbol.for("toonflow.presentationOutputs");
 
 export function useNodeInputs(canvas = useVueFlow()) {
-  const flow = canvas as typeof canvas & { [targetEdgesKey]?: ComputedRef<Map<string, Connection[]>> };
+  const flow = canvas as typeof canvas & { [targetEdgesKey]?: ComputedRef<Map<string, Connection[]>>; [presentationOutputsKey]?: Map<string, NodeOutputs> };
+  // 展示缓存挂在画布实例上；正文预览不进入 Graph 或持久输出。
+  const presentation = flow[presentationOutputsKey] ?? shallowReactive(new Map<string, NodeOutputs>());
+  if (!flow[presentationOutputsKey]) Object.defineProperty(flow, presentationOutputsKey, { value: presentation });
   const { nodeLookup } = canvas;
   // ACT: 按画布共享分组，保留重复边和原顺序；不依赖 VueFlow 会合并重复端点的连接索引。
   const targetEdges = flow[targetEdgesKey] ?? computed(() => Map.groupBy(canvas.getEdges.value, edge => edge.target));
   if (!flow[targetEdgesKey]) Object.defineProperty(flow, targetEdgesKey, { value: targetEdges });
   return {
     getTargetSources: (targetId: string, targetHandleId: string) => getTargetSources(targetId, targetHandleId, nodeLookup.value, targetEdges.value.get(targetId) ?? []),
-    getTargetValues: (targetId: string, targetHandleId: string) => getTargetValues(targetId, targetHandleId, nodeLookup.value, targetEdges.value.get(targetId) ?? []),
-    getSourceValue: (sourceId: string, sourceHandleId: string) => getSourceValue(sourceId, sourceHandleId, nodeLookup.value),
+    getTargetValues: (targetId: string, targetHandleId: string) => getTargetValues(targetId, targetHandleId, nodeLookup.value, targetEdges.value.get(targetId) ?? [], presentation),
+    getSourceValue: (sourceId: string, sourceHandleId: string) => getSourceValue(sourceId, sourceHandleId, nodeLookup.value, presentation),
+    setPresentationOutputs(nodeId: string, outputs: NodeOutputs) {
+      presentation.set(nodeId, outputs);
+      return () => { if (presentation.get(nodeId) === outputs) presentation.delete(nodeId); };
+    },
   };
 }
 

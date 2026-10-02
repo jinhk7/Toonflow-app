@@ -4,10 +4,20 @@ import type { Node, Edge } from "@vue-flow/core";
 import { useWorkspaceStore } from "@/stores/workspace";
 
 type WorkspaceEntry = { name: string; path: string; type: "file" | "directory" };
-export type WorkspaceGraph = { toonflowCanvas: true; nodes: Node[]; edges: Edge[]; viewport: { x: number; y: number; zoom: number }; toonflowGraph: { id: string; revision: number; nodes: Record<string, number>; edges: Record<string, number>; outputs: Record<string, number>; viewport: number } };
+export type WorkspaceGraph = { toonflowCanvas: true; cursor?: number; nodes: Node[]; edges: Edge[]; viewport: { x: number; y: number; zoom: number }; toonflowGraph: { id: string; revision: number; nodes: Record<string, number>; edges: Record<string, number>; outputs: Record<string, number>; viewport: number } };
 export type GraphChange = { kind: "node" | "edge"; id: string; expectedVersion: number; dependencies?: Record<string, number>; value: Node | Edge | null } | { kind: "output"; nodeId: string; slot: string; expectedVersion: number; value: unknown } | { kind: "viewport"; expectedVersion: number; value: WorkspaceGraph["viewport"] };
-const client = axios.create({ baseURL: "/api/workspaces" });
+const client = axios.create({ baseURL: "/api/workspaces", headers: { "X-Toonflow-Protocol": "2" } });
 const fileUrls = new Map<string, { directory: string; path: string; url: Promise<string>; users: number }>();
+
+export function graphValueJson(value: unknown, withoutOutputs = false) {
+  // 对象键顺序不属于图内容；后端规范化与 Vue Flow 导出的键顺序可能不同。
+  return JSON.stringify(value, (key, item) => {
+    if (withoutOutputs && key === "outputs") return undefined;
+    return item && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(Object.keys(item).sort().map(name => [name, item[name]]))
+      : item;
+  });
+}
 
 function cachePath(path: string) {
   return path.replaceAll("\\", "/").split("/").filter(part => part && part !== ".").join("/").toLowerCase();
@@ -99,7 +109,6 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
 
   async function saveGraph(path: string, baseline: WorkspaceGraph, flow: Pick<WorkspaceGraph, "nodes" | "edges" | "viewport">) {
     const changes: GraphChange[] = [];
-    const withoutOutputs = (key: string, value: unknown) => key === "outputs" ? undefined : value;
     function dependencies(kind: "node" | "edge", item?: Node | Edge, previous?: Node | Edge) {
       const ids = kind === "edge"
         ? [((item ?? previous) as Edge)?.source, ((item ?? previous) as Edge)?.target]
@@ -113,19 +122,19 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
         const previous = oldItems.get(item.id);
         const node = kind === "node" ? item as WorkspaceGraph["nodes"][number] : undefined;
         const before = kind === "node" ? previous as WorkspaceGraph["nodes"][number] | undefined : undefined;
-        if (JSON.stringify(previous, withoutOutputs) !== JSON.stringify(item, withoutOutputs)) changes.push({ kind, id: item.id, expectedVersion: baseline.toonflowGraph[kind === "node" ? "nodes" : "edges"][item.id] ?? 0, dependencies: dependencies(kind, item, previous), value: item });
+        if (graphValueJson(previous, true) !== graphValueJson(item, true)) changes.push({ kind, id: item.id, expectedVersion: baseline.toonflowGraph[kind === "node" ? "nodes" : "edges"][item.id] ?? 0, dependencies: dependencies(kind, item, previous), value: item });
         if (node && before) {
           const slots = new Set([...Object.keys(before.data?.outputs ?? {}), ...Object.keys(node.data?.outputs ?? {})]);
           for (const slot of slots) {
             const value = node.data?.outputs?.[slot] ?? null;
-            if (JSON.stringify(before.data?.outputs?.[slot] ?? null) !== JSON.stringify(value)) changes.push({ kind: "output", nodeId: item.id, slot, expectedVersion: baseline.toonflowGraph.outputs[JSON.stringify([item.id, slot])] ?? 0, value });
+            if (graphValueJson(before.data?.outputs?.[slot] ?? null) !== graphValueJson(value)) changes.push({ kind: "output", nodeId: item.id, slot, expectedVersion: baseline.toonflowGraph.outputs[JSON.stringify([item.id, slot])] ?? 0, value });
           }
         }
         oldItems.delete(item.id);
       }
       for (const [id, previous] of oldItems) changes.push({ kind, id, expectedVersion: baseline.toonflowGraph[kind === "node" ? "nodes" : "edges"][id] ?? 0, dependencies: dependencies(kind, undefined, previous), value: null });
     }
-    if (JSON.stringify(flow.viewport) !== JSON.stringify(baseline.viewport)) changes.push({ kind: "viewport", expectedVersion: baseline.toonflowGraph.viewport, value: flow.viewport });
+    if (graphValueJson(flow.viewport) !== graphValueJson(baseline.viewport)) changes.push({ kind: "viewport", expectedVersion: baseline.toonflowGraph.viewport, value: flow.viewport });
     return changes.length ? modifyGraph(path, changes) : baseline;
   }
 

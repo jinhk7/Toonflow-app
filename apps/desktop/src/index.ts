@@ -110,6 +110,8 @@ async function start() {
       // agentsRoot: resolve(PATHS.VIEWS_FOLDER, "../agents"),
       pluginRevision: hash,
     });
+    const { initializeBackendExecution } = await import("@toonflow/server/execution");
+    await initializeBackendExecution();
     const server = app.listen(0, "0.0.0.0");
 
     await once(server, "listening");

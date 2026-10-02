@@ -6,7 +6,7 @@ import type { AgentSession, FileEntry, SessionEntry } from "@earendil-works/pi-c
 import type { AgentEvent, AgentMention, AgentSubAgent, AgentToolCall } from "@/agent/runtime/types";
 import { agentMentionsSchema } from "@/agent/runtime/mentions";
 import conf from "@/utils/conf";
-import { getActiveRunForSession, listWaitingQuestionsForRun } from "@/agent/runtime/store";
+import { getLatestRunForSession, listWaitingQuestionsForRun } from "@/agent/runtime/store";
 import { providerSchema, getModelLimits } from "@/utils/ai";
 import { lockWorkspaceFiles, resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
 
@@ -23,6 +23,10 @@ export const agentAttachmentsSchema = z
 export type ActiveAgentSession = {
   history: SessionManager; session?: AgentSession; send: (event: AgentEvent) => void;
   entryOffset: number; tools: Map<string, AgentToolCall>;
+  publishedState?: {
+    entries: FileEntry[]; entryOffset: number; leafId: string | null; tools: Map<string, AgentToolCall>;
+    partial?: AgentSession["agent"]["state"]["streamingMessage"];
+  };
   abort(): Promise<void>;
 };
 type SessionMessage = {
@@ -34,6 +38,7 @@ type SessionMessage = {
 };
 // ACT: 复用正在运行的 SDK 会话，文件锁仍由 run 持有；多进程部署时需共享会话所有权。
 const activeSessions = new Map<string, ActiveAgentSession>();
+const sessionVersions = new Map<string, number>();
 const sessionKey = (path: string) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
 
 export function getActiveAgentSession(path: string) {
@@ -56,17 +61,72 @@ export function hasPendingAgentQuestion(active: ActiveAgentSession, visited = ne
   });
 }
 
+function captureAgentState(active: ActiveAgentSession) {
+  return structuredClone({
+    entries: [active.history.getHeader()!, ...active.history.getEntries()],
+    entryOffset: active.entryOffset,
+    leafId: active.history.getLeafId(),
+    tools: active.tools,
+    partial: active.session?.agent.state.streamingMessage,
+  });
+}
+
 export function trackAgentEvent(cwd: string, file: string | undefined, event: AgentEvent) {
-  if (!file || event.type !== "question") return;
+  if (!file) return;
   const active = getActiveAgentSession(resolve(cwd, ".agent/sessions", file));
-  const tool = active?.tools.get(event.toolCallId);
-  if (tool) tool.question = { callId: event.callId, title: event.title, question: event.question, options: event.options, fields: event.fields };
+  if (!active) return;
+  if (event.type === "question") {
+    const tool = active.tools.get(event.toolCallId);
+    if (tool) tool.question = { callId: event.callId, title: event.title, question: event.question, options: event.options, fields: event.fields };
+  }
+  const next = captureAgentState(active);
+  const previous = active.publishedState;
+  let partial = structuredClone(previous?.partial);
+  const completedMessages = next.entries.slice(next.entryOffset + 1)
+    .filter(entry => entry.type === "message" && entry.message.role === "assistant").length;
+  const previousCompleted = previous?.entries.slice(previous.entryOffset + 1)
+    .filter(entry => entry.type === "message" && entry.message.role === "assistant").length ?? 0;
+  if (completedMessages > previousCompleted) partial = undefined;
+  if (event.type === "text" || event.type === "thinking" || event.type === "tool") {
+    const block = /^(\d+):(\d+)$/.exec(event.blockId);
+    if (block && Number(block[1]) > completedMessages) {
+      const index = Number(block[2]);
+      const source = next.partial?.role === "assistant" ? next.partial
+        : active.session?.agent.state.messages.findLast(message => message.role === "assistant");
+      if (partial?.role !== "assistant" && source?.role === "assistant") partial = structuredClone({ ...source, content: [] });
+      if (partial?.role === "assistant") {
+        const part = partial.content[index];
+        if (event.type === "text") partial.content[index] = {
+          type: "text", text: event.content ?? ((part?.type === "text" ? part.text : "") + (event.delta ?? "")),
+        };
+        if (event.type === "thinking") partial.content[index] = {
+          type: "thinking", thinking: event.content ?? ((part?.type === "thinking" ? part.thinking : "") + (event.delta ?? "")),
+        };
+        if (event.type === "tool") {
+          const sourcePart = source?.role === "assistant" ? source.content[index] : undefined;
+          partial.content[index] = {
+            type: "toolCall", id: sourcePart?.type === "toolCall" ? sourcePart.id : event.tool.id,
+            name: event.tool.name, arguments: structuredClone(event.tool.args ?? (part?.type === "toolCall" ? part.arguments : {})),
+          };
+        }
+      }
+    }
+  }
+  // ACT: SDK 发布前会更新/清空流式消息，保留已发布块直到历史可见；每事件 O(历史长度)，大会话可改增量投影。
+  next.partial = partial;
+  active.publishedState = next;
 }
 
 export function registerAgentSession(path: string, active: ActiveAgentSession) {
   const key = sessionKey(path);
+  active.publishedState = captureAgentState(active);
   activeSessions.set(key, active);
-  return () => { if (activeSessions.get(key) === active) activeSessions.delete(key); };
+  sessionVersions.set(key, (sessionVersions.get(key) ?? 0) + 1);
+  return () => {
+    if (activeSessions.get(key) !== active) return;
+    activeSessions.delete(key);
+    sessionVersions.set(key, (sessionVersions.get(key) ?? 0) + 1);
+  };
 }
 
 export function getSubAgentInfo(history: SessionManager) {
@@ -255,16 +315,42 @@ export async function listAgentSessions(cwd: string, directory: string) {
 }
 
 export async function getAgentSession(cwd: string, path: string) {
-  const active = getActiveAgentSession(path);
-  const entries = active
-    ? [active.history.getHeader()!, ...active.history.getEntries()]
-    : parseSessionEntries(await readFile(path, "utf8"));
+  const capture = () => {
+    const active = getActiveAgentSession(path);
+    const run = getLatestRunForSession(cwd, basename(path));
+    return {
+      active,
+      version: sessionVersions.get(sessionKey(path)) ?? 0,
+      ...structuredClone({
+        entries: active?.publishedState?.entries,
+        entryOffset: active?.publishedState?.entryOffset ?? 0,
+        leafId: active?.publishedState?.leafId ?? null,
+        tools: active?.publishedState?.tools ?? new Map<string, AgentToolCall>(),
+        partial: active?.publishedState?.partial,
+        run,
+        waitingQuestions: run ? listWaitingQuestionsForRun(run.runId) : [],
+      }),
+    };
+  };
+  let snapshot = capture();
+  // ACT: 本进程同步复制活动状态；文件读取最多重试三次，持续变化返回冲突，避免持锁阻塞生成。
+  for (let attempt = 0; !snapshot.entries && attempt < 3; attempt++) {
+    const before = snapshot;
+    const result = await readFile(path, "utf8").then(content => ({ content }), (error: unknown) => ({ error }));
+    snapshot = capture();
+    if (snapshot.entries) break;
+    if (before.version !== snapshot.version
+      || JSON.stringify([before.run, before.waitingQuestions]) !== JSON.stringify([snapshot.run, snapshot.waitingQuestions])) continue;
+    if ("error" in result) throw result.error;
+    snapshot.entries = parseSessionEntries(result.content);
+  }
+  const { active, entries, tools, partial, run, waitingQuestions } = snapshot;
+  if (!entries) throw Object.assign(new Error("会话正在变化，请重新读取"), { status: 409 });
   if (entries[0]?.type !== "session") throw Object.assign(new Error("会话文件无效"), { status: 400 });
-  const partial = active?.session?.agent.state.streamingMessage;
   if (partial?.role === "assistant") entries.push({
-    type: "message", id: "streaming", parentId: active!.history.getLeafId(), timestamp: new Date().toISOString(), message: partial,
+    type: "message", id: "streaming", parentId: snapshot.leafId, timestamp: new Date().toISOString(), message: partial,
   });
-  const messageIndices = new Map(active ? entries.slice(active.entryOffset + 1)
+  const messageIndices = new Map(active ? entries.slice(snapshot.entryOffset + 1)
     .filter(entry => entry.type === "message" && entry.message.role === "assistant")
     .map((entry, index) => [(entry as SessionEntry).id, index + 1]) : []);
   const history = SessionManager.inMemory(cwd, undefined, entries);
@@ -281,8 +367,14 @@ export async function getAgentSession(cwd: string, path: string) {
       entry.type === "message" && entry.message.role === "toolResult" ? [[entry.message.toolCallId, entry.message] as const] : []
     )
   );
-  const activeRunRecord = getActiveRunForSession(cwd, basename(path));
-  const waitingQuestions = activeRunRecord ? listWaitingQuestionsForRun(activeRunRecord.runId) : [];
+  const toolExecutionIds = new Map<string, string>();
+  for (const entry of branch) {
+    if (entry.type !== "custom" || entry.customType !== "toonflowToolCall") continue;
+    const data = entry.data as { modelToolCallId?: unknown; toolCallId?: unknown } | undefined;
+    if (typeof data?.modelToolCallId === "string" && typeof data.toolCallId === "string") {
+      toolExecutionIds.set(data.modelToolCallId, data.toolCallId);
+    }
+  }
   let replyTo: string | undefined;
   const entriesMessages = branch.flatMap<SessionMessage>((entry) => {
     if (entry.type === "custom" && entry.customType === "toonflowDeletedUser") replyTo = entry.id;
@@ -309,13 +401,14 @@ export async function getAgentSession(cwd: string, path: string) {
               if (part.type === "thinking") return { id, type: "thinking" as const, content: part.thinking, collapsed: true };
               if (part.type === "toolCall") {
                 const result = toolResults.get(part.id);
+                const toolCallId = toolExecutionIds.get(part.id) ?? part.id;
                 return {
                   id,
                   type: "tool" as const,
                   tool: (() => {
-                    const pendingQuestion = waitingQuestions.find(item => item.toolCallId === part.id);
-                    const base = active?.tools.get(part.id) ?? {
-                      id: part.id,
+                    const pendingQuestion = waitingQuestions.find(item => item.toolCallId === toolCallId);
+                    const base = tools.get(toolCallId) ?? {
+                      id: toolCallId,
                       name: part.name,
                       args: part.arguments,
                       status: result ? (result.isError ? "error" as const : "success" as const) : "interrupted" as const,
@@ -405,26 +498,26 @@ export async function getAgentSession(cwd: string, path: string) {
     thinkingLevel: context.thinkingLevel,
     parentFile: getParentSessionFile(history),
     subAgents: [...subAgents.values()],
-    running: Boolean(active),
-    activeRun: (() => {
-      const fileName = basename(path);
-      const activeRun = getActiveRunForSession(cwd, fileName);
-      if (!activeRun) return undefined;
-      return {
-        runId: activeRun.runId,
-        status: activeRun.status,
-        intent: activeRun.intent,
-        lastEventSeq: activeRun.lastEventSeq,
-        waitingQuestions: listWaitingQuestionsForRun(activeRun.runId).map(item => ({
-          callId: item.callId,
-          toolCallId: item.toolCallId,
-          title: item.request.title,
-          question: item.request.question,
-          options: item.request.options,
-          fields: item.request.fields,
-        })),
-      };
+    canvasTarget: (() => {
+      const entry = branch.findLast(item => item.type === "custom" && item.customType === "toonflowCanvasTarget");
+      return entry?.type === "custom" ? entry.data as { canvasPath: string } : undefined;
     })(),
+    running: Boolean(active),
+    eventCursor: run ? { runId: run.runId, afterSeq: run.lastEventSeq } : undefined,
+    activeRun: run && run.status !== "completed" ? {
+      runId: run.runId,
+      status: run.status,
+      intent: run.intent,
+      lastEventSeq: run.lastEventSeq,
+      waitingQuestions: waitingQuestions.map(item => ({
+        callId: item.callId,
+        toolCallId: item.toolCallId,
+        title: item.request.title,
+        question: item.request.question,
+        options: item.request.options,
+        fields: item.request.fields,
+      })),
+    } : undefined,
   };
 }
 

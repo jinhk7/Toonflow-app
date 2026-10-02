@@ -1,10 +1,7 @@
 import { BufferGeometry, Float32BufferAttribute, Group, Mesh, MeshStandardMaterial } from "three";
 
-export const mannequinJoints = [
-  "hips", "spine", "neck", "head",
-  "leftShoulder", "leftElbow", "leftWrist", "rightShoulder", "rightElbow", "rightWrist",
-  "leftHip", "leftKnee", "leftAnkle", "rightHip", "rightKnee", "rightAnkle",
-] as const;
+import { mannequinJoints } from "./document";
+export { mannequinJoints } from "./document";
 
 export function createMannequin(id: string, color = "#c7a77b", hiddenParts: readonly typeof mannequinJoints[number][] = []): Group {
   const root = new Group();

@@ -30,11 +30,13 @@ export async function runProviderSource(
   function redact(value: unknown) {
     let text = typeof value === "string" ? value : JSON.stringify(value, (key, item) => {
       if (secretFields.test(key)) return "••••••";
+      if (["base64", "first_frame", "last_frame", "images", "audios"].includes(key)) return "[素材已隐藏]";
       if (typeof item === "string" && item.length > 4000) return `[${item.length} 个字符]`;
       return item;
     }, 2) ?? "";
     for (const secret of secrets) text = text.replaceAll(secret, "••••••");
-    return text.replace(/(Bearer\s+)[^\s"'<>]+/gi, "$1••••••")
+    return text.replace(/https?:\/\/[^\s"'<>]*[?&]X-Amz-[^\s"'<>]*/gi, "[签名素材地址已隐藏]")
+      .replace(/(Bearer\s+)[^\s"'<>]+/gi, "$1••••••")
       .replace(/([?&](?:api.?key|token|secret|password|signature)=)[^&\s"']*/gi, "$1••••••")
       .slice(0, 16000);
   }

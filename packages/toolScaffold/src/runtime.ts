@@ -58,6 +58,7 @@ export interface NodeToolsContext {
 }
 
 export interface CanvasToolCall {
+  commandId?: string;
   name: string;
   args: Record<string, unknown>;
 }

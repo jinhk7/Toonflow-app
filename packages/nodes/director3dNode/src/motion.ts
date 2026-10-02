@@ -1,17 +1,7 @@
-import { z } from "@toonflow/nodes-scaffold/runtime";
 import { PerspectiveCamera } from "three";
-import { cameraViewSchema, type CameraView } from "./scene";
-
-export const anchorSchema = cameraViewSchema.extend({
-  id: z.string().min(1).default(() => crypto.randomUUID()),
-  time: z.number().min(0).max(300).optional(),
-}).strip();
-export type CameraAnchor = z.infer<typeof anchorSchema>;
-export const cameraFramesSchema = z.array(z.strictObject({
-  time: z.number().min(0).max(300),
-  view: cameraViewSchema,
-  easing: z.enum(["linear", "smooth", "cut"]),
-})).min(1).max(120).refine(frames => frames.every((frame, index) => !index || frame.time > frames[index - 1]!.time), "镜头时间必须递增");
+import type { z } from "zod";
+import { cameraFramesSchema, type CameraView } from "./document";
+export { anchorSchema, cameraFramesSchema, type CameraAnchor } from "./document";
 
 export function applyCamera(camera: PerspectiveCamera, view: CameraView) {
   const { position, fov, near, far } = view.camera;

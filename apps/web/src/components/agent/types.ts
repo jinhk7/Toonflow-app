@@ -35,6 +35,7 @@ export type AgentConversation = {
   parentFile?: string;
   subAgents?: AgentSubAgent[];
   running?: boolean;
+  eventCursor?: { runId: string; afterSeq: number };
   activeRun?: {
     runId: string;
     status: string;

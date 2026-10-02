@@ -1,11 +1,13 @@
 import { mkdir, mkdtemp, lstat, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { crc32, inflateRawSync } from "node:zlib";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PluginInstallType } from "@/types/desktop";
 import conf from "@/utils/conf";
 import { parseTool, toolsDirectory } from "@/utils/plugins/tools";
+import { parseNodeExecution, retainNodeExecutionRevision, validateNodeExecutionPair } from "@/utils/plugins/nodeExecution";
 import { addMediaProvider } from "@/utils/media/provider";
 import { isSafeSegment } from "@/utils/skills/files";
 import { isWithin, lockWorkspaceFiles, writeWorkspaceFile } from "@/utils/workspace/files";
@@ -106,29 +108,93 @@ export function decodeText(bytes: Uint8Array) {
   catch { return invalid("插件文本内容不是有效的 UTF-8 编码，请检查文件编码后重新上传"); }
 }
 
-export async function installNode(fileName: string, source: string, force = false) {
-  if (!/^[a-z][a-zA-Z0-9]*\.umd\.js$/.test(fileName)) invalid("文件名需为小驼峰格式，例如 imageNode.umd.js");
-  if (!source.trim()) invalid("节点文件内容为空，请重新上传节点脚本");
-  if (Buffer.byteLength(source, "utf8") > maxBytes) invalid("节点文件不能超过 20 MB", 413);
-  const name = fileName.slice(0, -7);
-  if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(source)) {
-    invalid("节点文件实际是 HTML 网页，不是节点脚本，请重新上传构建生成的 .umd.js 文件");
+export async function installNode(fileName: string, input: string | Uint8Array, force = false) {
+  const matched = /^([a-z][a-zA-Z0-9]*)\.(umd\.js|node\.js|node\.zip)$/.exec(fileName);
+  if (!matched) invalid("文件名需为小驼峰格式的 .umd.js、.node.js 或完整 .node.zip 节点包");
+  const name = matched[1]!;
+  const bytes = typeof input === "string" ? Buffer.from(input, "utf8") : input;
+  if (!bytes.byteLength || bytes.byteLength > maxBytes) invalid("节点文件不能为空或超过 20 MB", bytes.byteLength ? 413 : 400);
+  const incoming = new Map<string, string>();
+  if (matched[2] === "node.zip") {
+    const files = skillZip(bytes);
+    if (!files.has(`${name}.umd.js`) || !files.has(`${name}.node.js`)) invalid("节点 ZIP 必须包含同名 .umd.js 与 .node.js 配对文件");
+    const metadata = parseNodeExecution(decodeText(files.get(`${name}.node.js`)!), name);
+    const declared = new Set([`${name}.umd.js`, `${name}.node.js`, ...Object.keys(metadata.artifacts)]);
+    if (files.size !== declared.size || [...files.keys()].some(path => !declared.has(path))) invalid("节点 ZIP 必须完整且仅包含配对文件与后端声明的配套产物");
+    for (const [path, revision] of Object.entries(metadata.artifacts)) {
+      if (createHash("sha256").update(files.get(path)!).digest("hex") !== revision) invalid(`节点配套产物版本不匹配：${path}`, 409);
+    }
+    for (const [path, content] of files) incoming.set(path, decodeText(content));
+  } else incoming.set(fileName, decodeText(bytes));
+  for (const [path, source] of incoming) {
+    if (!source.trim()) invalid("节点脚本不能为空");
+    if (path.endsWith(".node.js")) { parseNodeExecution(source, name); continue; }
+    if (path !== `${name}.umd.js`) {
+      try { new Bun.Transpiler({ loader: "js" }).scan(source); }
+      catch { invalid(`节点配套产物脚本语法无效：${path}`); }
+      continue;
+    }
+    if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(source)) invalid("节点文件实际是 HTML 网页，请上传构建生成的 .umd.js 文件");
+    // 安装仅做静态检查，不执行插件/UI。旧 UMD 仍安装，但明确 needsMigration。
+    if (!source.includes("toonflowNodeHost")) invalid("文件不是兼容的 Toonflow 节点，请使用节点脚手架构建生成的 .umd.js 文件");
+    if (!source.includes(`toonflowNodes.${name}`)) invalid(`文件名与节点导出名不一致：${path} 需要导出 toonflowNodes.${name}`);
+    try { new Bun.Transpiler({ loader: "js" }).scan(source); }
+    catch { invalid("节点界面脚本语法无效，请重新构建"); }
   }
-  // ACT: 仅静态检查脚手架约定和语法，确认安装后由画布加载执行。
-  if (!source.includes("toonflowNodeHost")) invalid("文件不是兼容的 Toonflow 节点，请使用节点脚手架构建生成的 .umd.js 文件");
-  if (!source.includes(`toonflowNodes.${name}`)) invalid(`文件名与节点导出名不一致：${fileName} 需要导出 toonflowNodes.${name}，请按实际节点名修改文件名`);
-  try { new Bun.Transpiler({ loader: "js" }).scan(source); }
-  catch { invalid("节点脚本语法无效，请重新构建并上传完整的 .umd.js 文件"); }
   const directory = resolve(dirname(conf.path), "nodes");
   await mkdir(directory, { recursive: true });
   if ((await lstat(directory)).isSymbolicLink()) invalid("节点目录不能是符号链接", 403);
-  const path = resolve(directory, fileName);
-  const release = lockWorkspaceFiles([path]);
+  const release = lockWorkspaceFiles([...new Set([`${name}.umd.js`, `${name}.node.js`, ...incoming.keys()])].map(path => resolve(directory, path)));
+  const previous = new Map<string, Buffer | undefined>();
+  const written: string[] = [];
   try {
-    const current = await lstat(path).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
-    if (current && !current.isFile()) invalid("现有节点必须是普通文件", 403);
-    if (current && !force) requireNewerVersion(current.size <= maxBytes ? nodeVersion(await readFile(path, "utf8")) : undefined, nodeVersion(source), `节点“${name}”`);
-    await writeWorkspaceFile(path, source, !current);
+    for (const [path, source] of incoming) {
+      const target = resolve(directory, path);
+      const current = await lstat(target).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+      if (current && (!current.isFile() || current.size > maxBytes)) invalid("现有节点必须是不超过 20 MB 的普通文件", 403);
+      const oldSource = current ? await readFile(target) : undefined;
+      previous.set(path, oldSource);
+      if (oldSource !== undefined && !force && (path === `${name}.umd.js` || path === `${name}.node.js`)) {
+        const version = path.endsWith(".node.js") ? (value: string) => { try { return parseNodeExecution(value, name).version; } catch { return undefined; } } : nodeVersion;
+        requireNewerVersion(version(oldSource.toString("utf8")), version(source), `节点“${name}”`);
+      }
+    }
+    const backend = incoming.get(`${name}.node.js`);
+    if (backend !== undefined) {
+      const ui = incoming.get(`${name}.umd.js`) ?? await readFile(resolve(directory, `${name}.umd.js`), "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") invalid("请先安装配对界面，或上传完整 .node.zip 节点包");
+        throw error;
+      });
+      validateNodeExecutionPair(ui, createHash("sha256").update(backend).digest("hex"));
+      const metadata = parseNodeExecution(backend, name);
+      for (const [path, revision] of Object.entries(metadata.artifacts)) {
+        const source = incoming.get(path);
+        const artifact = source === undefined ? await readFile(resolve(directory, path)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") invalid(`节点声明的配套产物缺失：${path}`, 409);
+          throw error;
+        }) : Buffer.from(source, "utf8");
+        if (createHash("sha256").update(artifact).digest("hex") !== revision) invalid(`节点配套产物版本不匹配：${path}`, 409);
+      }
+    }
+    await retainNodeExecutionRevision(name);
+    try {
+      // 配对产物切换期间校验失败会停止新执行，绝不把新 UI 与旧后端混用。
+      for (const [path, source] of incoming) {
+        await writeWorkspaceFile(resolve(directory, path), source, previous.get(path) === undefined);
+        written.push(path);
+      }
+    } catch (error) {
+      const errors: unknown[] = [error];
+      for (const path of written.reverse()) {
+        try {
+          const old = previous.get(path);
+          if (old === undefined) await rm(resolve(directory, path), { force: true });
+          else await writeWorkspaceFile(resolve(directory, path), old);
+        } catch (restoreError) { errors.push(restoreError); }
+      }
+      if (errors.length > 1) throw new AggregateError(errors, "节点安装失败且回退未完成，请保留归档并核对配对产物");
+      throw error;
+    }
   } finally { release(); }
   return { name };
 }
@@ -395,8 +461,8 @@ export async function installRemotePlugin(type: PluginInstallType, url: string, 
     try { fileName = decodeURIComponent(address.pathname.split("/").at(-1) ?? ""); }
     catch { return invalid("下载地址中的文件名编码无效，请重新生成下载链接"); }
   }
-  const patterns = { node: /^[a-z][a-zA-Z0-9]*\.umd\.js$/, tool: /^[a-z][a-zA-Z0-9]*\.tool\.js$/, skill: /\.(md|zip|tar|tar\.gz|tgz)$/i, provider: /^[a-z][a-zA-Z0-9]*\.ts$/, agent: /^[a-z][a-zA-Z0-9]*\.agent\.zip$/ };
-  const examples = { node: "audioNode.umd.js", tool: "exampleTool.tool.js", skill: "example.zip、SKILL.md、example.tar、example.tar.gz 或 example.tgz", provider: "exampleProvider.ts", agent: "exampleTeam.agent.zip" };
+  const patterns = { node: /^[a-z][a-zA-Z0-9]*\.(umd\.js|node\.js|node\.zip)$/, tool: /^[a-z][a-zA-Z0-9]*\.tool\.js$/, skill: /\.(md|zip|tar|tar\.gz|tgz)$/i, provider: /^[a-z][a-zA-Z0-9]*\.ts$/, agent: /^[a-z][a-zA-Z0-9]*\.agent\.zip$/ };
+  const examples = { node: "audioNode.umd.js、audioNode.node.js 或 audioNode.node.zip", tool: "exampleTool.tool.js", skill: "example.zip、SKILL.md、example.tar、example.tar.gz 或 example.tgz", provider: "exampleProvider.ts", agent: "exampleTeam.agent.zip" };
   if (!Object.hasOwn(patterns, type)) invalid("不支持此插件类型，可选值为 node、tool、skill、provider、agent");
   if (!fileName) invalid(`下载地址缺少文件名，请使用指向文件的地址，例如 ${examples[type]}`);
   if (fileName.length > 128 || /[\\/]/.test(fileName)) invalid("插件文件名无效，不能包含目录路径或超过 128 字符");
@@ -404,8 +470,8 @@ export async function installRemotePlugin(type: PluginInstallType, url: string, 
   const bytes = await download(url, type === "provider" ? 2 * 1024 * 1024 : maxBytes, { node: "节点", tool: "工具", skill: "技能", provider: "供应商", agent: "团队" }[type]);
   if (type === "agent") return (await import("@/utils/teams/install")).installTeam(fileName, bytes, force);
   if (type === "skill") return installSkill(fileName, bytes, force);
+  if (type === "node") return installNode(fileName, bytes, force);
   const source = decodeText(bytes);
-  if (type === "node") return installNode(fileName, source, force);
   if (type === "tool") return installTool(fileName, source, force);
   return { name: (await addMediaProvider(source)).id };
 }
