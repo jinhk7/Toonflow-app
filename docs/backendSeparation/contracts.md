@@ -7,7 +7,7 @@
 - POST /api/workspaces/canvas/command：CanvasCommand；返回统一 success 包装内 CanvasCommandResult。服务端和 Agent 直接调用相同处理函数。
 - GET /api/workspaces/canvas/command/get：directory、commandId；用于接受响应丢失后的对账。
 - GET /api/workspaces/canvas/events：directory、afterSeq；application/x-ndjson，持久 WorkspaceEvent。断线不取消。
-- GET /api/workspaces/canvas/content：directory、path；返回 content、revision。
+- GET /api/workspaces/canvas/content：directory、path；返回 content、revision、exists；区分缺失文件与已存在的空正文。
 - PUT /api/workspaces/canvas/content/write：directory、path、content、expectedRevision、commandId；CAS 写入，409 保留草稿。读取/写入各一个路由文件，遵守仓库接口规范。
 - GET /api/nodes/get：保留原字段并增加 protocolVersion、executionRevision、stateVersion、handles、defaultData、actions、layoutSize、executionStatus。不可通过执行 Vue 获取这些数据。
 - POST /api/agent/accept：保留 /api/agent 的原输入，增加 clientMessageId；返回 runId、sessionFile、重复受理标记，再订阅既有 /api/agent/events/get。
@@ -24,6 +24,8 @@ CanvasCommand name 沿用现有 canvasOperations。nodeTools 参数沿用 nodeId
 
 每个节点新增 src/backend.ts，默认导出 NodeExecutionDefinition。同一构建产生 name.node.js（后端模块）与 name.umd.js（UI）。UI 元数据包含执行协议及配对 revision；安装/升级由核心处理，既有旧包保留。
 
+可选配套产物 name.render.js 的 SHA256 写入后端元数据 artifacts，因此执行 revision 同时固定渲染实现。安装时校验完整包并保留旧版；getNodeExecutionArtifact(name, executionRevision, fileName) 只返回该固定版本声明且校验通过的归档，不能借用新版本文件恢复旧任务。
+
 NodeExecutionDefinition 提供 name/stateVersion/handles/defaultData/layoutSize/actions，以及可选 initialize/remove/migrate/validateConnection。actions 的 Zod schema 和实际 execute 来自服务器加载模块。后端私有来源证明记录真实 handler，客户端描述不包含函数。
 
 可选 readOutputs(context) 返回后端从权威文件派生的输出，仅查询，不写状态。文本节点用此方法读取正文，保持 textPath/content.md 为唯一正文，不把全文重复写进 Graph。getInputs 由后端解析这些派生输出。UI不得自行构建权威输出。
@@ -33,6 +35,8 @@ NodeExecutionContext 绑定 directory/canvasPath/node/commandId/revision；提�
 受理时固定节点状态、配置、执行 revision、上游文本与媒体文件副本；getInputs 按 referenceOrder 排序。动作可显式声明 snapshotInputs:false，省去无需上游输入的状态查询/配置更新的素材复制；此声明不改变审批规则，并禁止该动作随后读取上游输入。
 
 宿主 getModels 返回公开模型能力；getJob/cancelJob 面向持久节点作业。getMediaJob/retryMediaCollection 同时接受包装作业 ID、原媒体 ID 或本项目旧幂等键，复用原媒体任务。runJob 负责保存 generationJobId，media 负责 pendingMediaJob 与输出槽版本绑定，插件不得重复写入这些标记。重试收取不再次调用供应商生成。文本产物先保存到任务结果再 CAS 发布，正文冲突进入 needsReview 且保留文本。
+
+文本任务先以 deferStart 持久受理，绑定 generationJobId 成功后 activateNodeJob；绑定失败取消尚未执行的任务。重启遗留的未激活任务进入 needsReview，不自动启动。媒体先复制引用再写 pending，受理失败且没有对应媒体台账时才按最新图版本清理匹配标记；已有台账则保留幂等键以便继续核对。
 
 内置 job kind：text 输入 {providerId,modelId,prompt,systemPrompt?,references?,path?,expectedRevision?}，结果 {text,path?,revision?}；media 输入 {mediaType,request,binding?}，request 为既有 MediaGenerationRequest，结果 GeneratedMedia[]；render 使用下列渲染契约。nodeId/canvasPath/pluginRevision 使用外层 NodeJobRequest 固定，不相信客户端额外伪造目标。自定义任务按后端 handler 注册发现。
 

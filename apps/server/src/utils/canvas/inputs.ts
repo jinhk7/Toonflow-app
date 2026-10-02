@@ -17,7 +17,7 @@ export type NodeInputSnapshot = {
   revision: string;
   config: Record<string, unknown>;
   inputs: Record<string, NodeInputValue[]>;
-  texts: Record<string, { content: string; revision: string }>;
+  texts: Record<string, { content: string; revision: string; exists?: boolean }>;
   files: Record<string, string>;
   directory: string;
   capturedInputs: boolean;
@@ -48,8 +48,9 @@ export async function captureNodeInputs(directory: string, canvasPath: string, g
   const loaded = await loadNodeExecution((target.type ?? "").replace(/^remote-/, ""), revision);
   const capturedInputs = loaded.definition.actions.find(action => `node:${action.name}` === actionName)?.snapshotInputs !== false;
   const result: NodeInputSnapshot = { node: nodeSnapshot(graph, target), revision: loaded.revision, config: getNodeConfig(await readNode(loaded.definition.name)), inputs: {}, texts: {}, files: {}, directory: join(dirname(conf.path), "nodeInputs", crypto.randomUUID()), capturedInputs };
+  if (!capturedInputs) return result;
   const copy = structuredClone(graph);
-  const sources = new Set(capturedInputs ? copy.edges.filter(edge => edge.target === nodeId).map(edge => edge.source) : []);
+  const sources = new Set(copy.edges.filter(edge => edge.target === nodeId).map(edge => edge.source));
   sources.add(nodeId);
   const unavailable = () => { throw new Error("readOutputs 只能读取节点状态"); };
   for (const id of sources) {

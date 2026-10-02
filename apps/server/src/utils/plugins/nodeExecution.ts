@@ -27,6 +27,7 @@ const loaded = new Map<string, Promise<LoadedNodeExecution>>();
 const loadedDefinitions = new Map<string, LoadedNodeExecution>();
 const builtinHandlers = new WeakMap<object, { name: string; action: string; revision: string }>();
 type LoadedNodeExecution = { definition: NodeExecutionDefinition; revision: string; builtin: boolean };
+type NodeExecutionMetadata = { name: string; protocolVersion: 2; version: string; artifacts: Record<string, string> };
 
 // ACT: 后端节点使用宿主 Zod，归档副本不依赖用户安装目录中的 node_modules。
 Bun.plugin({
@@ -58,11 +59,13 @@ const definitionSchema = z.object({
 
 export function parseNodeExecution(source: string, name: string) {
   nodeNameSchema.parse(name);
-  let metadata: { name: string; protocolVersion: 2; version: string };
+  let metadata: NodeExecutionMetadata;
   try {
     const header = source.match(/^\/\*! toonflowNodeExecution:([^\r\n]*) \*\/(?:\r?\n|$)/)?.[1];
-    metadata = z.object({ name: nodeNameSchema, protocolVersion: z.literal(2), version: z.string().min(1).max(100) }).parse(JSON.parse(header ?? ""));
+    metadata = z.object({ name: nodeNameSchema, protocolVersion: z.literal(2), version: z.string().min(1).max(100), artifacts: z.record(z.string().max(256), revisionSchema).default({}) }).parse(JSON.parse(header ?? ""));
     if (metadata.name !== name) throw new Error("name");
+    if (Object.keys(metadata.artifacts).length > 16 || Object.keys(metadata.artifacts).some(fileName =>
+      !fileName.startsWith(`${name}.`) || !/^[a-z][a-zA-Z0-9]*\.[a-z][a-zA-Z0-9]*\.js$/.test(fileName) || fileName === `${name}.node.js` || fileName === `${name}.umd.js`)) throw new Error("artifacts");
     const scanned = new Bun.Transpiler({ loader: "js" }).scan(source);
     if (!scanned.exports.includes("default") || scanned.imports.some(item => !isBuiltin(item.path) && item.path !== "toonflow:node-zod")) throw new Error("imports");
   } catch {
@@ -100,7 +103,10 @@ export async function configureBuiltinNodeExecutions(nodesRoot?: string) {
     if (!file.isFile() || !/^[a-z][a-zA-Z0-9]*\.node\.js$/.test(file.name)) continue;
     const name = file.name.slice(0, -8);
     const artifact = await readArtifact(resolve(root, file.name));
-    parseNodeExecution(artifact.content.toString("utf8"), name);
+    const metadata = parseNodeExecution(artifact.content.toString("utf8"), name);
+    for (const [fileName, revision] of Object.entries(metadata.artifacts)) {
+      if ((await readArtifact(resolve(root, fileName))).revision !== revision) invalid(`官方节点配套产物校验失败：${fileName}`, 409);
+    }
     apply(mapSet, builtinHashes, [name, artifact.revision]);
   }
 }
@@ -118,12 +124,47 @@ async function archiveArtifact(name: string, content: Buffer, revision: string) 
   return path;
 }
 
+async function archiveCompanionArtifacts(name: string, revision: string, artifacts: Record<string, string>, sourceDirectory?: string) {
+  const entries = Object.entries(artifacts);
+  if (!entries.length) return;
+  const directory = resolve(revisionsDirectory, name, `r${revision}`);
+  if (sourceDirectory) await mkdir(directory, { recursive: true });
+  const actualDirectory = await realpath(directory).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") invalid("固定版本节点的配套产物不可用，请恢复原完整节点包", 409);
+    throw error;
+  });
+  if (!isWithin(await realpath(revisionsDirectory), actualDirectory) || (await lstat(directory)).isSymbolicLink()) invalid("节点配套产物归档目录无效", 403);
+  for (const [fileName, expectedRevision] of entries) {
+    const path = resolve(directory, fileName);
+    const archived = await readArtifact(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (archived) {
+      if (archived.revision !== expectedRevision) invalid(`固定版本节点配套产物校验失败：${fileName}`, 409);
+      continue;
+    }
+    if (!sourceDirectory) invalid(`固定版本节点配套产物缺失：${fileName}`, 409);
+    const artifact = await readArtifact(resolve(sourceDirectory, fileName)).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") invalid(`节点声明的配套产物缺失：${fileName}`, 409);
+      throw error;
+    });
+    if (artifact.revision !== expectedRevision) invalid(`节点配套产物版本不匹配：${fileName}`, 409);
+    await writeWorkspaceFile(path, artifact.content, true).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
+    if ((await readArtifact(path)).revision !== expectedRevision) invalid(`节点配套产物归档校验失败：${fileName}`, 409);
+  }
+}
+
 export async function retainNodeExecutionRevision(name: string) {
   nodeNameSchema.parse(name);
   let artifact: Awaited<ReturnType<typeof readArtifact>>;
   try { artifact = await readArtifact(resolve(nodesDirectory, `${name}.node.js`)); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+  const metadata = parseNodeExecution(artifact.content.toString("utf8"), name);
   await archiveArtifact(name, artifact.content, artifact.revision);
+  await archiveCompanionArtifacts(name, artifact.revision, metadata.artifacts, nodesDirectory);
   return artifact.revision;
 }
 
@@ -169,12 +210,14 @@ export async function loadNodeExecution(name: string, expectedRevision?: string)
       const actual = await realpath(path);
       const artifact = await readArtifact(path);
       if (!isWithin(await realpath(revisionsDirectory), actual) || artifact.revision !== revision) invalid("固定版本节点执行产物校验失败", 409);
-      parseNodeExecution(artifact.content.toString("utf8"), name);
+      const metadata = parseNodeExecution(artifact.content.toString("utf8"), name);
+      await archiveCompanionArtifacts(name, revision, metadata.artifacts);
     } else {
       const artifact = await readArtifact(resolve(nodesDirectory, `${name}.node.js`));
       if (artifact.revision !== revision) invalid("固定版本节点执行产物不可用，请保留旧版包后恢复任务", 409);
-      parseNodeExecution(artifact.content.toString("utf8"), name);
+      const metadata = parseNodeExecution(artifact.content.toString("utf8"), name);
       path = await archiveArtifact(name, artifact.content, revision);
+      await archiveCompanionArtifacts(name, revision, metadata.artifacts, nodesDirectory);
     }
   } else {
     let artifact: Awaited<ReturnType<typeof readArtifact>>;
@@ -184,10 +227,11 @@ export async function loadNodeExecution(name: string, expectedRevision?: string)
       throw error;
     }
     revision = artifact.revision;
-    parseNodeExecution(artifact.content.toString("utf8"), name);
+    const metadata = parseNodeExecution(artifact.content.toString("utf8"), name);
     const ui = await readArtifact(resolve(nodesDirectory, `${name}.umd.js`));
     validateNodeExecutionPair(ui.content.toString("utf8"), revision);
     path = await archiveArtifact(name, artifact.content, revision);
+    await archiveCompanionArtifacts(name, revision, metadata.artifacts, nodesDirectory);
   }
   const key = keyPrefix + revision;
   let promise = loaded.get(key);
@@ -210,6 +254,19 @@ export async function loadNodeExecution(name: string, expectedRevision?: string)
   const builtin = apply(mapGet, builtinHashes, [name]) === result.revision;
   if (builtin) for (const action of result.definition.actions) apply(weakMapSet, builtinHandlers, [action.execute, { name, action: action.name, revision: result.revision }]);
   return { ...result, builtin };
+}
+
+export async function getNodeExecutionArtifact(name: string, revision: string, fileName: string): Promise<{ path: string; revision: string }> {
+  nodeNameSchema.parse(name);
+  revisionSchema.parse(revision);
+  await loadNodeExecution(name, revision);
+  const execution = await readArtifact(resolve(revisionsDirectory, name, `r${revision}.node.js`));
+  const metadata = parseNodeExecution(execution.content.toString("utf8"), name);
+  const expectedRevision = Object.hasOwn(metadata.artifacts, fileName) ? metadata.artifacts[fileName] : undefined;
+  if (!expectedRevision) invalid("节点执行版本未声明此配套产物", 404);
+  const path = resolve(revisionsDirectory, name, `r${revision}`, fileName);
+  if ((await readArtifact(path)).revision !== expectedRevision) invalid("节点配套产物校验失败", 409);
+  return { path, revision: expectedRevision };
 }
 
 export function isBuiltinNodeExecutionAction(name: string, action: NodeExecutionAction, revision: string) {

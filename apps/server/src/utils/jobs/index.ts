@@ -46,6 +46,7 @@ type JobRecord = {
   lastEventSeq: number;
   attempt: number;
   cancelRequested: number;
+  activationRequired: number;
 };
 
 const handlers = new Map<string, { handler: JobHandler; recoveryMode: "safe" | "review"; revision: string }>();
@@ -81,6 +82,7 @@ function database() {
       lastEventSeq INTEGER NOT NULL DEFAULT 0,
       attempt INTEGER NOT NULL DEFAULT 0,
       cancelRequested INTEGER NOT NULL DEFAULT 0,
+      activationRequired INTEGER NOT NULL DEFAULT 0,
       UNIQUE(directory, commandId, kind)
     );
     CREATE TABLE IF NOT EXISTS node_job_events (
@@ -99,6 +101,8 @@ function database() {
     db.exec("ALTER TABLE node_jobs ADD COLUMN handlerRevision TEXT NOT NULL DEFAULT ''");
   if (!jobColumns.some(column => column.name === "cancelRequested"))
     db.exec("ALTER TABLE node_jobs ADD COLUMN cancelRequested INTEGER NOT NULL DEFAULT 0");
+  if (!jobColumns.some(column => column.name === "activationRequired"))
+    db.exec("ALTER TABLE node_jobs ADD COLUMN activationRequired INTEGER NOT NULL DEFAULT 0");
   const eventColumns = db.prepare("PRAGMA table_info(node_job_events)").all() as { name: string }[];
   if (!eventColumns.some(column => column.name === "workspacePublished"))
     db.exec("ALTER TABLE node_job_events ADD COLUMN workspacePublished INTEGER NOT NULL DEFAULT 0");
@@ -218,7 +222,7 @@ function terminal(status: NodeJobView["status"]) {
 function startJob(jobId: string) {
   if (activeJobs.has(jobId)) return;
   const record = getRecord(jobId);
-  if (!record || record.status !== "accepted") return;
+  if (!record || record.status !== "accepted" || record.activationRequired) return;
   const registered = handlers.get(record.kind);
   if (!registered) return;
   if (record.handlerRevision !== registered.revision) {
@@ -284,6 +288,10 @@ export function ensureNodeJobsReady() {
       .all() as JobRecord[];
     flushWorkspaceEvents();
     for (const record of records) {
+      if (record.activationRequired) {
+        updateJob(record.jobId, "needsReview", undefined, "任务尚未完成节点绑定，请核对后继续；未启动执行");
+        continue;
+      }
       if (record.status === "running") {
         const safe = record.recoveryMode === "safe" && !record.cancelRequested;
         updateJob(record.jobId, safe ? "accepted" : "needsReview", undefined,
@@ -297,7 +305,7 @@ export function ensureNodeJobsReady() {
   return ready;
 }
 
-export async function acceptNodeJob(input: { directory: string; commandId: string; request: NodeJobRequest }): Promise<NodeJobView> {
+export async function acceptNodeJob(input: { directory: string; commandId: string; request: NodeJobRequest; deferStart?: boolean }): Promise<NodeJobView> {
   await ensureNodeJobsReady();
   const directory = await resolveWorkspace(input.directory);
   if (!input.commandId || !input.request.kind) throw Object.assign(new Error("任务命令与类型不能为空"), { status: 400 });
@@ -317,16 +325,25 @@ export async function acceptNodeJob(input: { directory: string; commandId: strin
   const now = new Date().toISOString();
   db.prepare(`INSERT INTO node_jobs (
     jobId, commandId, directory, kind, nodeId, canvasPath, pluginRevision, requestJson, inputDigest,
-    recoveryMode, handlerRevision, status, createdAt, updatedAt
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`).run(
+    recoveryMode, handlerRevision, activationRequired, status, createdAt, updatedAt
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`).run(
     jobId, input.commandId, directory, input.request.kind, input.request.nodeId ?? null,
     input.request.canvasPath ?? null, input.request.pluginRevision ?? null, requestJson, inputDigest,
-    registered.recoveryMode, registered.revision, now, now,
+    registered.recoveryMode, registered.revision, input.deferStart ? 1 : 0, now, now,
   );
   appendEvent(jobId, "jobChanged", { job: view(getRecord(jobId)!) });
   // 执行在独立生命周期中进行，受理后客户端连接不会持有取消信号。
   startJob(jobId);
   return view(getRecord(jobId)!);
+}
+
+export function activateNodeJob(jobId: string): NodeJobView {
+  const record = getRecord(jobId);
+  if (!record) throw Object.assign(new Error("任务不存在"), { status: 404 });
+  if (terminal(record.status)) return view(record);
+  database().prepare("UPDATE node_jobs SET activationRequired = 0 WHERE jobId = ? AND status = 'accepted'").run(jobId);
+  startJob(jobId);
+  return getNodeJob(jobId)!;
 }
 
 export function getNodeJob(jobId: string): NodeJobView | undefined {

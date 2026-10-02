@@ -63,6 +63,7 @@ export function createNodeConfig(config: NodeConfig, configUrl: string) {
   const fileName = `${nodeName}.umd.js`;
   const backendFileName = `${nodeName}.node.js`;
   let backendSource: string | undefined;
+  let companionFiles: string[] = [];
   const outDir = fileURLToPath(new URL("../../build/nodes", import.meta.url));
   const dataDir = fileURLToPath(new URL("../../data/nodes", import.meta.url));
   let syncToData = process.env.NODE_ENV === "dev";
@@ -97,6 +98,7 @@ export function createNodeConfig(config: NodeConfig, configUrl: string) {
             throw error;
           });
           backendSource = undefined;
+          companionFiles = [];
           if (backendEntry !== undefined) {
             this.addWatchFile(backendPath);
             // Vite 可由 Node 或 Bun 启动；独立 Bun 编译器不要求节点作者改构建脚本。
@@ -104,7 +106,20 @@ export function createNodeConfig(config: NodeConfig, configUrl: string) {
             const result = await executeFile(compiler, ["-e", nodeCompiler, backendPath], { cwd: root, windowsHide: true, maxBuffer: 40 * 1024 * 1024 });
             const backend = JSON.parse(result.stdout) as { code: string; watched: string[] };
             for (const path of backend.watched) this.addWatchFile(path);
-            const backendMetadata = { name: nodeName, protocolVersion: 2, version };
+            const renderFileName = `${nodeName}.render.js`;
+            const renderPath = resolve(outDir, renderFileName);
+            const renderArtifact = await readFile(renderPath).catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return undefined;
+              throw error;
+            });
+            const artifacts: Record<string, string> = {};
+            if (renderArtifact !== undefined) {
+              if (!renderArtifact.byteLength || renderArtifact.byteLength > 20 * 1024 * 1024) throw new Error(`节点渲染产物不能为空或超过 20 MB：${renderFileName}`);
+              this.addWatchFile(renderPath);
+              artifacts[renderFileName] = createHash("sha256").update(renderArtifact).digest("hex");
+              companionFiles.push(renderFileName);
+            }
+            const backendMetadata = { name: nodeName, protocolVersion: 2, version, ...(companionFiles.length ? { artifacts } : {}) };
             backendSource = `/*! toonflowNodeExecution:${JSON.stringify(backendMetadata).replaceAll("/", "\\u002f")} */\n${backend.code}`;
             this.emitFile({ type: "asset", fileName: backendFileName, source: backendSource });
           }
@@ -118,6 +133,14 @@ export function createNodeConfig(config: NodeConfig, configUrl: string) {
         async writeBundle() {
           if (!syncToData) return;
           await mkdir(dataDir, { recursive: true });
+          for (const fileName of companionFiles) {
+            const targetPath = resolve(dataDir, fileName);
+            const tempPath = `${targetPath}.${crypto.randomUUID()}.tmp`;
+            try {
+              await copyFile(resolve(outDir, fileName), tempPath);
+              await rename(tempPath, targetPath);
+            } finally { await rm(tempPath, { force: true }); }
+          }
           if (backendSource !== undefined) {
             const backendTargetPath = resolve(dataDir, backendFileName);
             const backendTempPath = `${backendTargetPath}.${crypto.randomUUID()}.tmp`;

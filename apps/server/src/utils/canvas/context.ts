@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { z } from "zod";
 import type { CanvasContext, NodeToolInfo, NodeToolsContext, MediaGenerationRequest, MediaReference } from "@toonflow/tools-scaffold/runtime";
 import type { CanvasCommand, CanvasCommandResult, NodeExecutionContext, NodeExecutionDescriptor, NodeExecutionSnapshot } from "@toonflow/nodes-scaffold/execution";
@@ -14,7 +14,7 @@ import { listNodeExecutions, loadNodeExecution } from "@/utils/plugins/nodeExecu
 import { readNode, getNodeConfig } from "@/utils/plugins/nodes";
 import { readVersionedContent, writeVersionedContent, assertNoManagedResource } from "@/utils/canvas/content";
 import { acceptCanvasCommand, appendWorkspaceEvent, getCanvasCommand, listIncompleteCanvasCommands, requestDigest, updateCanvasCommand } from "@/utils/canvas/store";
-import { acceptNodeJob, getNodeJob, getNodeJobRequest, cancelNodeJob, waitForNodeJob } from "@/utils/jobs";
+import { acceptNodeJob, activateNodeJob, getNodeJob, getNodeJobRequest, cancelNodeJob, waitForNodeJob } from "@/utils/jobs";
 import { arrangeGraph } from "@/utils/canvas/layout";
 import { captureNodeInputs, captureInputFile, type NodeInputSnapshot } from "@/utils/canvas/inputs";
 import { listAiModels, getConfiguredModel, readAiReferences, aiReferenceSchema } from "@/utils/ai";
@@ -57,8 +57,13 @@ async function resolveCanvas(directory: string, target?: { id?: string; canvasPa
   const id = target?.canvasPath ?? target?.id;
   if (!id) return canvases[0]?.id ?? "";
   const matching = canvases.find(item => item.id === id || item.graph.toonflowGraph!.id === id);
-  if (!matching) throw Object.assign(new Error("目标画布不存在，请刷新项目"), { status: 404 });
-  return matching.id;
+  if (matching) return matching.id;
+  if (id.endsWith(".json")) {
+    const { path } = await resolveWorkspacePath(directory, id);
+    await readGraph(path, directory);
+    return relative(directory, path).replaceAll("\\", "/");
+  }
+  throw Object.assign(new Error("目标画布不存在，请刷新项目"), { status: 404 });
 }
 
 function nodeType(type: string) { return type.startsWith("remote-") ? type.slice(7) : type; }
@@ -79,8 +84,8 @@ export async function createBackendCanvasContext(directory: string, target?: { i
   async function refresh() {
     descriptors = await listNodeExecutions();
     canvases = await listCanvases(cwd);
-    graph = canvasPath ? canvases.find(item => item.id === canvasPath)?.graph : undefined;
-    if (canvasPath && !graph) throw Object.assign(new Error("画布已删除或改名，请重新选择"), { status: 409 });
+    graph = canvasPath ? canvases.find(item => item.id === canvasPath)?.graph ?? await readGraph((await resolveWorkspacePath(cwd, canvasPath)).path, cwd) : undefined;
+    if (canvasPath && graph && !canvases.some(item => item.id === canvasPath)) canvases.push({ id: canvasPath, name: canvasPath.slice(0, -5), graph });
   }
 
   function requireGraph(): Graph {
@@ -179,7 +184,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
         const name = request.args.name;
         if (/[\\/:*?"<>|]/.test(name)) throw Object.assign(new Error("画布名称无效"), { status: 400 });
         const source = await resolveWorkspacePath(cwd, canvasPath);
-        const nextPath = `${name}.json`;
+        const nextPath = join(dirname(canvasPath), `${name}.json`).replaceAll("\\", "/");
         const destination = await resolveWorkspacePath(cwd, nextPath);
         await renameWorkspaceFile(source.path, destination.path);
         canvasPath = nextPath;
@@ -261,6 +266,8 @@ export async function createBackendCanvasContext(directory: string, target?: { i
       }
       case "nodeTools": {
         const node = requireNode(request.args.nodeId);
+        const expected = command.expectedVersions?.[node.id];
+        if (expected !== undefined && expected !== requireGraph().toonflowGraph!.nodes[node.id]) throw Object.assign(new Error("节点版本冲突，请保留草稿并刷新后重试"), { status: 409 });
         if (command.inputSnapshot && command.inputSnapshot.node.version !== requireGraph().toonflowGraph!.nodes[node.id]) throw Object.assign(new Error("目标节点在受理后已变化，请刷新后重试"), { status: 409 });
         const loaded = await loadNodeExecution(nodeType(node.type ?? ""), command.inputSnapshot?.revision ?? request.args.expectedNodeRevision);
         const action = loaded.definition.actions.find(item => `node:${item.name}` === request.args.name);
@@ -294,7 +301,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
       async writeText(path, content, expectedRevision) {
         const before = expectedRevision ?? (await context.readText(path)).revision;
         const result = await writeVersionedContent({ directory: cwd, path, content, expectedRevision: before, commandId: `${command.commandId}:${nextStep()}` });
-        if (frozen) frozen.texts[path] = { content, revision: result.revision };
+        if (frozen) frozen.texts[path] = { content, revision: result.revision, exists: true };
         return result;
       },
       async read(path) { return new Uint8Array(await readFile(frozen?.files[path] ? join(frozen.directory, frozen.files[path]!) : (await resolveWorkspacePath(cwd, path)).path)); },
@@ -352,7 +359,6 @@ export async function createBackendCanvasContext(directory: string, target?: { i
           const slot = z.object({ outputSlot: z.string().optional() }).parse(input.binding ?? {}).outputSlot ?? definition.handles.find(handle => handle.type === "source" && isTypeCompatible(mediaType.toUpperCase(), handle.dataType))?.id;
           if (!slot) throw Object.assign(new Error("节点没有对应的媒体输出槽"), { status: 400 });
           const key = operationId(jobCommandId, 0);
-          await context.patchData({ pendingMediaJob: { idempotencyKey: key, outputSlot: slot, canvasPath, expectedNodeVersion: node.version + 1, startedAt: Date.now() } });
           let mediaSnapshot: { directory: string; request: MediaGenerationRequest } | undefined;
           if (frozen) {
             const copyReference = async (item: MediaReference) => ({ ...item, path: await captureInputFile(frozen, cwd, item.path) });
@@ -364,13 +370,31 @@ export async function createBackendCanvasContext(directory: string, target?: { i
             };
             mediaSnapshot = { directory: frozen.directory, request: { ...mediaRequest, images: await copyReferences(mediaRequest.images), videos: await copyReferences(mediaRequest.videos), audios: await copyReferences(mediaRequest.audios), firstFrame: mediaRequest.firstFrame && await copyReference(mediaRequest.firstFrame), lastFrame: mediaRequest.lastFrame && await copyReference(mediaRequest.lastFrame) } };
           }
-          const accepted = await acceptMediaJob({ cwd, mediaType, request: mediaRequest, idempotencyKey: key, binding: { canvasPath, nodeId, outputSlot: slot, expectedNodeVersion: node.version }, snapshot: mediaSnapshot });
-          if (accepted.kind === "conflict") throw Object.assign(new Error("媒体命令已用于其他输入"), { status: 409 });
-          input = { ...input, mediaJobId: accepted.job.jobId };
+          await context.patchData({ generationJobId: null, pendingMediaJob: { idempotencyKey: key, outputSlot: slot, canvasPath, expectedNodeVersion: node.version + 1, startedAt: Date.now() } });
+          try {
+            const accepted = await acceptMediaJob({ cwd, mediaType, request: mediaRequest, idempotencyKey: key, binding: { canvasPath, nodeId, outputSlot: slot, expectedNodeVersion: node.version }, snapshot: mediaSnapshot });
+            if (accepted.kind === "conflict") throw Object.assign(new Error("媒体命令已用于其他输入"), { status: 409 });
+            input = { ...input, mediaJobId: accepted.job.jobId };
+          } catch (error) {
+            if (!getMediaJobByIdempotency(cwd, key)) {
+              await refresh();
+              const latest = requireNode(nodeId);
+              if ((latest.data?.pendingMediaJob as { idempotencyKey?: unknown } | undefined)?.idempotencyKey === key) {
+                await apply([nodeChange(latest, { ...latest, data: { ...latest.data, pendingMediaJob: null } })], { ...command, expectedVersions: undefined }, nextStep());
+              }
+            }
+            throw error;
+          }
         }
-        const job = await acceptNodeJob({ directory: cwd, commandId: jobCommandId, request: { ...request, input, pluginRevision: revision, nodeId, canvasPath } });
-        if (request.kind === "text" || request.kind === "media") await context.patchData({ generationJobId: job.jobId });
-        return job;
+        const deferStart = request.kind === "text";
+        const job = await acceptNodeJob({ directory: cwd, commandId: jobCommandId, request: { ...request, input, pluginRevision: revision, nodeId, canvasPath }, deferStart });
+        try {
+          if (request.kind === "text" || request.kind === "media") await context.patchData({ generationJobId: job.jobId });
+        } catch (error) {
+          if (deferStart) await cancelNodeJob(job.jobId);
+          throw error;
+        }
+        return deferStart ? activateNodeJob(job.jobId) : job;
       },
       async getJob(jobId) { const job = getNodeJob(jobId); return job?.directory === cwd ? job : undefined; },
       async cancelJob(jobId) { if (getNodeJob(jobId)?.directory !== cwd) return; return cancelNodeJob(jobId); },

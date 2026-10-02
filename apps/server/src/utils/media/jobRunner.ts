@@ -51,7 +51,9 @@ async function linkCompletedMedia(job: MediaJobRow) {
       updateMediaJob(job.jobId, { linkStatus: "unlinked", errorMessage: "原节点已删除或不再等待该任务；成果保留在项目任务列表" });
       return;
     }
-    await modifyGraph(path, job.jobId, [{ kind: "output", nodeId: job.nodeId, slot: job.outputSlot,
+    // 旧版已写输出回执却未清等待标记，使用固定的补办操作，仍由输出版本和任务键共同校验。
+    const operationId = graph.toonflowGraph.receipts[job.jobId] ? `${job.jobId}:clearPending` : job.jobId;
+    await modifyGraph(path, operationId, [{ kind: "output", nodeId: job.nodeId, slot: job.outputSlot,
       expectedVersion: job.outputVersion, pendingJobKey: job.idempotencyKey, value }], job.workspaceDirectory);
     updateMediaJob(job.jobId, { linkStatus: "linked", errorMessage: null });
   } catch (error) {

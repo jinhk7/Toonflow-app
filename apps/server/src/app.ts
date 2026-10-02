@@ -33,7 +33,7 @@ export async function createApp({
   if (dataDirectory) process.env.TOONFLOW_DATA_DIR = resolve(dataDirectory);
   if (dataDirectory && toolsRoot)
     await initializePlugins(resolve(dataDirectory, "tools"), toolsRoot, /^[a-z][a-zA-Z0-9]*\.tool\.js$/, pluginRevision);
-  if (dataDirectory && nodesRoot) await initializePlugins(resolve(dataDirectory, "nodes"), nodesRoot, /^[a-z][a-zA-Z0-9]*\.(umd|node)\.js$/, pluginRevision);
+  if (dataDirectory && nodesRoot) await initializePlugins(resolve(dataDirectory, "nodes"), nodesRoot, /^[a-z][a-zA-Z0-9]*\.(umd|node|render)\.js$/, pluginRevision);
   const { configureBuiltinCanvasTools } = await import("@/utils/plugins/tools");
   await configureBuiltinCanvasTools(toolsRoot);
   const { configureBuiltinNodes } = await import("@/utils/plugins/nodes");

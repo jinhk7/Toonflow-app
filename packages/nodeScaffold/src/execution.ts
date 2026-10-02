@@ -74,7 +74,7 @@ export type NodeExecutionContext = {
   node: NodeExecutionSnapshot;
   config: Record<string, unknown>;
   signal: AbortSignal;
-  readText(path: string): Promise<{ content: string; revision: string }>;
+  readText(path: string): Promise<{ content: string; revision: string; exists?: boolean }>;
   writeText(path: string, content: string, expectedRevision?: string): Promise<{ revision: string }>;
   read(path: string): Promise<Uint8Array>;
   write(path: string, content: Uint8Array): Promise<void>;

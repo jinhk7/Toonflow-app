@@ -117,12 +117,23 @@ export async function installNode(fileName: string, input: string | Uint8Array, 
   const incoming = new Map<string, string>();
   if (matched[2] === "node.zip") {
     const files = skillZip(bytes);
-    if (files.size !== 2 || !files.has(`${name}.umd.js`) || !files.has(`${name}.node.js`)) invalid("节点 ZIP 必须在根目录仅包含同名 .umd.js 与 .node.js 配对文件");
+    if (!files.has(`${name}.umd.js`) || !files.has(`${name}.node.js`)) invalid("节点 ZIP 必须包含同名 .umd.js 与 .node.js 配对文件");
+    const metadata = parseNodeExecution(decodeText(files.get(`${name}.node.js`)!), name);
+    const declared = new Set([`${name}.umd.js`, `${name}.node.js`, ...Object.keys(metadata.artifacts)]);
+    if (files.size !== declared.size || [...files.keys()].some(path => !declared.has(path))) invalid("节点 ZIP 必须完整且仅包含配对文件与后端声明的配套产物");
+    for (const [path, revision] of Object.entries(metadata.artifacts)) {
+      if (createHash("sha256").update(files.get(path)!).digest("hex") !== revision) invalid(`节点配套产物版本不匹配：${path}`, 409);
+    }
     for (const [path, content] of files) incoming.set(path, decodeText(content));
   } else incoming.set(fileName, decodeText(bytes));
   for (const [path, source] of incoming) {
     if (!source.trim()) invalid("节点脚本不能为空");
     if (path.endsWith(".node.js")) { parseNodeExecution(source, name); continue; }
+    if (path !== `${name}.umd.js`) {
+      try { new Bun.Transpiler({ loader: "js" }).scan(source); }
+      catch { invalid(`节点配套产物脚本语法无效：${path}`); }
+      continue;
+    }
     if (/^\s*(?:<!doctype\s+html\b|<html\b)/i.test(source)) invalid("节点文件实际是 HTML 网页，请上传构建生成的 .umd.js 文件");
     // 安装仅做静态检查，不执行插件/UI。旧 UMD 仍安装，但明确 needsMigration。
     if (!source.includes("toonflowNodeHost")) invalid("文件不是兼容的 Toonflow 节点，请使用节点脚手架构建生成的 .umd.js 文件");
@@ -133,7 +144,7 @@ export async function installNode(fileName: string, input: string | Uint8Array, 
   const directory = resolve(dirname(conf.path), "nodes");
   await mkdir(directory, { recursive: true });
   if ((await lstat(directory)).isSymbolicLink()) invalid("节点目录不能是符号链接", 403);
-  const release = lockWorkspaceFiles([resolve(directory, `${name}.umd.js`), resolve(directory, `${name}.node.js`)]);
+  const release = lockWorkspaceFiles([...new Set([`${name}.umd.js`, `${name}.node.js`, ...incoming.keys()])].map(path => resolve(directory, path)));
   const previous = new Map<string, Buffer | undefined>();
   const written: string[] = [];
   try {
@@ -143,7 +154,7 @@ export async function installNode(fileName: string, input: string | Uint8Array, 
       if (current && (!current.isFile() || current.size > maxBytes)) invalid("现有节点必须是不超过 20 MB 的普通文件", 403);
       const oldSource = current ? await readFile(target) : undefined;
       previous.set(path, oldSource);
-      if (oldSource !== undefined && !force) {
+      if (oldSource !== undefined && !force && (path === `${name}.umd.js` || path === `${name}.node.js`)) {
         const version = path.endsWith(".node.js") ? (value: string) => { try { return parseNodeExecution(value, name).version; } catch { return undefined; } } : nodeVersion;
         requireNewerVersion(version(oldSource.toString("utf8")), version(source), `节点“${name}”`);
       }
@@ -155,6 +166,15 @@ export async function installNode(fileName: string, input: string | Uint8Array, 
         throw error;
       });
       validateNodeExecutionPair(ui, createHash("sha256").update(backend).digest("hex"));
+      const metadata = parseNodeExecution(backend, name);
+      for (const [path, revision] of Object.entries(metadata.artifacts)) {
+        const source = incoming.get(path);
+        const artifact = source === undefined ? await readFile(resolve(directory, path)).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") invalid(`节点声明的配套产物缺失：${path}`, 409);
+          throw error;
+        }) : Buffer.from(source, "utf8");
+        if (createHash("sha256").update(artifact).digest("hex") !== revision) invalid(`节点配套产物版本不匹配：${path}`, 409);
+      }
     }
     await retainNodeExecutionRevision(name);
     try {

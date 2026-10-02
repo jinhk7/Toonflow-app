@@ -33,8 +33,8 @@ export async function readVersionedContent(directory: string, path: string) {
   const target = await resolveWorkspacePath(await resolveWorkspace(directory), path, true);
   registerManagedResource(target.directory, relative(target.directory, target.path));
   return serialize(target.path, async () => {
-    const { content } = await readOptional(target.path);
-    return { content, revision: contentRevision(content) };
+    const { content, exists } = await readOptional(target.path);
+    return { content, revision: contentRevision(content), exists };
   });
 }
 
