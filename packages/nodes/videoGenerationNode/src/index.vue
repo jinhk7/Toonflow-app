@@ -10,9 +10,9 @@
     :bottomWidth="660"
     :style="{ width: previewUrl && videoWidth ? `${videoWidth + 18}px` : undefined }">
     <template #topActions>
-      <mediaHistory mediaType="video" :current="outputFile" :disabled="generating || deleting || uploading" @select="outputs.video = { dataType: 'VIDEO', value: $event }" />
-      <el-button :icon="IconTransfer" :loading="uploading" :disabled="generating || deleting" text title="替换视频" aria-label="替换视频" @click.stop="fileInput?.click()" />
-      <input ref="fileInput" type="file" accept="video/*" hidden aria-label="选择替换视频" :disabled="generating || deleting || uploading" @change="replaceOutput" />
+      <mediaHistory mediaType="video" :current="outputFile" :disabled="generating || pendingJob || uploading" @select="selectOutput" />
+      <el-button :icon="IconTransfer" :loading="uploading" :disabled="generating || pendingJob" text title="替换视频" aria-label="替换视频" @click.stop="fileInput?.click()" />
+      <input ref="fileInput" type="file" accept="video/*" hidden aria-label="选择替换视频" :disabled="generating || pendingJob || uploading" @change="replaceOutput($event).catch(error => showNodeError(error, '替换失败'))" />
     </template>
     <div v-loading="generating || uploading" class="videoContent nopan" :aria-busy="generating || uploading">
       <videoPlayer
@@ -42,7 +42,7 @@
             class="modelSelect"
             filterable
             :loading="modelsLoading"
-            :disabled="generating || deleting"
+            :disabled="generating || pendingJob"
             placeholder="选择模型"
             aria-label="生成模型"
             noDataText="请先在设置中添加视频模型"
@@ -64,15 +64,15 @@
             v-model:mode="data.mode"
             v-model:generateAudio="data.generateAudio"
             :ratios="ratioOptions"
-            :model="selectedModel"
-            :disabled="generating || deleting || !selectedModel" />
+            :model="settingsModel"
+            :disabled="generating || pendingJob || !selectedModel" />
           <el-button
             class="sendButton"
             :icon="generating ? IconPlayerStop : IconArrowUp"
-            :disabled="deleting || uploading || (!generating && !mediaPersistence.readPending() && (!generationPrompt || !selectedModel))"
+            :disabled="uploading || (!generating && !pendingJob && (!generationPrompt || !selectedModel))"
             :title="generating ? '停止生成' : '生成视频'"
             :aria-label="generating ? '停止生成' : '生成视频'"
-            @click="generating ? generationController?.abort() : startFromButton().catch((error) => showNodeError(error, '视频生成失败'))" />
+            @click="generating ? cancelGeneration() : startFromButton().catch((error) => showNodeError(error, '视频生成失败'))" />
         </div>
       </el-card>
     </template>
@@ -80,427 +80,192 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onScopeDispose, reactive, ref, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessageBox, ElLoading } from "element-plus";
 import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeMediaPersistence, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle, type PrepareMediaJobResult } from "@toonflow/nodes-scaffold/runtime";
+import { groupNodeModels, nodeSkeleton, showNodeError, useNode, useNodeReferences, type NodeMediaModel, type NodeMediaJobView, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import videoPlayer from "@toonflow/nodes-scaffold/videoPlayer";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
 import generationSettings from "./components/generationSettings.vue";
 
-defineOptions({
-  inheritAttrs: false,
-  icon: IconCameraAi,
-  handles: [
-    { id: "in", type: "target", dataType: ["IMAGE", "VIDEO", "AUDIO", "STRING"], label: "图片、视频、音频、文本输入" },
-    { id: "video", type: "source", dataType: "VIDEO", label: "视频输出" },
-  ] satisfies NodeHandle[],
-});
-const vLoading = ElLoading.directive;
-const { id, node, nodeProps, nodeEvent, outputs, files, ai, updateNodeInternals } = useNode({
-  label: "视频生成",
-});
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
-const data = computed(() => node.data as { prompt: string; promptModel: PromptModel; model: string; duration?: number; resolution: string; ratio: string; mode: string; generateAudio: boolean });
-data.value.prompt ??= "";
-data.value.promptModel ??= [];
-data.value.model ??= "";
-data.value.resolution ??= "";
-data.value.mode ??= "";
-data.value.generateAudio ??= true;
-data.value.ratio ??= "9:16";
+type ConfigState = { config: { providerId: string; modelId: string; size?: string; ratio: string; duration?: number; resolution?: string; mode?: string | string[]; generateAudio?: boolean }; models: NodeMediaModel[]; matchingModes?: (string | string[])[]; ratios?: string[] };
+type GenerationState = { status: string; jobId?: string; mediaJob?: NodeMediaJobView; error?: string };
+defineOptions({ inheritAttrs: false, icon: IconCameraAi });
+const vLoading = ElLoading.directive;
+const { node, nodeProps, outputs, files, execution, updateNodeInternals } = useNode({ label: "视频生成" });
+const nodeData = computed(() => node.data as typeof node.data & Record<string, unknown>);
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
-const mediaPersistence = useNodeMediaPersistence(id, () => data.value as Record<string, unknown>);
-const outputSlot = "video";
+const data = reactive({
+  prompt: typeof nodeData.value.prompt === "string" ? nodeData.value.prompt : "",
+  promptModel: Array.isArray(nodeData.value.promptModel) ? nodeData.value.promptModel as PromptModel : [],
+  model: typeof nodeData.value.model === "string" ? nodeData.value.model : "",
+  ratio: typeof nodeData.value.ratio === "string" ? nodeData.value.ratio : "9:16",
+  duration: typeof nodeData.value.duration === "number" ? nodeData.value.duration : undefined,
+  resolution: typeof nodeData.value.resolution === "string" ? nodeData.value.resolution : "",
+  mode: typeof nodeData.value.mode === "string" ? nodeData.value.mode : "",
+  generateAudio: nodeData.value.generateAudio !== false,
+});
 const models = ref<NodeMediaModel[]>([]);
+const matchingModes = ref<(string | string[])[]>([]);
+const ratioOptions = ref<string[]>(["16:9", "9:16", "1:1", "4:3", "3:4"]);
 const modelsLoading = ref(false);
 const uploading = ref(false);
 const fileInput = ref<HTMLInputElement>();
-let disposed = false;
-const deleting = ref(false);
-const player = ref<InstanceType<typeof videoPlayer>>();
+
 const videoWidth = ref(0);
-let generationController: AbortController | undefined;
-const generationState = useNodeGeneration(outputs, () => generationController?.abort());
-const { generating } = generationState;
-let generation: Promise<void> | undefined;
-let modelsRequest: Promise<void> | undefined;
-// ACT: 供应商未声明视频比例范围，沿用界面的通用比例，具体支持范围由供应商校验。
-const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"];
-const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
-const selectedMode = computed(() => selectedModel.value?.mode?.find((item) => JSON.stringify(item) === data.value.mode) as NodeVideoRequest["mode"]);
+const player = ref<InstanceType<typeof videoPlayer>>();
+const generating = ref(false);
+const pendingJob = computed(() => !!nodeData.value.pendingMediaJob);
+const selectedModel = computed(() => models.value.find(item => JSON.stringify([item.providerId, item.modelId]) === data.model));
+const settingsModel = computed(() => selectedModel.value ? { ...selectedModel.value, mode: matchingModes.value } : undefined);
+const selectedMode = computed(() => { try { return JSON.parse(data.mode) as string | string[]; } catch { return undefined; } });
 const frameMode = computed(() => ["startEndRequired", "endFrameOptional", "startFrameOptional"].includes(String(selectedMode.value)));
-const mediaCounts = computed(() => ({
-  image: refList.value.filter((item) => item.dataType === "IMAGE").length,
-  video: refList.value.filter((item) => item.dataType === "VIDEO").length,
-  audio: refList.value.filter((item) => item.dataType === "AUDIO").length,
-}));
-const matchingModes = computed(() => getMatchingModes(selectedModel.value));
 
-function getMatchingModes(choice?: NodeMediaModel) {
-  return (choice?.mode ?? []).filter((mode) => {
-    const { image, video, audio } = mediaCounts.value;
-    if (Array.isArray(mode)) return image + video + audio > 0 && Object.entries(mediaCounts.value).every(([type, count]) =>
-      count <= Number(mode.find((item) => item.startsWith(`${type}Reference:`))?.split(":")[1] ?? 0)
-    );
-    if (mode === "text") return image + video + audio === 0;
-    if (video || audio) return false;
-    if (mode === "singleImage") return image === 1;
-    if (mode === "startEndRequired") return image === 2;
-    return ["endFrameOptional", "startFrameOptional"].includes(mode) && image >= 1 && image <= 2;
-  });
-}
-
-function getDurations(choice: NodeMediaModel) {
-  return [...new Set((choice.durationResolutionMap ?? []).flatMap((item) => item.duration))].sort((a, b) => a - b);
-}
-
-function getResolutions(choice: NodeMediaModel, duration?: number) {
-  // ACT: 当前视频分辨率使用 p 单位；出现其他单位时再统一换算。
-  return [...new Set((choice.durationResolutionMap ?? []).filter((item) => item.duration.includes(duration!)).flatMap((item) => item.resolution))]
-    .sort((left, right) => (Number.parseFloat(left) || Infinity) - (Number.parseFloat(right) || Infinity));
-}
-// ACT: 引用改变时只替换不适用的模式；普通媒体优先作为参考，避免自动变成首尾帧。
-watch([selectedModel, matchingModes, () => data.value.mode], ([choice, matches]) => {
-  if (!choice || matches.some((item) => JSON.stringify(item) === data.value.mode)) return;
-  const modes = choice.mode ?? [];
-  const mode = matches.find(Array.isArray) ?? matches.find((item) => item === "singleImage")
-    ?? matches.find((item) => item === "endFrameOptional") ?? matches[0]
-    ?? modes.find((item) => JSON.stringify(item) === data.value.mode) ?? modes.find(Array.isArray) ?? modes[0];
-  data.value.mode = mode === undefined ? "" : JSON.stringify(mode);
-}, { flush: "sync" });
-// ACT: 参数在节点内归一化，未选中、未挂载底部设置时也可由 Agent 直接生成。
-watch([selectedModel, () => data.value.duration], ([choice]) => {
-  if (!choice) return;
-  const durations = getDurations(choice);
-  if (!durations.includes(data.value.duration!)) data.value.duration = durations[0];
-  const resolutions = getResolutions(choice, data.value.duration);
-  if (!resolutions.includes(data.value.resolution)) data.value.resolution = resolutions[0] ?? "";
-  if (!ratioOptions.includes(data.value.ratio)) data.value.ratio = "9:16";
-  if (choice.audio !== "optional") data.value.generateAudio = choice.audio === true;
-}, { flush: "sync" });
 const modelGroups = computed(() => groupNodeModels(models.value));
-const generationPrompt = computed(() =>
-  [
-    data.value.prompt.trim(),
-    ...refList.value.flatMap((item, index) => (item.dataType === "STRING" && item.value?.trim() ? [`参考 ${index + 1}：\n${item.value.trim()}`] : [])),
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-);
+const generationPrompt = computed(() => data.prompt.trim() || refList.value.some(item => item.dataType === "STRING" && typeof item.value === "string" && item.value.trim()));
 const outputFile = computed(() => outputs.value.video?.dataType === "VIDEO" ? outputs.value.video.value : undefined);
-const previewUrl = files.useFileUrl(
-  outputFile,
-  (error) => showNodeError(error, "视频读取失败")
-);
+const previewUrl = files.useFileUrl(outputFile, error => showNodeError(error, "视频读取失败"));
+let applying = false;
+let disposed = false;
+let controlsSaving = Promise.resolve();
+let promptTimer: ReturnType<typeof setTimeout> | undefined;
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let statusError = "";
 
-onMounted(async () => {
-  await loadModels().catch((error) => showNodeError(error, "模型读取失败"));
-  // 模型列表读取失败也继续恢复：续查和收取不依赖当前模型或提示词。
-  await resumePendingGeneration().catch((error) => showNodeError(error, "恢复任务失败"));
+function applyConfig(state: ConfigState) {
+  applying = true;
+  models.value = state.models;
+  matchingModes.value = state.matchingModes ?? [];
+  if (state.ratios) ratioOptions.value = state.ratios;
+  const config = state.config;
+  data.model = config.modelId ? JSON.stringify([config.providerId, config.modelId]) : typeof nodeData.value.model === "string" ? nodeData.value.model : "";
+  data.ratio = config.ratio;
+  data.duration = config.duration;
+  data.resolution = config.resolution ?? "";
+  data.mode = config.mode === undefined ? "" : JSON.stringify(config.mode);
+  data.generateAudio = config.generateAudio !== false;
+  applying = false;
+}
+function queueControl(name: string, args: Record<string, unknown>) {
+  const pending = controlsSaving.catch(() => {}).then(() => execution.call<ConfigState>(name, args));
+  controlsSaving = pending.then(state => { if (name === "setConfig") applyConfig(state); });
+  void controlsSaving.catch(error => { if (!disposed) showNodeError(error, "节点设置保存失败"); });
+  return controlsSaving;
+}
+function savePrompt() {
+  clearTimeout(promptTimer);
+  promptTimer = undefined;
+  return queueControl("setPrompt", { prompt: data.prompt });
+}
+watch(() => [data.prompt, data.promptModel], () => {
+  if (applying) return;
+  clearTimeout(promptTimer);
+  promptTimer = setTimeout(() => { void savePrompt(); }, 400);
+}, { deep: true, flush: "sync" });
+watch(() => data.model, value => {
+  if (applying) return;
+  const choice = models.value.find(item => JSON.stringify([item.providerId, item.modelId]) === value);
+  if (choice) void queueControl("setConfig", { providerId: choice.providerId, modelId: choice.modelId });
+}, { flush: "sync" });
+watch(() => [data.duration, data.resolution, data.ratio, data.mode, data.generateAudio] as const, (values, previous) => {
+  if (applying) return;
+  const args: Record<string, unknown> = {};
+  if (values[0] !== undefined && values[0] !== previous[0]) args.duration = values[0];
+  if (values[1] && values[1] !== previous[1]) args.resolution = values[1];
+  if (values[2] && values[2] !== previous[2]) args.ratio = values[2];
+  if (values[3] && values[3] !== previous[3]) args.mode = JSON.parse(values[3]);
+  if (values[4] !== previous[4]) args.generateAudio = values[4];
+  if (Object.keys(args).length) void queueControl("setConfig", args);
+}, { flush: "sync" });
+watch(() => [nodeData.value.prompt, nodeData.value.promptModel], () => {
+  if (promptTimer) return;
+  applying = true;
+  data.prompt = typeof nodeData.value.prompt === "string" ? nodeData.value.prompt : "";
+  data.promptModel = Array.isArray(nodeData.value.promptModel) ? nodeData.value.promptModel as PromptModel : [];
+  applying = false;
 });
-onScopeDispose(() => {
-  disposed = true;
-  generationController?.abort();
-});
-
+async function loadModels() {
+  if (modelsLoading.value) return;
+  modelsLoading.value = true;
+  try { applyConfig(await execution.call<ConfigState>("getConfig")); }
+  finally { modelsLoading.value = false; }
+}
+async function selectOutput(value: NodeMediaValue) {
+  try { await execution.call("setVideo", { path: value.url, mimeType: value.mimeType }); }
+  catch (error) { showNodeError(error, "选择历史视频失败"); }
+}
 async function replaceOutput(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = "";
-  if (!file || generating.value || deleting.value || uploading.value || disposed) return;
+  if (!file || generating.value || uploading.value) return;
   if (!file.type.startsWith("video/")) return void showNodeError("请选择视频文件", "视频替换失败");
   if (!file.size || file.size > 100 * 1024 * 1024) return void showNodeError("视频不能为空且不能超过 100 MB", "视频替换失败");
   uploading.value = true;
   try {
-    const workspace = files.getWorkspaceFiles();
-    const url = await files.uploadFile(file);
-    if (disposed) {
-      await workspace.remove(url);
-      return;
+    const workspaceFiles = files.getWorkspaceFiles();
+    const stagedPath = `assets/uploads/${crypto.randomUUID()}`;
+    for (const path of ["assets", "assets/uploads"]) {
+      await workspaceFiles.mkdir(path).catch((error: { response?: { data?: { data?: { code?: string } } } }) => {
+        if (error.response?.data?.data?.code !== "EEXIST") throw error;
+      });
     }
-    // ACT: 保留历史输出文件，避免破坏撤销记录和复制节点的引用。
-    outputs.value.video = { dataType: "VIDEO", value: { url, mimeType: file.type } };
-  } catch (error) {
-    showNodeError(error, "视频替换失败");
-  } finally {
-    uploading.value = false;
-  }
+    await workspaceFiles.write(stagedPath, file, true);
+    await execution.call("uploadVideo", { stagedPath, name: file.name, mimeType: file.type });
+  } finally { uploading.value = false; }
 }
-
-function loadModels() {
-  if (modelsRequest) return modelsRequest;
-  modelsLoading.value = true;
-  modelsRequest = ai.getMediaModels().then((items) => {
-    if (generating.value || deleting.value) return;
-    models.value = items.filter((item) => item.type === "video");
-    // ACT: 只给空配置选默认模型，保留暂时不可用的旧选择及其参数。
-    if (!data.value.model) {
-      const first = models.value[0];
-      data.value.model = first ? JSON.stringify([first.providerId, first.modelId]) : "";
-    }
-  }).finally(() => {
-    modelsLoading.value = false;
-    modelsRequest = undefined;
-  });
-  return modelsRequest;
-}
-
-function mediaBindingFields(binding?: PrepareMediaJobResult) {
-  return binding ? {
-    canvasPath: binding.canvasPath,
-    nodeId: binding.nodeId,
-    outputSlot: binding.outputSlot,
-    expectedNodeVersion: binding.expectedNodeVersion,
-  } : {};
-}
-
-function buildVideoInput(choice: NodeMediaModel): Omit<NodeVideoRequest, "directory"> {
-  const images = refList.value.flatMap((item) => item.dataType === "IMAGE" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []);
-  return {
-    providerId: choice.providerId,
-    modelId: choice.modelId,
-    prompt: generationPrompt.value,
-    mode: selectedMode.value,
-    duration: data.value.duration,
-    resolution: data.value.resolution || undefined,
-    ratio: data.value.ratio,
-    generateAudio: choice.audio === "optional" ? data.value.generateAudio : choice.audio,
-    outputDirectory: `assets/${id}`,
-    images: frameMode.value ? undefined : images,
-    firstFrame: frameMode.value && (selectedMode.value !== "startFrameOptional" || images.length > 1) ? images[0] : undefined,
-    lastFrame: frameMode.value ? images[selectedMode.value === "startFrameOptional" && images.length === 1 ? 0 : 1] : undefined,
-    videos: refList.value.flatMap((item) => item.dataType === "VIDEO" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []),
-    audios: refList.value.flatMap((item) => item.dataType === "AUDIO" && item.value ? [{ path: item.value.url, mimeType: item.value.mimeType }] : []),
-  };
-}
-
-async function waitForVideoResult(directory: string, idempotencyKey: string, binding?: PrepareMediaJobResult, signal?: AbortSignal) {
-  const choice = selectedModel.value;
-  if (!choice) throw new Error("请先选择视频模型");
-  const [result] = await ai.generateVideo({
-    directory,
-    idempotencyKey,
-    ...buildVideoInput(choice),
-    ...mediaBindingFields(binding),
-  }, signal);
-  if (!result) throw new Error("供应商未返回视频");
-  outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
-  await mediaPersistence.clearPending(outputSlot);
-}
-
-async function resumePendingGeneration() {
-  const pending = mediaPersistence.readPending();
-  if (!pending || pending.outputSlot !== outputSlot || generating.value || uploading.value || deleting.value) return;
-  const workspace = files.getWorkspaceFiles();
-  const controller = new AbortController();
-  generationController = controller;
-  generation = generationState.run(async () => {
-    const { directory } = await workspace.list();
-    controller.signal.throwIfAborted();
-    const job = await ai.fetchMediaJob(directory, pending.idempotencyKey, controller.signal);
-    if (!job) throw new Error("未找到任务记录，点击生成可核对并确认放弃原任务");
-    if (job.status === "completed" && job.linkStatus !== "pending" && job.files?.length) {
-      const result = job.files.find(file => file.mediaType === "video") ?? job.files[0];
-      outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
-      await mediaPersistence.clearPending(outputSlot);
-      return;
-    }
-    if (job.status === "failed") throw Object.assign(new Error(job.errorMessage || "媒体生成失败"), { definitive: true });
-    if (job.status === "unknown") throw new Error(`${job.errorMessage || "提交结果未知"}；结果未知，点击生成可确认放弃后重新提交`);
-    if (job.status === "collectionFailed") {
-      throw new Error(`${job.errorMessage || "媒体归档失败"}；点击生成仅重试收取原结果，不重新生成`);
-    }
-    const [result] = await ai.pollMediaJob(directory, pending.idempotencyKey, controller.signal);
-    if (!result) throw new Error("供应商未返回视频");
-    outputs.value.video = { dataType: "VIDEO", value: { url: result.path, mimeType: result.mimeType } };
-    await mediaPersistence.clearPending(outputSlot);
-  })
-    .catch(async (error) => {
-      showNodeError(error, "视频生成失败");
-      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showNodeError(releaseError, "解除任务占用失败"));
-    })
-    .finally(() => {
-      generationController = undefined;
-    });
-}
-
-// 结果未知的任务不会再写回节点；只有按钮操作经用户确认后才解除占用，Agent 调用仍被 prepare 拒绝。
-async function releaseUnknownPending() {
-  const pending = mediaPersistence.readPending();
-  if (!pending || pending.outputSlot !== outputSlot || generating.value) return true;
-  const { directory } = await files.getWorkspaceFiles().list();
-  const job = await ai.fetchMediaJob(directory, pending.idempotencyKey);
-  if (job && job.status !== "unknown") {
-    if (job.status === "collectionFailed") await ai.retryMediaCollection(directory, job.jobId);
-    await resumePendingGeneration();
-    return false;
-  }
-  try {
-    await ElMessageBox.confirm(
-      "上次任务结果未知，服务可能仍在生成或已计费。请先在服务端核对；放弃后原任务的结果不会写回节点，本次会产生新的生成请求。",
-      "放弃上次任务？",
-      { type: "warning", confirmButtonText: "放弃并重新生成", cancelButtonText: "取消" },
-    );
-  } catch { return false; }
-  if (disposed || mediaPersistence.readPending()?.idempotencyKey !== pending.idempotencyKey) return false;
-  const current = await ai.fetchMediaJob(directory, pending.idempotencyKey);
-  if (current && current.status !== "unknown") {
-    await resumePendingGeneration();
-    return false;
-  }
-  await mediaPersistence.clearPending(outputSlot);
-  return true;
-}
-
 async function startFromButton() {
-  if (await releaseUnknownPending()) await startGeneration();
-}
-
-async function startGeneration() {
-  const choice = selectedModel.value;
-  if (generating.value) throw new Error("视频正在生成，请等待完成");
-  if (uploading.value) throw new Error("视频正在替换，请等待完成");
-  if (deleting.value) throw new Error("节点正在删除");
-  if (!choice) throw new Error("请先选择视频模型");
-  if (!generationPrompt.value) throw new Error("请输入生成提示词");
-  if (refList.value.some(item => item.value === undefined)) throw new Error("引用节点暂无内容，请先补充引用内容");
-  if (choice.mode?.length && !matchingModes.value.length) throw new Error("当前模型没有适合这些参考素材的生成模式，请更换模型或调整引用");
-  const workspace = files.getWorkspaceFiles();
-  const controller = new AbortController();
-  const { idempotencyKey, binding } = await mediaPersistence.prepare(outputSlot);
-  generationController = controller;
-  // ACT: 工具立即返回，任务由节点持有，停止或卸载时取消本地等待。
-  generation = generationState.run(() => workspace
-    .list()
-    .then(({ directory }) => {
-      controller.signal.throwIfAborted();
-      return waitForVideoResult(directory, idempotencyKey, binding, controller.signal);
-    }))
-    .catch(async (error) => {
-      showNodeError(error, "视频生成失败");
-      await mediaPersistence.releaseFailed(outputSlot, error).catch((releaseError) => showNodeError(releaseError, "解除任务占用失败"));
-    })
-    .finally(() => {
-      generationController = undefined;
-    });
-  return { status: "generating" };
-}
-
-nodeEvent.on("save", (reason) => {
-  if (reason === "reload" && (generating.value || uploading.value || deleting.value)) throw new Error("视频处理中，请完成后再刷新节点");
-});
-nodeEvent.on("delete", async () => {
-  if (uploading.value) throw new Error("视频正在替换，请稍后删除节点");
-  deleting.value = true;
-  generationController?.abort();
-  try {
-    await generation;
-    await files.removeNodeFiles();
-  } finally {
-    deleting.value = false;
+  await controlsSaving;
+  const state = await execution.call<GenerationState>("getGenerationStatus");
+  if (state.mediaJob?.status === "collectionFailed") {
+    await execution.call("retryCollection");
+    return;
   }
-});
-
+  if (pendingJob.value && (!state.mediaJob || state.mediaJob.status === "unknown")) {
+    try {
+      await ElMessageBox.confirm("上次任务结果未知，服务可能仍在生成或已计费。请先在服务端核对；放弃后原任务的结果不会写回节点，本次会产生新的生成请求。", "放弃上次任务？", { type: "warning", confirmButtonText: "放弃并重新生成", cancelButtonText: "取消" });
+    } catch { return; }
+    await execution.call("abandonUnknownGeneration", { confirmed: true });
+  }
+  if (["accepted", "running"].includes(state.status) || state.mediaJob && ["prepared", "submitting", "tracking", "collecting"].includes(state.mediaJob.status)) return;
+  await savePrompt();
+  await execution.call("generateVideo");
+  generating.value = true;
+}
+async function cancelGeneration() {
+  try { await execution.call("cancelGeneration"); }
+  catch (error) { showNodeError(error, "停止生成失败"); }
+}
+async function poll() {
+  try {
+    if (!document.hidden) {
+      const id = nodeData.value.generationJobId;
+      const job = typeof id === "string" ? await execution.getJob(id) : undefined;
+      if (!job && pendingJob.value) {
+        const state = await execution.call<GenerationState>("getGenerationStatus");
+        generating.value = ["accepted", "running"].includes(state.status);
+      } else generating.value = !!job && ["accepted", "running"].includes(job.status);
+      if (job?.errorMessage && job.errorMessage !== statusError) { statusError = job.errorMessage; showNodeError(job.errorMessage, "视频生成失败"); }
+    }
+  } catch (error) { if (!disposed) showNodeError(error, "任务状态读取失败"); }
+  finally { if (!disposed) pollTimer = setTimeout(() => { void poll(); }, 2000); }
+}
 async function resizeVideo(event: Event) {
   const video = event.currentTarget as HTMLVideoElement;
   if (!video.videoWidth || !video.videoHeight) return;
-  videoWidth.value = Math.max(180, (240 * video.videoWidth) / video.videoHeight);
+  videoWidth.value = Math.max(180, 240 * video.videoWidth / video.videoHeight);
   await nextTick();
   updateNodeInternals();
 }
-
-function getConfig() {
-  return {
-    config: {
-      providerId: selectedModel.value?.providerId ?? "",
-      modelId: selectedModel.value?.modelId ?? "",
-      duration: data.value.duration,
-      resolution: data.value.resolution,
-      ratio: data.value.ratio,
-      mode: selectedMode.value,
-      generateAudio: data.value.generateAudio,
-    },
-    models: models.value,
-    ratios: ratioOptions,
-    matchingModes: matchingModes.value,
-  };
-}
-
-nodeTools.register({
-  name: "getConfig",
-  description: "读取此视频生成节点的当前配置、可选视频模型能力、通用比例及适合当前引用的模式，不含密钥；时长与分辨率须符合 durationResolutionMap",
-  parameters: z.strictObject({}),
-  async execute(_args, { signal }) {
-    signal?.throwIfAborted();
-    await loadModels();
-    signal?.throwIfAborted();
-    return getConfig();
-  },
+onMounted(async () => {
+  try { await loadModels(); }
+  catch (error) { showNodeError(error, "模型读取失败"); }
+  void poll();
 });
-
-nodeTools.register({
-  name: "setConfig",
-  description: "修改此视频生成节点的模型、时长、分辨率、比例、模式或声音；先用 getConfig 查询能力，providerId 与 modelId 必须同时提供；mode 使用返回的原始字符串或数组，须匹配当前引用；不修改提示词、不启动生成",
-  parameters: z.strictObject({
-    providerId: z.string().min(1).optional(),
-    modelId: z.string().min(1).optional(),
-    duration: z.number().positive().optional(),
-    resolution: z.string().min(1).optional(),
-    ratio: z.enum(ratioOptions).optional(),
-    mode: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
-    generateAudio: z.boolean().optional(),
-  }).refine((args) => (args.providerId === undefined) === (args.modelId === undefined), "providerId 与 modelId 必须同时提供"),
-  async execute(args, { signal }) {
-    signal?.throwIfAborted();
-    if (generating.value || deleting.value) throw new Error("节点正在生成或删除，请稍后修改配置");
-    await loadModels();
-    signal?.throwIfAborted();
-    if (generating.value || deleting.value) throw new Error("节点正在生成或删除，请稍后修改配置");
-    const choice = args.modelId === undefined ? selectedModel.value
-      : models.value.find((item) => item.providerId === args.providerId && item.modelId === args.modelId);
-    if (!choice) throw new Error("请选择 getConfig 返回的有效视频模型");
-    const durations = getDurations(choice);
-    if (args.duration !== undefined && !durations.includes(args.duration)) throw new Error(`当前模型不支持时长 ${args.duration}，可选：${durations.join("、")}`);
-    const duration = args.duration ?? (durations.includes(data.value.duration!) ? data.value.duration : durations[0]);
-    const resolutions = getResolutions(choice, duration);
-    if (args.resolution !== undefined && !resolutions.includes(args.resolution)) throw new Error(`当前时长不支持分辨率 ${args.resolution}，可选：${resolutions.join("、")}`);
-    const resolution = args.resolution ?? (resolutions.includes(data.value.resolution) ? data.value.resolution : resolutions[0] ?? "");
-    if (args.mode !== undefined && !getMatchingModes(choice).some((item) => JSON.stringify(item) === JSON.stringify(args.mode))) throw new Error("所选模式不受当前模型支持或不适用于当前引用，请根据模型能力及已连接素材选择");
-    if (args.generateAudio !== undefined && choice.audio !== "optional" && args.generateAudio !== (choice.audio === true)) throw new Error("当前模型不支持切换声音，请查看 getConfig 返回的 audio 能力");
-    data.value.model = JSON.stringify([choice.providerId, choice.modelId]);
-    data.value.duration = duration;
-    data.value.resolution = resolution;
-    if (args.ratio !== undefined) data.value.ratio = args.ratio;
-    if (args.mode !== undefined) data.value.mode = JSON.stringify(args.mode);
-    if (args.generateAudio !== undefined) data.value.generateAudio = args.generateAudio;
-    return getConfig();
-  },
-});
-
-nodeTools.register({
-  name: "setPrompt",
-  description: "修改此节点的视频生成提示词，支持 {{ref 1}} 等参考标记；只修改提示词，不启动生成",
-  parameters: z.strictObject({ prompt: z.string() }),
-  execute({ prompt: value }) {
-    if (deleting.value) throw new Error("节点正在删除，请稍后修改");
-    data.value.prompt = value;
-    data.value.promptModel = value.split("\n").map((text) => [{ type: "Write", text }]);
-    return { prompt: value };
-  },
-});
-
-nodeTools.register({
-  name: "generateVideo",
-  description: "启动此节点的后台视频生成，使用当前提示词、模型、模式、时长、分辨率、比例和参考素材；立即返回已开始，用 getGenerationStatus 查询完成结果，cancelGeneration 停止生成",
-  parameters: z.strictObject({}),
-  execute(_args, { signal }) {
-    signal?.throwIfAborted();
-    return startGeneration();
-  },
-});
+onScopeDispose(() => { disposed = true; clearTimeout(promptTimer); clearTimeout(pollTimer); });
 </script>
 
 <style scoped lang="scss">

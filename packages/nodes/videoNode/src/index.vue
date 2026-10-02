@@ -47,15 +47,14 @@
 import { computed, nextTick, ref } from "vue";
 import { IconVideo, IconUpload, IconTransfer } from "@tabler/icons-vue";
 import { ElButton, ElMessage, ElProgress } from "element-plus";
-import { nodeSkeleton, nodeTools, useNode, z, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { nodeSkeleton, useNode } from "@toonflow/nodes-scaffold/runtime";
 import videoPlayer from "@toonflow/nodes-scaffold/videoPlayer";
 
 defineOptions({
   inheritAttrs: false,
   icon: IconVideo,
-  handles: [{ id: "video", type: "source", dataType: "VIDEO", label: "视频输出" }] satisfies NodeHandle[],
 });
-const { node, nodeProps, outputs, nodeEvent, files, updateNodeInternals } = useNode({
+const { node, nodeProps, outputs, execution, files, updateNodeInternals } = useNode({
   label: "视频",
 });
 const fileInput = ref<HTMLInputElement>();
@@ -70,41 +69,6 @@ const previewUrl = files.useFileUrl(
   outputFile,
   (error) => showError(error, "视频读取失败")
 );
-
-nodeEvent.on("save", (reason) => {
-  if (uploading.value) throw new Error("视频处理中，请完成后再切换或刷新节点");
-  if (reason === "reload" && exporting.value) throw new Error("视频正在导出，请完成后再刷新节点");
-});
-nodeEvent.on("delete", () => {
-  if (uploading.value) throw new Error("视频上传中，请稍后删除节点");
-  uploading.value = true;
-  return files.removeNodeFiles().finally(() => {
-    uploading.value = false;
-  });
-});
-
-nodeTools.register({
-  name: "setVideo",
-  description: "选择工作区内已有的视频文件作为此节点的输出，path 使用工作区相对路径",
-  parameters: z.strictObject({
-    path: z.string().min(1).max(4096),
-    mimeType: z.string().regex(/^video\/[a-zA-Z0-9.+-]+$/),
-  }),
-  async execute({ path, mimeType }, { signal }) {
-    signal?.throwIfAborted();
-    if (uploading.value || exporting.value) throw new Error("视频处理中，请稍后重试");
-    uploading.value = true;
-    try {
-      const content = await files.getWorkspaceFiles().read(path);
-      signal?.throwIfAborted();
-      if (!content.byteLength || content.byteLength > 100 * 1024 * 1024) throw new Error("视频不能为空且不能超过 100 MB");
-      outputs.value.video = { dataType: "VIDEO", value: { url: path, mimeType } };
-      return outputs.value.video;
-    } finally {
-      uploading.value = false;
-    }
-  },
-});
 
 async function resizeVideo(event: Event) {
   const video = event.currentTarget as HTMLVideoElement;
@@ -121,11 +85,17 @@ async function uploadVideo(event: Event) {
   if (!file || uploading.value || exporting.value) return;
   if (!file.type.startsWith("video/")) return void ElMessage.error("请选择视频文件");
   if (!file.size || file.size > 100 * 1024 * 1024) return void ElMessage.error("视频不能为空且不能超过 100 MB");
+  const stagedPath = `assets/uploads/${crypto.randomUUID()}`;
   uploading.value = true;
   try {
-    const url = await files.uploadFile(file);
-    // ACT: 复制节点可能仍引用旧视频，替换输出不删除共享文件。
-    outputs.value.video = { dataType: "VIDEO", value: { url, mimeType: file.type } };
+    const workspaceFiles = files.getWorkspaceFiles();
+    for (const path of ["assets", "assets/uploads"]) {
+      await workspaceFiles.mkdir(path).catch((error: { response?: { data?: { data?: { code?: string } } } }) => {
+        if (error.response?.data?.data?.code !== "EEXIST") throw error;
+      });
+    }
+    await workspaceFiles.write(stagedPath, file, true);
+    await execution.call("uploadVideo", { stagedPath, name: file.name, mimeType: file.type });
   } catch (error) {
     showError(error, "视频替换失败");
   } finally {
