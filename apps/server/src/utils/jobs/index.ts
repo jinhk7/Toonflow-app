@@ -50,7 +50,7 @@ type JobRecord = {
   activationRequired: number;
 };
 
-const handlers = new Map<string, { handler: JobHandler; recoveryMode: "safe" | "review"; revision: string }>();
+const handlers = new Map<string, { handler: JobHandler; recoveryMode: "safe" | "review"; revision: string; canResumeResult?: (result: unknown) => boolean }>();
 const activeJobs = new Map<string, AbortController>();
 const committingJobs = new Set<string>();
 const listeners = new Map<string, Set<(event: NodeJobEvent) => void>>();
@@ -138,11 +138,14 @@ function view(record: JobRecord): NodeJobView {
   };
 }
 
-function canResume(record: JobRecord) {
+function canContinue(record: JobRecord) {
   const registered = handlers.get(record.kind);
-  return record.recoveryMode === "safe" && registered?.recoveryMode === "safe"
-    && record.handlerRevision === registered.revision && !record.activationRequired
-    && (record.status === "failed" || record.status === "needsReview");
+  if (!registered || record.recoveryMode !== registered.recoveryMode || record.handlerRevision !== registered.revision || record.activationRequired) return false;
+  return record.recoveryMode === "safe" || !!registered.canResumeResult?.(record.resultJson === null ? undefined : JSON.parse(record.resultJson));
+}
+
+function canResume(record: JobRecord) {
+  return (record.status === "failed" || record.status === "needsReview") && canContinue(record);
 }
 
 function jobSummary(record: JobRecord) {
@@ -303,10 +306,10 @@ function startJob(jobId: string) {
   });
 }
 
-export function registerNodeJobHandler(kind: string, handler: JobHandler, recoveryMode: "safe" | "review", handlerRevision?: string) {
+export function registerNodeJobHandler(kind: string, handler: JobHandler, recoveryMode: "safe" | "review", handlerRevision?: string, canResumeResult?: (result: unknown) => boolean) {
   if (handlers.has(kind)) throw new Error(`任务处理器已注册：${kind}`);
   const revision = handlerRevision ?? createHash("sha256").update(handler.toString()).digest("hex");
-  handlers.set(kind, { handler, recoveryMode, revision });
+  handlers.set(kind, { handler, recoveryMode, revision, canResumeResult });
   if (ready) void ready.then(() => {
     const records = database().prepare("SELECT jobId FROM node_jobs WHERE kind = ? AND status = 'accepted'")
       .all(kind) as { jobId: string }[];
@@ -383,9 +386,7 @@ export function activateNodeJob(jobId: string): NodeJobView {
 export function resumeNodeJob(jobId: string): NodeJobView {
   const record = getRecord(jobId);
   if (!record) throw Object.assign(new Error("任务不存在"), { status: 404 });
-  const registered = handlers.get(record.kind);
-  if (record.recoveryMode !== "safe" || registered?.recoveryMode !== "safe"
-    || record.handlerRevision !== registered.revision || record.activationRequired)
+  if (!canContinue(record))
     throw Object.assign(new Error("任务不能安全恢复，请核对原任务和执行器版本"), { status: 409 });
   if (record.status === "accepted" || record.status === "running") {
     startJob(jobId);

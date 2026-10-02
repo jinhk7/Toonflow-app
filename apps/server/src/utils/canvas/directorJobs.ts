@@ -11,7 +11,7 @@ import { getNodeExecutionArtifact, getNodeExecutionModule, loadNodeExecution } f
 import { getNodeConfig, readNode } from "@/utils/plugins/nodes";
 import { readGraph, modifyGraph, type GraphChange } from "@/utils/workspace/graph";
 import { resolveWorkspacePath, writeWorkspaceFile } from "@/utils/workspace/files";
-import { writeVersionedContent } from "@/utils/canvas/content";
+import { readVersionedContent, writeVersionedContent } from "@/utils/canvas/content";
 import { getGraphWrite, requestDigest } from "@/utils/canvas/store";
 
 const revisionSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -113,7 +113,11 @@ async function draftHandler(raw: Record<string, unknown>, context: NodeJobContex
     const saved = await writeVersionedContent({ directory: context.directory, path: result.modelPath,
       content: JSON.stringify(result.document, null, 2), expectedRevision: result.expectedRevision, commandId: `${host.commandId}:model` });
     context.saveResult({ ...checkpoint, phase: "contentPublished", modelRevision: saved.revision });
+    if ((await readVersionedContent(context.directory, result.modelPath)).revision !== saved.revision) {
+      needsReview("导演正文在提交后已被修改，保留草稿，未覆盖后续编辑或发布旧方案");
+    }
     await modifyGraph(target.path, publishId(host, "directorDraft"), [{ kind: "node", id: host.nodeId,
+      ...(host.parentNode ? { dependencies: { [host.parentNode]: host.parentVersion! } } : {}),
       expectedVersion: host.expectedNodeVersion, value: { ...target.node, data: { ...target.node.data,
         modelRevision: saved.revision, modelSnapshot: null, selectedPlanId: result.selectedPlanId } } }], context.directory);
     return { ...checkpoint, phase: "published", modelRevision: saved.revision };
@@ -198,6 +202,8 @@ export function registerDirectorNodeJobHandlers() {
   const sharedRevision = [checkConfig.toString(), readTarget.toString(), published.toString(), saveCheckpoint.toString(), z.toJSONSchema(hostSchema)];
   // 镜头 ID 的随机默认值属于入参规范化，不能让相同执行器每次启动产生不同版本。
   const renderSchema = z.toJSONSchema(renderJobSchema, { override(context) { delete context.jsonSchema.default; } });
-  registerNodeJobHandler("directorDraft", draftHandler, "review", requestDigest([...sharedRevision, draftHandler.toString(), streamAi.toString(), createConfiguredAiModel.toString()]));
+  // 仅已有生成成果可手动继续发布；没有 checkpoint 的审核型任务仍禁止重调模型。
+  const canResumeDraft = (result: unknown) => z.object({ kind: z.literal("directorDraft"), phase: z.enum(["generated", "contentPublished"]), document: z.record(z.string(), z.unknown()) }).safeParse(result).success;
+  registerNodeJobHandler("directorDraft", draftHandler, "review", requestDigest([...sharedRevision, draftHandler.toString(), streamAi.toString(), createConfiguredAiModel.toString(), canResumeDraft.toString()]), canResumeDraft);
   registerNodeJobHandler("render", renderHandler, "safe", requestDigest([...sharedRevision, renderHandler.toString(), createRenderer.toString(), renderSchema]));
 }

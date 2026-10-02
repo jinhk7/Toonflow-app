@@ -13,7 +13,7 @@
 - POST /api/agent/accept：保留 /api/agent 的原输入，增加 clientMessageId；返回 runId、sessionFile、重复受理标记，再订阅既有 /api/agent/events/get。
 - GET /api/agent/accept/get：directory、clientMessageId；查询受理记录。
 - GET /api/jobs/get、GET /api/jobs/list、POST /api/jobs/cancel、GET /api/jobs/events：持久本地节点/FFmpeg/渲染任务。既有媒体接口和账本保留，jobId 可关联其任务。
-- POST /api/jobs/resume：`{directory,jobId,confirmed:true}`；仅恢复处理器版本匹配、已完成绑定的 safe 任务，保留原输入、commandId 和结果。只有 `canResume:true` 的 failed/needsReview 任务提供入口，不自动重提模型或供应商生成。
+- POST /api/jobs/resume：`{directory,jobId,confirmed:true}`；仅恢复处理器版本匹配、已完成绑定的任务：safe 任务，或处理器明确允许复用已有成果的 review 任务。保留原输入、commandId 和结果。只有 `canResume:true` 的 failed/needsReview 任务提供入口，不自动重提模型或供应商生成。
 - POST /api/ai/explain：`{directory,commandId,message,context?}`；返回持久 text 作业，固定首次受理模型配置与解释输入，同命令重复请求返回原任务。
 - POST /api/workspaces/canvas/modify：原 Graph 批量修改接口继续使用协议头 `X-Toonflow-Protocol: 2`；新增/删除的 lifecycle 在同一个持久 canvasModify 作业内执行。
 
@@ -24,6 +24,8 @@ CanvasCommand name 沿用现有 canvasOperations。nodeTools 参数沿用 nodeId
 查询快照提供 cursor，必须与返回内容同一逻辑边界。WorkspaceEvent 为 {seq,eventId,directory,commandId?,canvasId?,nodeId?,type,payload,createdAt}；type 包括 graphChanged/contentChanged/jobChanged/pluginsChanged/uiIntent。事件用于显示，不触发客户端执行。AgentEvent 协议继续沿用，移除对 canvasCall 客户端执行的依赖。
 
 子/孙会话的 eventCursor.runId 指向所属 root run，afterSeq 使用该 run 的全局序号；客户端过滤当前子会话内容，但推进所有收到事件的序号。完成会话继续返回游标，activeRun 仅在所属运行未完成时存在。父会话发起新运行不改变旧子会话归属。
+
+审批范围包括实际节点输入快照、正文内容/版本和引用媒体摘要。消费授权与执行共用同一服务端快照，客户端不能注入。新工具调用消费原调用的授权时，仅原明确来源调用记为已替代并禁止重播；执行结果仍记录于实际调用，不批量结清同类待授权项。
 
 ## 节点模块
 
@@ -54,6 +56,8 @@ NodeJobRequest {kind,input,pluginRevision?,nodeId?,canvasPath?}。kind 按后端
 NodeJobView.summary 提供从固定输入抽取的展示信息（指令、格式、锚点等），不公开供应商密钥。beginCommit 只保护最终发布阶段；进入该阶段后取消返回当前运行状态，避免已写产物却报告取消。此前取消仍中止工作。媒体包装任务的取消仅停止观察，客户端仍查询原媒体任务，明确区分供应商状态与 observerStatus。
 
 directorDraft 与 render 的持久输入为 `{payload,host}`：payload 是业务快照，host 固定命令、节点/画布版本、配置摘要、插件 revision、父分组版本，以及 AI 配置/引用或渲染 worker/输出节点 revision。directorDraft 为 review 恢复策略，render 为 safe。生成成果先写 checkpoint，再 CAS 发布；目标变化时进入 needsReview，保留结果，不覆盖后续编辑。
+
+directorDraft 已保存 generated/contentPublished checkpoint 时可显式继续发布，不再调用模型；没有成果或处理器版本变化仍拒绝恢复。Graph 提交锁内校验全部声明的节点依赖。文本发布持 Graph 锁核对画布身份、节点执行版本、正文路径和 generationJobId，再完成正文 CAS；目标已删除或绑定变化时保留文本供核对。
 
 渲染 worker 输入 RenderJobInput：scene、plan、anchor、lighting、settings、aspect、width、height、frameRate、time、duration、format（image/video）、assets。所有资产都是后端预先校验的任务快照引用。
 

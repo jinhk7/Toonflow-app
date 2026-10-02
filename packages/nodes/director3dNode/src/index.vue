@@ -187,7 +187,6 @@ async function generate() {
     instructions.set(job.jobId, instruction);
     jobs.value = [...jobs.value.filter(item => item.jobId !== job.jobId), job];
     ++jobVersion;
-    setPrompt("");
     void loadJobs();
   } catch (error) { showError(error); }
   finally { if (!disposed) request.value = ""; }

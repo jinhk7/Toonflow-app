@@ -6,7 +6,7 @@ import type { Request, Response, NextFunction } from "express";
 import buildRoute from "@/core";
 import { error } from "@/lib/responseFormat";
 import desktopRequest from "@/lib/desktop";
-import initializePlugins from "@/utils/plugins/initialize";
+import initializePlugins, { initializeNodePlugins } from "@/utils/plugins/initialize";
 
 const autoInstallProviders = ["tfRouter.ts", "apiMart.ts", "meta.ts"];
 
@@ -33,7 +33,7 @@ export async function createApp({
   if (dataDirectory) process.env.TOONFLOW_DATA_DIR = resolve(dataDirectory);
   if (dataDirectory && toolsRoot)
     await initializePlugins(resolve(dataDirectory, "tools"), toolsRoot, /^[a-z][a-zA-Z0-9]*\.tool\.js$/, pluginRevision);
-  if (dataDirectory && nodesRoot) await initializePlugins(resolve(dataDirectory, "nodes"), nodesRoot, /^[a-z][a-zA-Z0-9]*\.(umd|node|render)\.js$/, pluginRevision);
+  if (dataDirectory && nodesRoot) await initializeNodePlugins(resolve(dataDirectory, "nodes"), nodesRoot, pluginRevision);
   const { configureBuiltinCanvasTools } = await import("@/utils/plugins/tools");
   await configureBuiltinCanvasTools(toolsRoot);
   const { configureBuiltinNodes } = await import("@/utils/plugins/nodes");

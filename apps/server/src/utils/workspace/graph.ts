@@ -174,7 +174,8 @@ export async function readGraphUnlocked(path: string, directory = dirname(path),
   if (!graph.toonflowGraph) {
     graph.toonflowGraph = state(graph);
     const digest = contentHash(content);
-    await persistGraph(path, directory, `initialize:${contentHash(`${graphRelativePath(path, directory)}\0${content}`)}`, digest, content, graph);
+    // 画布身份先随写入意图持久化；恢复复用该身份，同路径新建画布使用独立生命周期。
+    await persistGraph(path, directory, `initialize:${graph.toonflowGraph.id}`, digest, content, graph);
   }
   return graph;
 }
@@ -247,6 +248,9 @@ export async function modifyGraph(path: string, operationId: string, changes: Gr
     for (const change of changes) {
       const key = change.kind === "viewport" ? "viewport" : change.kind === "output" ? JSON.stringify([change.nodeId, change.slot]) : `${change.kind}:${change.id}`;
       if (change.kind === "node" || change.kind === "edge") {
+        for (const [id, version] of Object.entries(change.dependencies ?? {})) {
+          if (version !== (originalNodeVersions[id] ?? 0)) invalid(`版本冲突：依赖节点 ${id} 已变化`, 409);
+        }
         const related = change.kind === "edge"
           ? [change.value ? (change.value as Edge).source : originalEdges.get(change.id)?.source,
             change.value ? (change.value as Edge).target : originalEdges.get(change.id)?.target]

@@ -447,12 +447,20 @@ export function listPendingAuthorizations(runId: string) {
   const run = getAgentRun(runId);
   if (!run) return [];
   const rows = getAgentRunDatabase().prepare("SELECT toolCallId, name, argsJson FROM agent_tool_calls WHERE runId = ? AND status = 'pendingAuthorization' ORDER BY createdAt").all(runId) as { toolCallId: string; name: string; argsJson: string }[];
-  const grants = new Map((getAgentRunDatabase().prepare("SELECT scopeKey, remaining FROM agent_authorizations WHERE runId = ?").all(runId) as { scopeKey: string; remaining: number }[])
-    .map(row => [row.scopeKey, row.remaining]));
-  return rows.map(row => {
+  const grants = new Map((getAgentRunDatabase().prepare("SELECT scopeKey, remaining, scopeJson FROM agent_authorizations WHERE runId = ?").all(runId) as { scopeKey: string; remaining: number; scopeJson: string }[])
+    .map(row => [row.scopeKey, { remaining: row.remaining, sourceToolCallId: (JSON.parse(row.scopeJson) as { sourceToolCallId?: string }).sourceToolCallId }]));
+  const calls = rows.map(row => {
     const args = JSON.parse(row.argsJson) as unknown;
     return { toolCallId: row.toolCallId, toolName: row.name, args, modelId: run.modelId, scopeKey: authorizationScopeKey(row.name, args, run.modelId) };
-  }).filter(call => requiresToolAuthorization(call.toolName, call.args, storedToolContext(run, call.args)) && (grants.get(call.scopeKey) ?? 0) < 1);
+  });
+  const counts = new Map<string, number>();
+  for (const call of calls) counts.set(call.scopeKey, (counts.get(call.scopeKey) ?? 0) + 1);
+  return calls.filter(call => {
+    if (!requiresToolAuthorization(call.toolName, call.args, storedToolContext(run, call.args))) return false;
+    const grant = grants.get(call.scopeKey);
+    if (!grant || grant.remaining < 1) return true;
+    return grant.sourceToolCallId ? grant.sourceToolCallId !== call.toolCallId : counts.get(call.scopeKey) !== 1;
+  });
 }
 
 export function grantAuthorization(runId: string, toolCallId: string, remaining = 1) {
@@ -465,7 +473,7 @@ export function grantAuthorization(runId: string, toolCallId: string, remaining 
     throw Object.assign(new Error("没有可授权的待执行工具调用"), { status: 409 });
   if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 1000) throw Object.assign(new Error("授权次数无效"), { status: 400 });
   const scopeKey = authorizationScopeKey(call.name, args, run.modelId);
-  const scope = { toolName: call.name, modelId: run.modelId, inputDigest: scopeKey.slice(5) };
+  const scope = { toolName: call.name, modelId: run.modelId, inputDigest: scopeKey.slice(5), sourceToolCallId: toolCallId };
   getAgentRunDatabase().prepare(`
     INSERT INTO agent_authorizations (id, runId, scopeKey, scopeJson, remaining, createdAt)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -481,11 +489,27 @@ export function requireSideEffectAuthorization(runId: string, toolName: string, 
   const scopeKey = authorizationScopeKey(toolName, args, run.modelId);
   getAgentRunDatabase().transaction(() => {
     const db = getAgentRunDatabase();
-    const authorization = db.prepare("SELECT remaining FROM agent_authorizations WHERE runId = ? AND scopeKey = ?").get(runId, scopeKey) as { remaining: number } | undefined;
+    const authorization = db.prepare("SELECT remaining, scopeJson FROM agent_authorizations WHERE runId = ? AND scopeKey = ?").get(runId, scopeKey) as { remaining: number; scopeJson: string } | undefined;
     if (!authorization || authorization.remaining < 1)
       throw Object.assign(new Error(`工具 ${toolName} 尚未授权，请核对精确输入和模型`), { code: "AGENT_NEEDS_AUTHORIZATION", status: 403, toolCallId });
+    const scope = JSON.parse(authorization.scopeJson) as { sourceToolCallId?: string };
+    if (!scope.sourceToolCallId) {
+      const candidates = (db.prepare("SELECT toolCallId, argsJson FROM agent_tool_calls WHERE runId = ? AND name = ? AND status = 'pendingAuthorization' AND toolCallId <> ?")
+        .all(runId, toolName, toolCallId) as { toolCallId: string; argsJson: string }[])
+        .filter(call => authorizationScopeKey(toolName, JSON.parse(call.argsJson), run.modelId) === scopeKey);
+      if (candidates.length > 1) throw Object.assign(new Error("旧授权对应多个待执行调用，请重新批准具体调用"), { code: "AGENT_NEEDS_AUTHORIZATION", status: 403, toolCallId });
+      scope.sourceToolCallId = candidates[0]?.toolCallId ?? toolCallId;
+      db.prepare("UPDATE agent_authorizations SET scopeJson = ? WHERE runId = ? AND scopeKey = ?").run(JSON.stringify(scope), runId, scopeKey);
+    }
+    const source = getToolCallRecord(scope.sourceToolCallId);
+    if (!source || source.runId !== runId || source.name !== toolName || authorizationScopeKey(toolName, JSON.parse(source.argsJson ?? "null"), run.modelId) !== scopeKey)
+      throw Object.assign(new Error("授权来源调用已变化，请重新批准"), { code: "AGENT_NEEDS_AUTHORIZATION", status: 403, toolCallId });
+    const started = db.prepare("UPDATE agent_tool_calls SET status = 'started', updatedAt = ? WHERE toolCallId = ? AND runId = ? AND status = 'pendingAuthorization'").run(nowIso(), toolCallId, runId);
+    if (!started.changes) throw Object.assign(new Error("待执行调用已变化"), { status: 409 });
     db.prepare("UPDATE agent_authorizations SET remaining = remaining - 1 WHERE runId = ? AND scopeKey = ?").run(runId, scopeKey);
-    db.prepare("UPDATE agent_tool_calls SET status = 'started', updatedAt = ? WHERE toolCallId = ? AND runId = ? AND status = 'pendingAuthorization'").run(nowIso(), toolCallId, runId);
+    if (source.toolCallId !== toolCallId && source.status === "pendingAuthorization") {
+      recordToolCallFinish(source.toolCallId, "skipped", { supersededBy: toolCallId, noReplay: true, reason: "authorizationConsumed" });
+    }
   })();
 }
 

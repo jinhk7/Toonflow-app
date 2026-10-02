@@ -1,4 +1,5 @@
 import { mkdir, readFile, readdir } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join, relative } from "node:path";
 import { z } from "zod";
 import type { CanvasContext, NodeToolInfo, NodeToolsContext, MediaGenerationRequest, MediaReference } from "@toonflow/tools-scaffold/runtime";
@@ -25,7 +26,12 @@ type Graph = Awaited<ReturnType<typeof readGraph>>;
 type Node = Graph["nodes"][number];
 type BackendCommand = CanvasCommand & { inputSnapshot?: NodeInputSnapshot };
 export type NodeLifecycleInput = { directory: string; canvasPath: string; commandId: string; hook: "initialize" | "remove"; node: NodeExecutionSnapshot; revision: string; config?: Record<string, unknown> };
-type BackendCanvasContext = CanvasContext & { canvasPath: string; runNodeLifecycle(input: NodeLifecycleInput, signal?: AbortSignal): Promise<void> };
+type BackendCanvasContext = CanvasContext & {
+  canvasPath: string;
+  runNodeLifecycle(input: NodeLifecycleInput, signal?: AbortSignal): Promise<void>;
+  captureNodeToolSnapshot(nodeId: string, name: string, expectedNodeRevision?: string, signal?: AbortSignal): Promise<NodeInputSnapshot>;
+  executeWithNodeToolSnapshot<T>(commandId: string, snapshot: NodeInputSnapshot, callback: () => Promise<T>): Promise<T>;
+};
 const running = new Map<string, Promise<CanvasCommandResult>>();
 let recovered = false;
 
@@ -82,6 +88,8 @@ export async function createBackendCanvasContext(directory: string, target?: { i
   let canvases: { id: string; name: string; graph: Graph }[] = [];
   let selected = new Set(target?.selectedNodeIds ?? []);
   const contextId = options.runId ?? options.clientId ?? cwd;
+  const capturedTools = new WeakMap<NodeInputSnapshot, { canvasPath: string; nodeId: string; name: string }>();
+  const approvedTool = new AsyncLocalStorage<{ commandId: string; snapshot: NodeInputSnapshot; canvasPath: string; name: string }>();
 
   async function refresh() {
     descriptors = await listNodeExecutions();
@@ -294,13 +302,18 @@ export async function createBackendCanvasContext(directory: string, target?: { i
     let node = deleted ?? frozen?.node ?? snapshot(current, requireNode(nodeId));
     const outputVersions = { ...current.toonflowGraph!.outputs };
     const metadata = await readNode(nodeType(node.type));
+    function jobForNode(jobId: string) {
+      const job = getNodeJob(jobId);
+      return job?.directory === cwd && job.nodeId === nodeId && job.canvasPath === canvasPath ? job : undefined;
+    }
     function mediaForJob(jobId: string) {
       const local = getNodeJob(jobId);
-      if (local && local.directory !== cwd) return;
+      if (local && (!jobForNode(jobId) || local.kind !== "media")) return;
       const mediaJobId = local ? getNodeJobRequest(jobId)?.input.mediaJobId : jobId;
       if (typeof mediaJobId !== "string") return;
       const media = getMediaJob(mediaJobId) ?? getMediaJobByIdempotency(cwd, mediaJobId);
-      return media?.workspaceDirectory === cwd ? media : undefined;
+      return media?.workspaceDirectory === cwd && media.nodeId === nodeId && media.canvasPath === canvasPath
+        && media.canvasId === requireGraph().toonflowGraph!.id ? media : undefined;
     }
     const context: NodeExecutionContext = {
       directory: cwd, canvasPath, commandId: command.commandId, revision, get node() { return node; }, config: config ?? frozen?.config ?? getNodeConfig(metadata), signal,
@@ -358,7 +371,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
             if (reference.dataType === "STRING" || !frozen?.files[reference.value.url]) return [readAiReferences(cwd, [reference], signal).then(items => items[0]!)];
             return [readAiReferences(frozen.directory, [{ ...reference, value: { ...reference.value, url: frozen.files[reference.value.url]! } }], signal).then(items => items[0]!)];
           }));
-          input = { ...input, referenceContents: references, configuredRevision: requestDigest(getConfiguredModel(parsed.providerId, parsed.modelId)), ...(parsed.path ? { expectedRevision: request.input.expectedRevision ?? (await context.readText(parsed.path)).revision } : {}) };
+          input = { ...input, canvasId: current.toonflowGraph!.id, referenceContents: references, configuredRevision: requestDigest(getConfiguredModel(parsed.providerId, parsed.modelId)), ...(parsed.path ? { expectedRevision: request.input.expectedRevision ?? (await context.readText(parsed.path)).revision } : {}) };
         } else if (request.kind === "directorDraft" || request.kind === "render") {
           const loaded = await loadNodeExecution(nodeType(node.type), revision);
           const host: Record<string, unknown> = {
@@ -434,8 +447,8 @@ export async function createBackendCanvasContext(directory: string, target?: { i
         }
         return deferStart ? activateNodeJob(job.jobId) : job;
       },
-      async getJob(jobId) { const job = getNodeJob(jobId); return job?.directory === cwd ? job : undefined; },
-      async cancelJob(jobId) { if (getNodeJob(jobId)?.directory !== cwd) return; return cancelNodeJob(jobId); },
+      async getJob(jobId) { return jobForNode(jobId); },
+      async cancelJob(jobId) { if (!jobForNode(jobId)) return; return cancelNodeJob(jobId); },
       async getMediaJob(jobId) { const media = mediaForJob(jobId); return media ? { ...media, files: media.files as never, errorMessage: media.errorMessage } : undefined; },
       async retryMediaCollection(jobId) {
         const media = mediaForJob(jobId);
@@ -445,7 +458,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
         await context.patchData({ generationJobId: job.jobId });
         return { ...retried, files: retried.files as never };
       },
-      async waitForJob(jobId) { if (getNodeJob(jobId)?.directory !== cwd) throw Object.assign(new Error("任务不存在"), { status: 404 }); return waitForNodeJob(jobId, signal); },
+      async waitForJob(jobId) { if (!jobForNode(jobId)) throw Object.assign(new Error("任务不存在"), { status: 404 }); return waitForNodeJob(jobId, signal); },
     };
     return context;
   }
@@ -455,10 +468,19 @@ export async function createBackendCanvasContext(directory: string, target?: { i
     if (!schema) throw Object.assign(new Error("未知画布命令"), { status: 400 });
     const request = { name: input.name, args: schema.parse(input.args) } as CanvasRequest;
     const command: BackendCommand = options.command ?? { commandId: input.commandId ?? crypto.randomUUID(), directory: cwd, canvasPath, name: input.name, args: request.args, clientContext: { clientId: contextId, selectedNodeIds: [...selected] } };
-    if (options.command || isCanvasRead(request.name)) return execute(request, command, signal);
     const identity = structuredClone(command);
+    const approved = approvedTool.getStore();
+    if (approved && request.name === "nodeTools") {
+      if (command.commandId !== approved.commandId || canvasPath !== approved.canvasPath
+        || request.args.nodeId !== approved.snapshot.node.id || request.args.name !== approved.name
+        || (request.args.expectedNodeRevision && request.args.expectedNodeRevision !== approved.snapshot.revision)) {
+        throw Object.assign(new Error("审批快照与执行目标不一致，请重新审批"), { status: 409 });
+      }
+      command.inputSnapshot = structuredClone(approved.snapshot);
+    }
+    if (options.command || isCanvasRead(request.name)) return execute(request, command, signal);
     const previous = getCanvasCommand(cwd, command.commandId);
-    if (!previous && request.name === "nodeTools") { await refresh(); command.inputSnapshot = await captureNodeInputs(cwd, canvasPath, requireGraph(), request.args.nodeId, request.args.expectedNodeRevision, request.args.name); }
+    if (!previous && request.name === "nodeTools" && !command.inputSnapshot) { await refresh(); command.inputSnapshot = await captureNodeInputs(cwd, canvasPath, requireGraph(), request.args.nodeId, request.args.expectedNodeRevision, request.args.name); }
     if (!acceptCanvasCommand(command, identity)) {
       const existing = getCanvasCommand(cwd, command.commandId)!;
       if (existing.status === "completed") return existing.result;
@@ -478,6 +500,27 @@ export async function createBackendCanvasContext(directory: string, target?: { i
   await refresh();
   return {
     get id() { return canvasPath || "unselected"; }, get canvasPath() { return canvasPath; }, get tools() { return nodeTools.tools; }, getNodeLabel: id => String(graph?.nodes.find(node => node.id === id)?.data?.label ?? id), call,
+    async captureNodeToolSnapshot(nodeId, name, expectedNodeRevision, signal = new AbortController().signal) {
+      await refresh();
+      signal.throwIfAborted();
+      const snapshot = await captureNodeInputs(cwd, canvasPath, requireGraph(), nodeId, expectedNodeRevision, name);
+      // 权威正文不一定通过 readOutputs 暴露；沿用节点已声明的正文路径，避免执行时重新读最新文件。
+      for (const field of ["textPath", "modelPath"]) {
+        const path = snapshot.node.data[field];
+        if (typeof path === "string" && path && !snapshot.texts[path]) snapshot.texts[path] = await readVersionedContent(cwd, path);
+      }
+      signal.throwIfAborted();
+      capturedTools.set(snapshot, { canvasPath, nodeId, name });
+      return snapshot;
+    },
+    async executeWithNodeToolSnapshot(commandId, snapshot, callback) {
+      const captured = capturedTools.get(snapshot);
+      if (!captured || captured.canvasPath !== canvasPath || captured.nodeId !== snapshot.node.id) {
+        throw Object.assign(new Error("审批快照不属于当前画布上下文"), { status: 409 });
+      }
+      capturedTools.delete(snapshot);
+      return approvedTool.run({ commandId, snapshot, canvasPath: captured.canvasPath, name: captured.name }, callback);
+    },
     async runNodeLifecycle(input, signal = new AbortController().signal) {
       await refresh();
       signal.throwIfAborted();

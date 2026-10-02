@@ -2,6 +2,8 @@
 
 工作树：`C:\Users\jinhk\AppData\Local\Temp\toonflowBackendSeparation20261002`，分支 `feat/backendSeparation`。原项目与生产数据、服务均未用于验证。
 
+以下为第一轮实际验证记录，不代表验收。独立审查随后在 `a94a990` 发现遗漏；对应修复及逐项回归见 [reviewFixes.md](./reviewFixes.md)，本轮修复仍需再次独立复审。
+
 ## 已完成
 
 - Server TypeScript 完整检查通过；路由由原 `src/core.ts` 生成。

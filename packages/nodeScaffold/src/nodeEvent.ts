@@ -78,16 +78,16 @@ export function useNodeEvent(nodeId = useNodeId(), canvas = useVueFlow()) {
     }
     if (args[0] === "copy") {
       return (async () => {
-        const copyData = (canvas as NodeCopyHost)[nodeCopyDataKey];
-        const patch = await copyData?.(nodeId);
-        if (patch !== undefined) {
-          if ((canvas as NodeCopyHost)[nodeCopyDataKey] !== copyData) throw new Error("画布已切换，请重新复制");
-          return patch;
-        }
         const node = canvas.findNode(nodeId);
         const data: Record<string, unknown> = {};
         for (const callback of [...events?.copy ?? []]) Object.assign(data, await callback());
         if (canvas.findNode(nodeId) !== node || registry.get(nodeId) !== events) throw new Error("节点已切换，请重新复制");
+        const copyData = (canvas as NodeCopyHost)[nodeCopyDataKey];
+        const patch = await copyData?.(nodeId);
+        if (patch !== undefined) {
+          if ((canvas as NodeCopyHost)[nodeCopyDataKey] !== copyData) throw new Error("画布已切换，请重新复制");
+          return { ...data, ...patch };
+        }
         return data;
       })();
     }

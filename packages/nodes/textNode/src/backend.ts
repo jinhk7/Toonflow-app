@@ -5,13 +5,16 @@ import type { NodeOutputs } from "@toonflow/nodes-scaffold/values";
 function textPath(context: NodeExecutionContext) {
   if (!context.node.id || /[\\/]/.test(context.node.id) || context.node.id === "." || context.node.id === "..") throw new Error("节点 ID 不能作为文件夹名称");
   const path = `assets/${context.node.id}/content.md`;
-  if (context.node.data.textPath !== undefined && context.node.data.textPath !== path) throw new Error("文本文件路径无效");
+  if (context.node.data.textPath != null && context.node.data.textPath !== path) throw new Error("文本文件路径无效");
   return path;
 }
 
 async function initialize(context: NodeExecutionContext) {
   const path = textPath(context);
   if (context.node.data.textPath) return;
+  const jobId = context.node.data.generationJobId;
+  // 新节点不能继承来源节点的任务；原 ID 的撤销恢复继续保留自己的绑定。
+  if (typeof jobId === "string" && !await context.getJob(jobId)) await context.patchData({ generationJobId: null });
   const outputs = context.node.data.outputs as NodeOutputs | undefined;
   const content = context.node.data.textSnapshot ?? (outputs?.text?.dataType === "STRING" ? outputs.text.value : "");
   if (typeof content !== "string") throw new Error("文本内容无效");
@@ -49,6 +52,17 @@ const definition: NodeExecutionDefinition = {
     return { text: { dataType: "STRING", value: content } };
   },
   actions: [
+    {
+      name: "getCopyData",
+      snapshotInputs: false,
+      description: "读取权威文本生成独立复制快照，副本不继承来源节点的生成任务",
+      parameters: z.strictObject({}),
+      async execute(_args, context) {
+        await initialize(context);
+        const current = await context.readText(textPath(context));
+        return { textPath: null, textSnapshot: current.content, generationJobId: null };
+      },
+    },
     {
       name: "getText",
       snapshotInputs: false,
