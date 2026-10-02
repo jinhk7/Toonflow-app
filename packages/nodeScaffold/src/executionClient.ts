@@ -19,9 +19,10 @@ export function getExecutionClientId() { return clientId ??= crypto.randomUUID()
 
 export async function executionRequest<T>(url: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, options);
-  const payload = await response.json().catch(() => null);
+  const payload = await response.json().catch(error => { if (response.ok) throw error; return null; });
   if (!response.ok || payload?.code !== 200 && payload?.code !== 202) {
-    throw new ExecutionRequestError(payload?.message || `请求失败（${response.status}）`, response.status);
+    if (response.ok && !(payload?.code >= 400 && payload?.code <= 599)) throw new Error("服务端响应格式无效，原提交结果待确认");
+    throw new ExecutionRequestError(payload?.message || `请求失败（${response.status}）`, response.ok ? payload.code : response.status);
   }
   return payload.data as T;
 }
@@ -55,6 +56,11 @@ export async function* readExecutionEvents<T>(response: Response, signal: AbortS
   }
 }
 
+function commandReceipt(result: CanvasCommandResult, commandId: string) {
+  if (!result || result.commandId !== commandId || !["accepted", "running", "completed", "failed", "needsReview"].includes(result.status)) throw new Error("命令收据无效，原提交结果待确认");
+  return result;
+}
+
 export function createExecutionClient(directory: string) {
   if (!directory.trim()) throw new Error("请先选择工作目录");
   const query = (params: Record<string, string | number>) => new URLSearchParams({ directory, ...Object.fromEntries(Object.entries(params).map(([key, value]) => [key, String(value)])) });
@@ -62,7 +68,8 @@ export function createExecutionClient(directory: string) {
 
   async function getCommand(commandId: string, signal?: AbortSignal) {
     try {
-      return await executionRequest<CanvasCommandResult | null>(`/api/workspaces/canvas/command/get?${query({ commandId })}`, { signal });
+      const result = await executionRequest<CanvasCommandResult | null>(`/api/workspaces/canvas/command/get?${query({ commandId })}`, { signal });
+      return result === null ? null : commandReceipt(result, commandId);
     } catch (error) {
       if (error instanceof ExecutionRequestError && error.status === 404) return null;
       throw error;
@@ -75,7 +82,8 @@ export function createExecutionClient(directory: string) {
     for (let attempt = 0; attempt < 2; attempt++) {
       signal?.throwIfAborted();
       try {
-        return await executionRequest<CanvasCommandResult>("/api/workspaces/canvas/command", json(body, signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000)));
+        const result = await executionRequest<CanvasCommandResult>("/api/workspaces/canvas/command", json(body, signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000)));
+        return commandReceipt(result, body.commandId);
       } catch (error) {
         if (error instanceof ExecutionRequestError && error.status < 500) throw error;
         signal?.throwIfAborted();
@@ -88,7 +96,9 @@ export function createExecutionClient(directory: string) {
   }
 
   async function readContent(path: string, signal?: AbortSignal) {
-    return executionRequest<{ content: string; revision: string }>(`/api/workspaces/canvas/content?${query({ path })}`, { signal });
+    const result = await executionRequest<{ content: string; revision: string }>(`/api/workspaces/canvas/content?${query({ path })}`, { signal });
+    if (typeof result?.content !== "string" || !/^[a-f0-9]{64}$/.test(result.revision)) throw new Error("正文快照缺少有效内容或版本");
+    return result;
   }
 
   async function execute<T = unknown>(input: Parameters<typeof command>[0], signal?: AbortSignal): Promise<T> {
@@ -114,7 +124,9 @@ export function createExecutionClient(directory: string) {
     for (let attempt = 0; attempt < 2; attempt++) {
       signal?.throwIfAborted();
       try {
-        return await executionRequest<{ revision: string }>("/api/workspaces/canvas/content/write", { ...request, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) });
+        const result = await executionRequest<{ revision: string }>("/api/workspaces/canvas/content/write", { ...request, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) });
+        if (!result || !/^[a-f0-9]{64}$/.test(result.revision)) throw new Error("正文写入收据无效，保存结果待确认");
+        return result;
       } catch (error) {
         if (attempt || error instanceof ExecutionRequestError && error.status < 500) throw error;
       }

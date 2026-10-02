@@ -1,6 +1,7 @@
 <template>
   <section class="mobileNodeDetail" v-loading="loading">
     <mobileTopBar :title="title" :subtitle="typeLabel" :backTo="workspaceLink" />
+    <el-alert v-if="graphError || connectionError" :title="graphError || connectionError" type="warning" :closable="false" showIcon />
     <el-main v-if="node && graph" class="content">
       <el-alert v-if="conflict" :title="conflict.message" type="warning" :closable="false" showIcon />
       <details v-if="conflict?.changes" class="draftPreview"><summary>查看保留的修改草稿</summary><pre>{{ JSON.stringify(conflict.changes, null, 2) }}</pre></details>
@@ -94,7 +95,7 @@ const directory = computed(() => String(route.query.directory ?? ""));
 const canvasPath = computed(() => String(route.query.canvas ?? ""));
 const projectName = computed(() => String(route.query.name ?? "项目"));
 
-const { graph, loading, conflict, load, applyChanges } = useMobileGraph(
+const { graph, loading, error: graphError, connectionError, conflict, load, applyChanges } = useMobileGraph(
   () => directory.value,
   () => canvasPath.value,
 );

@@ -17,7 +17,7 @@ export type AgentAcceptInput = {
   attachments: { name: string; path: string; mimeType: string }[];
   canvas?: { id: string; selectedNodeIds?: string[]; tools?: unknown[] };
 };
-export type AgentAcceptResult = { runId: string; sessionFile: string; duplicate?: boolean };
+export type AgentAcceptResult = { clientMessageId: string; runId: string; sessionFile: string; duplicate?: boolean };
 const pendingPrefix = "toonflow.pendingAgent.";
 
 export function pendingAgentMessages(directory: string, sessionFile?: string) {
@@ -37,7 +37,9 @@ export function clearPendingAgentMessage(clientMessageId: string) { localStorage
 
 export async function getAcceptedAgentMessage(directory: string, clientMessageId: string, signal?: AbortSignal) {
   try {
-    return await executionRequest<AgentAcceptResult | null>(`/api/agent/accept/get?${new URLSearchParams({ directory, clientMessageId })}`, { signal });
+    const accepted = await executionRequest<AgentAcceptResult | null>(`/api/agent/accept/get?${new URLSearchParams({ directory, clientMessageId })}`, { signal });
+    if (accepted !== null && (!accepted || accepted.clientMessageId !== clientMessageId || typeof accepted.runId !== "string" || !accepted.runId || typeof accepted.sessionFile !== "string" || !accepted.sessionFile)) throw new Error("受理记录缺少有效运行或会话凭据");
+    return accepted;
   } catch (error) {
     if (error instanceof ExecutionRequestError && error.status === 404) return null;
     throw error;
@@ -55,7 +57,7 @@ export async function acceptAgentMessage(input: AgentAcceptInput, signal?: Abort
         method: "POST", headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" }, body,
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000),
       });
-      if (!accepted?.runId || !accepted.sessionFile) throw new Error("服务端未返回受理凭据");
+      if (accepted?.clientMessageId !== input.clientMessageId || typeof accepted.runId !== "string" || !accepted.runId || typeof accepted.sessionFile !== "string" || !accepted.sessionFile) throw new Error("服务端未返回有效受理凭据");
       clearPendingAgentMessage(input.clientMessageId);
       return accepted;
     } catch (error) {
@@ -128,10 +130,12 @@ export async function subscribeAgentRunEvents(runId: string, afterSeq: number, o
   for await (const raw of readAgentEvents(response, signal ?? AbortSignal.timeout(600_000))) {
     const event = raw as AgentEvent & { runSeq?: number };
     const seq = event.runSeq;
-    if (seq !== undefined && seq <= cursor) continue;
+    if (seq === undefined || !Number.isSafeInteger(seq)) throw new Error("后台事件缺少有效游标，请刷新客户端后恢复");
+    if (seq <= cursor) continue;
     if (seq !== undefined) delete (event as { runSeq?: number }).runSeq;
     await onEvent(event, seq !== undefined ? { seq } : undefined);
     if (seq !== undefined) cursor = seq;
+    if (event.type === "done" || event.type === "error") return;
   }
 }
 

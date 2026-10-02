@@ -7,7 +7,6 @@ import { readExecutionEvents } from "@toonflow/nodes-scaffold/runtime";
 export async function* readAgentEvents(response: Response, signal: AbortSignal) {
   for await (const event of readExecutionEvents<AgentEvent>(response, signal)) {
     yield event;
-    if (event.type === "done" || event.type === "error") return;
   }
   throw new Error("连接已中断，正在恢复后台运行");
 }
@@ -140,5 +139,26 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
     reply = undefined;
   }
 
-  return { begin, receive, finish, suspend };
+  function restore(snapshot: AgentMessage[]) {
+    const previous = messages.value;
+    const tools = new Map(previous.flatMap(message => message.parts ?? []).flatMap(part => part.type === "tool" ? [[part.tool.id, part] as const] : []));
+    suspend();
+    messages.value = snapshot.map(message => {
+      const existing = previous.find(item => {
+        if (item.role !== message.role) return false;
+        if (message.role === "assistant" && !message.report && message.replyTo) return !item.report && item.replyTo === message.replyTo;
+        return message.entryId ? item.entryId === message.entryId : item.id === message.id;
+      });
+      return { ...message, id: existing?.id ?? (message.id === "streaming" ? crypto.randomUUID() : message.id), parts: message.parts?.map(part => {
+        if (part.type !== "tool") return part;
+        const old = tools.get(part.tool.id);
+        if (!old) return part;
+        const question = old.tool.question?.callId === part.tool.question?.callId ? old.tool.question : part.tool.question;
+        Object.assign(old.tool, part.tool, { question });
+        return old;
+      }) };
+    });
+  }
+
+  return { begin, receive, finish, suspend, restore };
 }

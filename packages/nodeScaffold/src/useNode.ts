@@ -1,7 +1,7 @@
 import { computed, getCurrentInstance, inject, readonly, type Component } from "vue";
 import { useNode as useFlowNode, useVueFlow } from "@vue-flow/core";
-import { isTypeCompatible, type NodeData, type NodeHandle } from "./connection";
-import { isNodeOutput, type NodeOutputs } from "./values";
+import type { NodeData, NodeHandle } from "./connection";
+import type { NodeOutputs } from "./values";
 import { useNodeEvent } from "./nodeEvent";
 import { nodeTools } from "./nodeTools";
 import { useNodeFiles } from "./workspaceFiles";
@@ -26,13 +26,7 @@ export function useNode<T extends NodeOutputs = NodeOutputs>(options: NodeOption
   const defaults = getCurrentInstance()?.type as Pick<NodeOptions, "handles" | "icon"> | undefined;
   const execution = useNodeExecution(id);
   const handles = computed<NodeHandle[]>(() => execution.descriptor.value?.handles ?? node.data.handles ?? options.handles ?? defaults?.handles ?? []);
-  const savedOutputs = Object.fromEntries(Object.entries(node.data.outputs ?? {}).filter(([handleId, output]) => {
-    const handle = handles.value.find(item => item.type === "source" && item.id === handleId);
-    const defaultOutput = options.outputs?.[handleId];
-    return handle && isNodeOutput(output) && isTypeCompatible(output.dataType, handle.dataType)
-      && (!defaultOutput || defaultOutput.dataType === output.dataType);
-  }));
-  const outputs = computed(() => (node.data.outputs ?? savedOutputs) as T);
+  const outputs = computed(() => readonly(node.data.outputs ?? {}) as T);
   const nodeProps = computed(() => ({
     previewReady: previewReady.value,
     label: node.data.label ?? options.label,

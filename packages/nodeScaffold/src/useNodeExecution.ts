@@ -24,6 +24,8 @@ export function useNodeExecution(nodeId = useNodeId()) {
   async function command(name: string, args: Record<string, unknown> = {}, options: NodeActionOptions = {}) {
     const initial = target();
     const action = name.startsWith("node:") ? name : `node:${name}`;
+    const requestArgs = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
+    const commandId = options.commandId ?? crypto.randomUUID();
     if (!initial.descriptor.actions.some(item => item.name === action || `node:${item.name}` === action)) throw new Error(`节点未注册后端动作：${action}`);
     await host!.beforeCommand?.(initial);
     const current = target();
@@ -31,10 +33,10 @@ export function useNodeExecution(nodeId = useNodeId()) {
     const signal = options.signal ? AbortSignal.any([lifetime.signal, options.signal]) : lifetime.signal;
     const client = createExecutionClient(initial.directory);
     const result = await client.command({
-      commandId: options.commandId,
+      commandId,
       canvasPath: initial.canvasPath,
       name: "nodeTools",
-      args: { nodeId, name: action, args, expectedNodeRevision: initial.descriptor.executionRevision },
+      args: { nodeId, name: action, args: requestArgs, expectedNodeRevision: initial.descriptor.executionRevision },
       expectedVersions: { [nodeId]: options.expectedVersion ?? current.version },
     }, signal);
     await host!.refresh?.(initial);

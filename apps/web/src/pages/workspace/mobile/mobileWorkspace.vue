@@ -15,6 +15,7 @@
       <el-button :icon="IconRefresh" :loading="loading" aria-label="刷新画布" @click="reload" />
     </div>
     <el-alert v-if="graphError" type="error" :title="graphError" showIcon :closable="false" />
+    <el-alert v-else-if="connectionError" type="warning" :title="connectionError" showIcon :closable="false" />
     <el-alert v-else-if="conflict" type="warning" :title="conflict.message" showIcon :closable="false" />
     <el-scrollbar v-loading="loading" class="nodeScroll">
       <mobileNodeList
@@ -60,7 +61,7 @@ const highlightId = ref("");
 const addNodeVisible = ref(false);
 const nodeTypes = ref<MobileNodeType[]>([]);
 
-const { graph, loading, error: graphError, conflict, load, applyChanges } = useMobileGraph(
+const { graph, loading, error: graphError, connectionError, conflict, load, applyChanges } = useMobileGraph(
   () => directory.value,
   () => canvasId.value,
 );

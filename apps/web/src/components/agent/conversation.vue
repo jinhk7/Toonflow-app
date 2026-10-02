@@ -209,8 +209,9 @@ const directory = props.directory ?? workspaceStore.project?.directory;
 const draftAttachments = ref<AgentAttachment[]>([]);
 const createCanvasContext = inject<(() => CanvasContext | undefined) | undefined>("canvas", undefined);
 const getAgentCanvasContext = inject<(() => { id: string; selectedNodeIds: string[] } | undefined) | undefined>("agentCanvasContext", undefined);
-const messages = ref<AgentMessage[]>((props.initialSession?.messages ?? []).map(message => ({ ...message })));
+const messages = ref<AgentMessage[]>([]);
 const stream = createConversationStream(messages);
+stream.restore(props.initialSession?.messages ?? []);
 const remoteRunning = ref(props.initialSession?.running ?? false);
 const currentRunId = ref(props.initialSession?.eventCursor?.runId ?? props.initialSession?.activeRun?.runId);
 const runStatus = ref(props.initialSession?.activeRun?.status);
@@ -344,19 +345,7 @@ async function reloadConversation(signal: AbortSignal) {
   signal.throwIfAborted();
   if (data.code !== 200) throw new Error(data.message || "读取会话快照失败");
   const session = data.data;
-  const oldTools = new Map(messages.value.flatMap(message => message.parts ?? []).flatMap(part => part.type === "tool" ? [[part.tool.id, part] as const] : []));
-  stream.suspend();
-  messages.value = session.messages.map(message => ({
-    ...message,
-    parts: message.parts?.map(part => {
-      if (part.type !== "tool") return part;
-      const old = oldTools.get(part.tool.id);
-      if (!old) return part;
-      const question = old.tool.question?.callId === part.tool.question?.callId ? old.tool.question : part.tool.question;
-      Object.assign(old.tool, part.tool, { question });
-      return old;
-    }),
-  }));
+  stream.restore(session.messages);
   stats.value = session.stats;
   contextUsage.value = session.contextUsage;
   for (const agent of session.subAgents ?? []) emit("event", { type: "subAgent", agent });
@@ -388,11 +377,15 @@ async function reconnectActiveRun() {
     if (connection.signal.aborted || !snapshot.live && snapshot.lastEventSeq <= eventCursor) return;
     busy.value = snapshot.live;
     connectionError.value = "";
-    await subscribeAgentRunEvents(runId, eventCursor, (event, meta) => {
+    await subscribeAgentRunEvents(runId, eventCursor, async (event, meta) => {
       if (props.initialSession?.parentFile) {
         if (event.type === "subAgentEvent" && event.file === boundSessionFile.value) applyEvent(event.event);
       } else applyEvent(event);
       if (meta?.seq !== undefined) eventCursor = meta.seq;
+      if (event.type === "done" || event.type === "error") {
+        await reloadConversation(connection.signal);
+        await refreshRunStatus(runId, connection.signal);
+      }
       reconnectDelay = 1000;
     }, connection.signal);
   } catch (error) {
@@ -480,7 +473,7 @@ function applyEvent(event: AgentEvent) {
       break;
     }
     case "report":
-      if (event.parentFile !== props.sessionFile) { emit("event", event); break; }
+      if (event.parentFile !== boundSessionFile.value) { emit("event", event); break; }
       if (!messages.value.some(message => message.id === event.id)) messages.value.push({
         id: event.id, role: "assistant", content: event.content,
         parts: [{ id: event.id, type: "text", content: event.content }], report: { file: event.file, name: event.name },
@@ -512,6 +505,8 @@ function applyEvent(event: AgentEvent) {
 }
 
 function receiveEvent(event: AgentEvent) {
+  // 子会话有自己的游标订阅时，由该订阅归并；父会话转发的同一增量不能再次追加。
+  if (props.initialSession?.parentFile && reconnectController && currentRunId.value) return;
   if (event.type === "done" || event.type === "error") {
     remoteRunning.value = false;
     compacting.value = false;
