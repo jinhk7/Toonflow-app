@@ -153,7 +153,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, ref, shallowRef, watch, watchEffect, type Component, type ShallowRef } from "vue";
+import { computed, inject, nextTick, ref, shallowRef, watch, type Component, type ShallowRef } from "vue";
 import { Handle, Position, getTransformForBounds, pointToRendererPoint, useNode, useVueFlow, wheelDelta } from "@vue-flow/core";
 import {
   IconRefresh,
@@ -173,6 +173,7 @@ import { ElCard, ElButton, ElDropdown, ElDropdownMenu, ElDropdownItem, ElMessage
 import type { DropdownInstance } from "element-plus";
 import { validateConnection } from "./connection";
 import { useNodeEvent } from "./nodeEvent";
+import { useNodeInputs } from "./nodeInputs";
 import type { NodeConnectionFeedback, NodeData, NodeHandle } from "./connection";
 import type { NodeOutput } from "./values";
 
@@ -229,7 +230,6 @@ const {
   addSelectedNodes,
   removeSelectedElements,
   removeNodes,
-  removeEdges,
   updateNodeInternals,
   connectionLookup,
   connectionStartHandle,
@@ -478,28 +478,15 @@ function getHandleStatus(item: NodeHandle) {
   return target?.id === item.id && target.type === item.type ? connectionStatus.value : null;
 }
 
-watchEffect(() => {
-  if (props.loading) return;
-  // 仅同步端口快照供跨节点校验；端口状态由具体 node 维护。
-  if (JSON.stringify(node.data.handles) !== JSON.stringify(props.handles)) node.data.handles = props.handles.map((item) => ({ ...item }));
-});
-watchEffect(() => {
-  if (props.loading) return;
-  // 输出由 node 持有，画布仅共享当前值；不使用 JSON 比较或触发端口重测。
-  node.data.outputs = props.outputs;
-});
+const { setPresentationOutputs } = useNodeInputs();
+watch(() => props.outputs, (outputs, _previous, onCleanup) => {
+  onCleanup(setPresentationOutputs(nodeId, outputs));
+}, { immediate: true });
 // 比较内容，避免内联数组的新引用触发渲染循环。
 watch(
   () => JSON.stringify([props.label, props.handles]),
   () => {
     if (props.loading) return;
-    removeEdges((edges) =>
-      edges.filter(
-        (edge) =>
-          (edge.source === nodeId && !props.handles.some((item) => item.type === "source" && item.id === edge.sourceHandle)) ||
-          (edge.target === nodeId && !props.handles.some((item) => item.type === "target" && item.id === edge.targetHandle))
-      )
-    );
     updateNodeInternals([nodeId]);
   },
   { flush: "post" }

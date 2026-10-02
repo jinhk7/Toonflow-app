@@ -15,6 +15,27 @@ function mediaJobId(context: NodeExecutionContext, jobId?: string) {
   const pending = context.node.data.pendingMediaJob as { idempotencyKey?: unknown } | undefined;
   return jobId ?? (typeof pending?.idempotencyKey === "string" ? pending.idempotencyKey : undefined);
 }
+async function getGenerationState(context: NodeExecutionContext) {
+  const job = await currentJob(context);
+  const id = mediaJobId(context, job?.jobId);
+  const mediaJob = id ? await context.getMediaJob(id) : undefined;
+  const mediaRunning = !!mediaJob && ["prepared", "submitting", "tracking", "collecting"].includes(mediaJob.status);
+  const mediaUnresolved = mediaRunning || mediaJob?.status === "unknown" || mediaJob?.status === "collectionFailed";
+  const observerRunning = !!job && ["accepted", "running"].includes(job.status);
+  const pendingMedia = !!context.node.data.pendingMediaJob;
+  const mediaFinished = mediaJob?.status === "failed" || (mediaJob?.status === "completed" && mediaJob.linkStatus !== "pending" && !pendingMedia);
+  return {
+    status: mediaJob ? mediaRunning ? "running" : mediaJob.status : job?.status ?? "idle",
+    jobId: job?.jobId,
+    observerStatus: job?.status,
+    observationCancelled: job?.status === "cancelled",
+    canCancelObservation: observerRunning,
+    controlsBlocked: !mediaFinished && (mediaUnresolved || pendingMedia || observerRunning || job?.status === "needsReview"),
+    mediaJob,
+    outputs: context.node.data.outputs ?? {},
+    error: mediaJob ? mediaJob.errorMessage ?? undefined : job?.errorMessage,
+  };
+}
 async function requireAvailable(context: NodeExecutionContext) {
   const job = await currentJob(context);
   const id = mediaJobId(context, job?.jobId);
@@ -90,7 +111,7 @@ const definition: NodeExecutionDefinition = {
     },
     {
       name: "generateImage",
-      description: "启动此节点的后台图片生成，使用当前提示词、模型、分辨率、比例和参考图片；立即返回已开始，用 getGenerationStatus 查询完成结果，cancelGeneration 停止生成",
+      description: "启动此节点的后台图片生成，使用当前提示词、模型、分辨率、比例和参考图片；立即返回已开始，用 getGenerationStatus 查询完成结果，cancelGeneration 仅取消本地等待",
       parameters: z.strictObject({}),
       async execute(_args, context) {
         await requireAvailable(context);
@@ -108,25 +129,22 @@ const definition: NodeExecutionDefinition = {
     {
       name: "getGenerationStatus",
       snapshotInputs: false,
-      description: "查询持久后台生成状态、当前输出和最近一次错误；当前输出可能来自之前生成，completed 表示本次生成完成",
+      description: "查询真实媒体任务状态、观察状态、当前输出和最近一次错误；取消观察不会改变供应商状态，completed 表示本次媒体生成完成",
       parameters: z.strictObject({}),
       async execute(_args, context) {
-        const job = await currentJob(context);
-        const id = mediaJobId(context, job?.jobId);
-        const mediaJob = id ? await context.getMediaJob(id) : undefined;
-        return { status: job?.status ?? (mediaJob && ["prepared", "submitting", "tracking", "collecting"].includes(mediaJob.status) ? "running" : mediaJob?.status ?? "idle"), jobId: job?.jobId, mediaJob, outputs: context.node.data.outputs ?? {}, error: job?.errorMessage ?? mediaJob?.errorMessage };
+        return getGenerationState(context);
       },
     },
     {
       name: "cancelGeneration",
       snapshotInputs: false,
-      description: "请求停止当前后台生成；cancellationRequested 表示已发出停止请求，随后用 getGenerationStatus 查询终止状态。不会删除已有输出，不能保证供应商撤销任务或费用",
+      description: "取消当前任务的本地等待和观察；cancellationRequested 仅表示已请求取消观察，不会停止供应商提交、追踪或收集。原媒体任务和结果保留，用 getGenerationStatus 查询真实状态",
       parameters: z.strictObject({}),
       async execute(_args, context) {
         const job = await currentJob(context);
         const cancellationRequested = !!job && ["accepted", "running"].includes(job.status);
         if (cancellationRequested) await context.cancelJob(job!.jobId);
-        return { cancellationRequested, jobId: job?.jobId };
+        return { ...await getGenerationState(context), cancellationRequested, cancellationScope: "observer" };
       },
     },
     {

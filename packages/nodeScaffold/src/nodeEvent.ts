@@ -18,6 +18,15 @@ type NodeEventListeners = {
 
 // 挂在共享画布实例上，让独立 UMD 共用注册表；不会进入画布 JSON。
 const nodeEventsKey = Symbol.for("toonflow.nodeEvents");
+const nodeCopyDataKey = Symbol.for("toonflow.nodeCopyData");
+type NodeCopyData = (nodeId: string) => Promise<Record<string, unknown> | undefined>;
+type NodeCopyHost = ReturnType<typeof useVueFlow> & { [nodeCopyDataKey]?: NodeCopyData };
+
+export function useNodeCopyData(copyData: NodeCopyData, canvas = useVueFlow()) {
+  const host = canvas as NodeCopyHost;
+  host[nodeCopyDataKey] = copyData;
+  onScopeDispose(() => { if (host[nodeCopyDataKey] === copyData) delete host[nodeCopyDataKey]; });
+}
 
 export function useNodeEvent(nodeId = useNodeId(), canvas = useVueFlow()) {
   if (!nodeId) throw new Error("请在节点组件中使用 useNodeEvent()，或传入节点 ID");
@@ -69,6 +78,12 @@ export function useNodeEvent(nodeId = useNodeId(), canvas = useVueFlow()) {
     }
     if (args[0] === "copy") {
       return (async () => {
+        const copyData = (canvas as NodeCopyHost)[nodeCopyDataKey];
+        const patch = await copyData?.(nodeId);
+        if (patch !== undefined) {
+          if ((canvas as NodeCopyHost)[nodeCopyDataKey] !== copyData) throw new Error("画布已切换，请重新复制");
+          return patch;
+        }
         const node = canvas.findNode(nodeId);
         const data: Record<string, unknown> = {};
         for (const callback of [...events?.copy ?? []]) Object.assign(data, await callback());

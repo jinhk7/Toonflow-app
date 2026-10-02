@@ -40,7 +40,7 @@ defineOptions({ inheritAttrs: false, icon: IconCube3dSphere });
 const { node, nodeProps, previewReady, ai } = useNode({ label: "3D导演台" });
 const execution = useNodeExecution(node.id);
 const vLoading = ElLoading.directive;
-const data = computed(() => node.data as typeof node.data & { modelPath?: string; modelRevision?: string });
+const data = computed(() => node.data as typeof node.data & Record<string, unknown>);
 const modelDocument = shallowRef<ModelDocument>({ version: 1, scene: createEmptyScene(), plans: [] });
 const scope = shallowRef<ModelSnapshot>();
 const scene = computed(() => modelDocument.value.scene);
@@ -54,12 +54,12 @@ const renderKinds = new Map<string, string>();
 const instructions = new Map<string, string>();
 const running = (job: NodeJobView) => job.status === "accepted" || job.status === "running";
 const renderJobs = computed(() => jobs.value.filter(job => job.kind === "render" && running(job)));
-const exportingVideo = computed(() => request.value === "video" || renderJobs.value.some(job => !renderKinds.get(job.jobId)?.startsWith("image:")));
+const exportingVideo = computed(() => request.value === "video" || renderJobs.value.some(job => (renderKinds.get(job.jobId) ?? job.summary?.format) === "video"));
 const exportingImage = computed(() => request.value.startsWith("image:") ? request.value.slice(6)
-  : renderJobs.value.map(job => renderKinds.get(job.jobId)).find(kind => kind?.startsWith("image:"))?.slice(6) ?? "");
+  : renderJobs.value.map(job => renderKinds.get(job.jobId) ?? (job.summary?.format === "image" ? `image:${job.summary.anchorId ?? ""}` : undefined)).find(kind => kind?.startsWith("image:"))?.slice(6) ?? "");
 const exportProgress = computed(() => Math.max(0, ...renderJobs.value.map(job => (job.progress ?? 0) * 100)));
 const tasks = computed<DirectorGeneration[]>(() => jobs.value.filter(job => job.kind === "directorDraft" && job.status !== "completed" && job.status !== "cancelled").map(job => ({
-  id: job.jobId, instruction: instructions.get(job.jobId) ?? "", error: job.status === "failed" || job.status === "needsReview" ? job.errorMessage ?? job.status : undefined,
+  id: job.jobId, instruction: instructions.get(job.jobId) ?? job.summary?.instruction ?? "", error: job.status === "failed" || job.status === "needsReview" ? job.errorMessage ?? job.status : undefined,
 })));
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
 const editing = ref(false);
@@ -82,7 +82,7 @@ let preferencesSaving: Promise<void> | undefined;
 
 function syncPreferences() {
   if (preferencesSaving || Object.keys(pendingPreferences).length) return;
-  const value = node.data;
+  const value = data.value;
   preferences.value = {
     prompt: typeof value.prompt === "string" ? value.prompt : "",
     promptModel: (value.promptModel ?? []) as PromptModel,
@@ -218,7 +218,7 @@ async function renderPreview(document: ModelDocument, plan: DirectorPlan | undef
   } finally { player?.dispose(); disposeStage(runtime); }
 }
 watch(() => [data.value.modelPath, data.value.modelRevision], () => { void loadDocument(); }, { immediate: true });
-watch(() => [node.data.prompt, node.data.model, node.data.selectedPlanId, node.data.anchors, node.data.lighting, node.data.sceneSettings], syncPreferences, { deep: true });
+watch(() => [data.value.prompt, data.value.model, data.value.selectedPlanId, data.value.anchors, data.value.lighting, data.value.sceneSettings], syncPreferences, { deep: true });
 watch([modelDocument, selectedPlan, lighting, sceneSettings, modelLoading, previewReady], async ([document, plan, light, settings, loading, ready]) => {
   const version = ++previewVersion;
   if (!ready || loading || modelError.value) return;

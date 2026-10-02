@@ -60,6 +60,8 @@ export type NodeJobView = {
   canvasPath?: string;
   status: "accepted" | "running" | "completed" | "failed" | "cancelled" | "needsReview";
   progress?: number;
+  summary?: { instruction?: string; format?: "image" | "video"; anchorId?: string; modelLabel?: string };
+  canResume?: boolean;
   result?: unknown;
   errorMessage?: string;
   createdAt: string;

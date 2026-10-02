@@ -141,7 +141,33 @@ export function getAgentRunDatabase() {
   if (!acceptanceColumns.some(column => column.name === "messageId")) database.exec("ALTER TABLE agent_acceptances ADD COLUMN messageId TEXT;");
   const questionColumns = database.prepare("PRAGMA table_info(agent_pending_questions)").all() as { name: string }[];
   if (!questionColumns.some(column => column.name === "sessionFile")) database.exec("ALTER TABLE agent_pending_questions ADD COLUMN sessionFile TEXT;");
+  const db = database;
+  const hasSessionIndex = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_run_sessions'").get();
+  if (!hasSessionIndex) db.transaction(() => {
+    db.exec(`
+      CREATE TABLE agent_run_sessions (
+        runId TEXT NOT NULL,
+        sessionFile TEXT NOT NULL,
+        PRIMARY KEY (runId, sessionFile)
+      );
+    `);
+    // ACT: 首次升级从既有委派事件回填归属，扫描量与历史事件数成正比；不按父会话最新 run 猜测旧子会话归属。
+    for (const row of db.prepare("SELECT runId, payload FROM agent_run_events WHERE payload LIKE '%\"subAgent%'").iterate() as Iterable<{ runId: string; payload: string }>) {
+      indexRunEventSessions(db, row.runId, JSON.parse(row.payload) as AgentEvent);
+    }
+  })();
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agent_run_sessions_file ON agent_run_sessions(sessionFile, runId);");
   return database;
+}
+
+function indexRunEventSessions(db: Database, runId: string, event: AgentEvent) {
+  if (event.type !== "subAgentEvent" && event.type !== "subAgent") return;
+  const insert = db.prepare("INSERT OR IGNORE INTO agent_run_sessions (runId, sessionFile) VALUES (?, ?)");
+  while (event.type === "subAgentEvent") {
+    insert.run(runId, event.file);
+    event = event.event;
+  }
+  if (event.type === "subAgent") insert.run(runId, event.agent.file);
 }
 
 export async function ensureAgentRunStore() {
@@ -202,9 +228,12 @@ export function getAgentRun(runId: string) {
 
 export function getLatestRunForSession(cwd: string, sessionFile: string) {
   return getAgentRunDatabase().prepare(`
-    SELECT * FROM agent_runs WHERE cwd = ? AND sessionFile = ?
+    SELECT * FROM agent_runs
+    WHERE cwd = ? AND (sessionFile = ? OR EXISTS (
+      SELECT 1 FROM agent_run_sessions WHERE agent_run_sessions.runId = agent_runs.runId AND agent_run_sessions.sessionFile = ?
+    ))
     ORDER BY createdAt DESC, rowid DESC LIMIT 1
-  `).get(cwd, sessionFile) as AgentRunRecord | undefined;
+  `).get(cwd, sessionFile, sessionFile) as AgentRunRecord | undefined;
 }
 
 export function getAgentAcceptance(cwd: string, clientMessageId: string) {
@@ -269,6 +298,7 @@ export function appendRunEvent(runId: string, event: AgentEvent) {
     const seq = Math.max(run.lastEventSeq, maximum.seq ?? 0) + 1;
     const createdAt = nowIso();
     db.prepare("INSERT INTO agent_run_events (runId, seq, payload, createdAt) VALUES (?, ?, ?, ?)").run(runId, seq, JSON.stringify(event), createdAt);
+    indexRunEventSessions(db, runId, event);
     db.prepare("UPDATE agent_runs SET lastEventSeq = ?, updatedAt = ? WHERE runId = ?").run(seq, createdAt, runId);
     return { seq, event, createdAt };
   })();

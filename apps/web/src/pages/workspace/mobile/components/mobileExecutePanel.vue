@@ -33,7 +33,9 @@
         <el-progress v-if="job.progress !== undefined" :percentage="Math.max(0, Math.min(100, job.progress <= 1 ? job.progress * 100 : job.progress))" />
         <div class="actions">
           <el-button v-if="job.nodeId && job.canvasPath" text @click="openJobNode(job)">查看节点</el-button>
-          <el-button v-if="job.status === 'accepted' || job.status === 'running'" text type="danger" @click="cancelJob(job)">取消任务</el-button>
+          <el-button v-if="job.result !== undefined" text @click="downloadResult(job)">下载任务结果</el-button>
+          <el-button v-if="job.canResume" text @click="resumeJob(job)">恢复原任务</el-button>
+          <el-button v-if="job.status === 'accepted' || job.status === 'running'" text type="danger" @click="cancelJob(job)">{{ job.kind === "media" ? "停止观察" : "取消任务" }}</el-button>
         </div>
       </li>
     </ul>
@@ -56,6 +58,7 @@ import type { CanvasCommand, CanvasCommandResult, NodeJobView } from "@toonflow/
 import type { WorkspaceGraph } from "@/lib/workspaceFiles";
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
 import { useWorkspaceEvents } from "@/lib/workspaceEvents";
+import saveFile from "@/lib/saveFile";
 import type { CanvasNode } from "../lib/mobileGraphModel";
 
 type ParameterSchema = { type?: string; title?: string; description?: string; default?: unknown; enum?: any[]; minimum?: number; maximum?: number; maxLength?: number; $ref?: string; oneOf?: unknown; anyOf?: unknown };
@@ -212,10 +215,21 @@ async function reconcileCommand() {
 }
 async function cancelJob(job: NodeJobView) {
   try {
-    await ElMessageBox.confirm("取消该后台任务？", "取消任务", { confirmButtonText: "取消任务", cancelButtonText: "继续执行" });
+    await ElMessageBox.confirm(job.kind === "media" ? "仅停止本地观察，已提交的媒体仍会生成、收取并可能计费。" : "取消该后台任务？已进入提交阶段的结果会继续保存。", job.kind === "media" ? "停止观察" : "取消任务", { confirmButtonText: job.kind === "media" ? "停止观察" : "取消任务", cancelButtonText: "继续执行" });
   } catch { return; }
   try { await createExecutionClient(job.directory).cancelJob(job.jobId); await load(); }
   catch (err) { ElMessage.error(err instanceof Error ? err.message : "取消失败"); }
+}
+async function resumeJob(job: NodeJobView) {
+  try {
+    await ElMessageBox.confirm("使用已保存的输入继续原任务。已写入的图和正文会按原命令核对，不会重新提交模型生成。", "恢复原任务", { confirmButtonText: "恢复", cancelButtonText: "取消" });
+  } catch { return; }
+  try { await createExecutionClient(job.directory).resumeJob(job.jobId); await load(); }
+  catch (err) { ElMessage.error(err instanceof Error ? err.message : "恢复失败"); }
+}
+async function downloadResult(job: NodeJobView) {
+  try { await saveFile(new Blob([JSON.stringify(job.result, null, 2)], { type: "application/json" }), `${job.kind}Result.json`); }
+  catch (err) { ElMessage.error(err instanceof Error ? err.message : "结果下载失败"); }
 }
 function openJobNode(job: NodeJobView) {
   void router.push({ path: `/mobile/node/${job.nodeId}`, query: { ...route.query, directory: job.directory, canvas: job.canvasPath } });

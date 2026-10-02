@@ -1,6 +1,7 @@
 import { ensureAgentRunStore } from "@/agent/runtime/store";
 import { ensureNodeJobsReady } from "@/utils/jobs";
 import { registerBuiltinNodeJobHandlers } from "@/utils/canvas/jobs";
+import { registerCanvasLifecycleJobHandlers } from "@/utils/canvas/lifecycle";
 import { recoverResourceWrites } from "@/utils/canvas/content";
 import { ensureCanvasCommandsReady } from "@/utils/canvas/context";
 import { recoverGraphWrites } from "@/utils/workspace/graph";
@@ -14,6 +15,7 @@ export function initializeBackendExecution() {
   ready ??= (async () => {
     await ensureAgentRunStore();
     registerBuiltinNodeJobHandlers();
+    registerCanvasLifecycleJobHandlers();
     await recoverGraphWrites();
     await recoverResourceWrites();
     ensureMediaJobsReady();

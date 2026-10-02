@@ -10,10 +10,10 @@ import { createCanvasQueries, isCanvasRead } from "@toonflow/tool-canvas/queries
 import { readGraph, modifyGraph, type GraphChange } from "@/utils/workspace/graph";
 import { resolveWorkspace } from "@/utils/workspace";
 import { resolveWorkspacePath, writeWorkspaceFile, renameWorkspaceFile, assertNoManagedGraph } from "@/utils/workspace/files";
-import { listNodeExecutions, loadNodeExecution } from "@/utils/plugins/nodeExecution";
+import { listNodeExecutions, loadNodeExecution, getNodeExecutionArtifact, getNodeExecutionModule } from "@/utils/plugins/nodeExecution";
 import { readNode, getNodeConfig } from "@/utils/plugins/nodes";
 import { readVersionedContent, writeVersionedContent, assertNoManagedResource } from "@/utils/canvas/content";
-import { acceptCanvasCommand, appendWorkspaceEvent, getCanvasCommand, listIncompleteCanvasCommands, requestDigest, updateCanvasCommand } from "@/utils/canvas/store";
+import { acceptCanvasCommand, appendWorkspaceEvent, getCanvasCommand, getGraphWrite, listIncompleteCanvasCommands, requestDigest, updateCanvasCommand } from "@/utils/canvas/store";
 import { acceptNodeJob, activateNodeJob, getNodeJob, getNodeJobRequest, cancelNodeJob, waitForNodeJob } from "@/utils/jobs";
 import { arrangeGraph } from "@/utils/canvas/layout";
 import { captureNodeInputs, captureInputFile, type NodeInputSnapshot } from "@/utils/canvas/inputs";
@@ -24,6 +24,8 @@ import { acceptMediaJob, getMediaJob, getMediaJobByIdempotency, retryMediaJobCol
 type Graph = Awaited<ReturnType<typeof readGraph>>;
 type Node = Graph["nodes"][number];
 type BackendCommand = CanvasCommand & { inputSnapshot?: NodeInputSnapshot };
+export type NodeLifecycleInput = { directory: string; canvasPath: string; commandId: string; hook: "initialize" | "remove"; node: NodeExecutionSnapshot; revision: string; config?: Record<string, unknown> };
+type BackendCanvasContext = CanvasContext & { canvasPath: string; runNodeLifecycle(input: NodeLifecycleInput, signal?: AbortSignal): Promise<void> };
 const running = new Map<string, Promise<CanvasCommandResult>>();
 let recovered = false;
 
@@ -72,7 +74,7 @@ function operationId(commandId: string, index: number) {
   return requestDigest([commandId, index]).slice(0, 32);
 }
 
-export async function createBackendCanvasContext(directory: string, target?: { id?: string; canvasPath?: string; selectedNodeIds?: string[] }, options: { runId?: string; clientId?: string; onTargetChanged?: (canvasPath: string) => void; command?: BackendCommand } = {}): Promise<CanvasContext & { canvasPath: string }> {
+export async function createBackendCanvasContext(directory: string, target?: { id?: string; canvasPath?: string; selectedNodeIds?: string[] }, options: { runId?: string; clientId?: string; onTargetChanged?: (canvasPath: string) => void; command?: BackendCommand } = {}): Promise<BackendCanvasContext> {
   const cwd = await resolveWorkspace(directory);
   let canvasPath = await resolveCanvas(cwd, target);
   let graph: Graph | undefined;
@@ -135,6 +137,11 @@ export async function createBackendCanvasContext(directory: string, target?: { i
   });
 
   async function apply(changes: GraphChange[], command: CanvasCommand, step: number) {
+    const known = getGraphWrite(cwd, `graph:${operationId(command.commandId, step)}`);
+    if (command.name === "nodeLifecycle" && known) {
+      graph = await readGraph((await resolveWorkspacePath(cwd, canvasPath)).path, cwd);
+      return graph;
+    }
     for (const change of changes) {
       const id = change.kind === "node" || change.kind === "edge" ? change.id : change.kind === "output" ? change.nodeId : "viewport";
       const expected = command.expectedVersions?.[id];
@@ -281,7 +288,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
     }
   }
 
-  async function executionContext(nodeId: string, revision: string, command: BackendCommand, signal: AbortSignal, nextStep: () => number, deleted?: NodeExecutionSnapshot): Promise<NodeExecutionContext> {
+  async function executionContext(nodeId: string, revision: string, command: BackendCommand, signal: AbortSignal, nextStep: () => number, deleted?: NodeExecutionSnapshot, config?: Record<string, unknown>): Promise<NodeExecutionContext> {
     const current = requireGraph();
     const frozen = command.inputSnapshot?.node.id === nodeId ? command.inputSnapshot : undefined;
     let node = deleted ?? frozen?.node ?? snapshot(current, requireNode(nodeId));
@@ -296,7 +303,7 @@ export async function createBackendCanvasContext(directory: string, target?: { i
       return media?.workspaceDirectory === cwd ? media : undefined;
     }
     const context: NodeExecutionContext = {
-      directory: cwd, canvasPath, commandId: command.commandId, revision, get node() { return node; }, config: frozen?.config ?? getNodeConfig(metadata), signal,
+      directory: cwd, canvasPath, commandId: command.commandId, revision, get node() { return node; }, config: config ?? frozen?.config ?? getNodeConfig(metadata), signal,
       readText: path => frozen?.texts[path] ? Promise.resolve(frozen.texts[path]!) : readVersionedContent(cwd, path),
       async writeText(path, content, expectedRevision) {
         const before = expectedRevision ?? (await context.readText(path)).revision;
@@ -352,6 +359,36 @@ export async function createBackendCanvasContext(directory: string, target?: { i
             return [readAiReferences(frozen.directory, [{ ...reference, value: { ...reference.value, url: frozen.files[reference.value.url]! } }], signal).then(items => items[0]!)];
           }));
           input = { ...input, referenceContents: references, configuredRevision: requestDigest(getConfiguredModel(parsed.providerId, parsed.modelId)), ...(parsed.path ? { expectedRevision: request.input.expectedRevision ?? (await context.readText(parsed.path)).revision } : {}) };
+        } else if (request.kind === "directorDraft" || request.kind === "render") {
+          const loaded = await loadNodeExecution(nodeType(node.type), revision);
+          const host: Record<string, unknown> = {
+            commandId: jobCommandId, nodeId, canvasPath, nodeType: loaded.definition.name, pluginRevision: revision,
+            canvasId: current.toonflowGraph!.id, expectedNodeVersion: node.version + 1,
+            configRevision: requestDigest(context.config), position: node.position,
+            sourceWidth: loaded.definition.layoutSize.width, ...(node.parentNode ? { parentNode: node.parentNode, parentVersion: current.toonflowGraph!.nodes[node.parentNode] } : {}),
+          };
+          let payload: Record<string, unknown>;
+          if (request.kind === "directorDraft") {
+            const module = await getNodeExecutionModule(loaded.definition.name, revision);
+            const schema = module.directorDraftInputSchema as z.ZodType<Record<string, unknown>> | undefined;
+            if (!schema || typeof schema.parse !== "function") throw Object.assign(new Error("固定版本节点未提供导演草稿协议"), { status: 422 });
+            payload = schema.parse(request.input);
+            const parsed = z.object({ providerId: z.string().min(1), modelId: z.string().min(1), references: z.array(aiReferenceSchema) }).parse(payload);
+            const referenceContents = await Promise.all(parsed.references.map(reference => {
+              if (reference.dataType === "STRING" || !frozen?.files[reference.value.url]) return readAiReferences(cwd, [reference], signal).then(items => items[0]!);
+              return readAiReferences(frozen.directory, [{ ...reference, value: { ...reference.value, url: frozen.files[reference.value.url]! } }], signal).then(items => items[0]!);
+            }));
+            host.ai = { configuredRevision: requestDigest(getConfiguredModel(parsed.providerId, parsed.modelId)), referenceContents };
+          } else {
+            const parsed = z.object({ format: z.enum(["image", "video"]) }).parse(request.input);
+            const artifact = await getNodeExecutionArtifact(loaded.definition.name, revision, "director3dNode.render.js");
+            const output = await loadNodeExecution(parsed.format === "image" ? "imageNode" : "videoNode");
+            host.artifactRevision = artifact.revision;
+            host.outputNodeType = output.definition.name;
+            host.outputNodeRevision = output.revision;
+            payload = structuredClone(request.input);
+          }
+          input = { payload, host };
         } else if (request.kind === "media") {
           const mediaType = z.enum(["image", "video", "audio"]).parse(input.mediaType);
           const mediaRequest = (mediaType === "image" ? imageGenerationSchema : mediaType === "video" ? videoGenerationSchema : audioGenerationSchema).parse(input.request) as MediaGenerationRequest;
@@ -386,10 +423,11 @@ export async function createBackendCanvasContext(directory: string, target?: { i
             throw error;
           }
         }
-        const deferStart = request.kind === "text";
+        const deferStart = ["text", "directorDraft", "render"].includes(request.kind);
         const job = await acceptNodeJob({ directory: cwd, commandId: jobCommandId, request: { ...request, input, pluginRevision: revision, nodeId, canvasPath }, deferStart });
         try {
-          if (request.kind === "text" || request.kind === "media") await context.patchData({ generationJobId: job.jobId });
+          if (request.kind === "text" || request.kind === "media" || request.kind === "directorDraft") await context.patchData({ generationJobId: job.jobId });
+          else if (request.kind === "render") await context.patchData({ renderJobId: job.jobId });
         } catch (error) {
           if (deferStart) await cancelNodeJob(job.jobId);
           throw error;
@@ -438,7 +476,28 @@ export async function createBackendCanvasContext(directory: string, target?: { i
   }
 
   await refresh();
-  return { get id() { return canvasPath || "unselected"; }, get canvasPath() { return canvasPath; }, get tools() { return nodeTools.tools; }, getNodeLabel: id => String(graph?.nodes.find(node => node.id === id)?.data?.label ?? id), call };
+  return {
+    get id() { return canvasPath || "unselected"; }, get canvasPath() { return canvasPath; }, get tools() { return nodeTools.tools; }, getNodeLabel: id => String(graph?.nodes.find(node => node.id === id)?.data?.label ?? id), call,
+    async runNodeLifecycle(input, signal = new AbortController().signal) {
+      await refresh();
+      signal.throwIfAborted();
+      const loaded = await loadNodeExecution(nodeType(input.node.type), input.revision);
+      const hook = loaded.definition[input.hook];
+      if (!hook) return;
+      if (input.hook === "initialize") {
+        const current = requireNode(input.node.id);
+        if (current.type !== input.node.type || current.data?.executionRevision !== input.revision) throw Object.assign(new Error("生命周期目标节点已变化"), { code: "JOB_NEEDS_REVIEW" });
+      }
+      let step = 0;
+      const command: BackendCommand = { commandId: input.commandId, directory: cwd, canvasPath, name: "nodeLifecycle", args: {} };
+      await hook(await executionContext(input.node.id, input.revision, command, signal, () => ++step, input.hook === "remove" ? input.node : undefined, input.config));
+    },
+  };
+}
+
+export async function runNodeLifecycle(input: NodeLifecycleInput, signal?: AbortSignal) {
+  const context = await createBackendCanvasContext(input.directory, { canvasPath: input.canvasPath });
+  await context.runNodeLifecycle(input, signal);
 }
 
 export async function submitCanvasCommand(raw: CanvasCommand) {

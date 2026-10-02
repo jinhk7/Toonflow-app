@@ -25,6 +25,7 @@ import * as mentionFiles from "@/agent/mentionFiles";
 import * as backendCanvas from "@/utils/canvas/context";
 import * as canvasContent from "@/utils/canvas/content";
 import * as canvasStore from "@/utils/canvas/store";
+import * as canvasLifecycle from "@/utils/canvas/lifecycle";
 import * as nodeExecution from "@/utils/plugins/nodeExecution";
 import * as jobs from "@/utils/jobs";
 
@@ -57,6 +58,7 @@ export default {
   backendCanvas,
   canvasContent,
   canvasStore,
+  canvasLifecycle,
   nodeExecution,
   jobs,
 };

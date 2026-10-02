@@ -4,7 +4,7 @@ export * from "./executionClient";
 export * from "./useNodeExecution";
 export { useNodeReferences } from "./useNodeReferences";
 export { useNodeGeneration } from "./useNodeGeneration";
-export { showNodeError } from "./showNodeError";
+export { showNodeError, useNodeError } from "./showNodeError";
 export * from "./connection";
 export * from "./values";
 export * from "./nodeInputs";

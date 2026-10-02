@@ -298,7 +298,9 @@ export async function modifyGraph(path: string, operationId: string, changes: Gr
             if (value.type === "canvasGroup") value.data = { ...value.data, handles: [], outputs: {} };
             else {
               if (typeof value.type !== "string") invalid("节点类型无效");
-              const loaded = await loadNodeExecution(value.type.startsWith("remote-") ? value.type.slice(7) : value.type);
+              const revision = value.data?.executionRevision;
+              if (revision !== undefined && typeof revision !== "string") invalid("节点执行版本无效");
+              const loaded = await loadNodeExecution(value.type.startsWith("remote-") ? value.type.slice(7) : value.type, revision);
               value.data = { ...structuredClone(loaded.definition.defaultData), ...value.data,
                 handles: structuredClone(loaded.definition.handles), executionRevision: loaded.revision, stateVersion: loaded.definition.stateVersion };
             }

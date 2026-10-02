@@ -149,6 +149,7 @@ export function createExecutionClient(directory: string) {
     listJobs: (signal?: AbortSignal) => executionRequest<NodeJobView[]>(`/api/jobs/list?${query({})}`, { signal }),
     getJob: (jobId: string, signal?: AbortSignal) => executionRequest<NodeJobView>(`/api/jobs/get?${query({ jobId })}`, { signal }),
     cancelJob: (jobId: string) => executionRequest<NodeJobView>("/api/jobs/cancel", json({ directory, jobId })),
+    resumeJob: (jobId: string) => executionRequest<NodeJobView>("/api/jobs/resume", json({ directory, jobId, confirmed: true })),
   };
 }
 

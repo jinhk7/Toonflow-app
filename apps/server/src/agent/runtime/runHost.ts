@@ -482,6 +482,7 @@ export async function runPersistentAgentTask<T>(runId: string, execute: (send: (
   const record = getAgentRun(runId);
   if (!record) throw Object.assign(new Error("运行不存在"), { status: 404 });
   if (hostedRuns.has(runId)) throw Object.assign(new Error("运行仍在执行"), { status: 409 });
+  if (record.intent === "terminate" || record.status === "completed") throw Object.assign(new Error("运行已结束"), { status: 409 });
   const hosted: HostedRun = { runId, cwd: record.cwd, sessionFile: record.sessionFile ?? undefined, intent: "active",
     subscribers: new Set(), stopGeneration: new AbortController(), runAbort: new AbortController(), bridges: {}, task: Promise.resolve() };
   hostedRuns.set(runId, hosted);

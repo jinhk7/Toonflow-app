@@ -52,7 +52,8 @@ export function createA2aRouter() {
               pending.set(request.taskId, current);
             }
             const activeTask = current;
-            const record = getAgentRun(current.runId)!;
+            const record = getAgentRun(current.runId);
+            if (!record || record.intent === "terminate" || record.status === "completed") throw Object.assign(new Error("任务已结束，请创建新任务"), { status: 409 });
             const saved = JSON.parse(record.inputJson) as { messages: string[]; canvas?: { canvasPath: string }; modelRevision?: string };
             saved.messages.push(task);
             updateAgentRun(current.runId, { inputJson: JSON.stringify(saved) });

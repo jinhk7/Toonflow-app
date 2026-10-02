@@ -10,9 +10,9 @@
     :bottomWidth="660"
     :style="{ width: previewUrl && imageWidth ? `${imageWidth + 18}px` : undefined }">
     <template #topActions>
-      <mediaHistory mediaType="image" :current="outputFile" :disabled="generating || pendingJob || uploading" @select="selectOutput" />
-      <el-button :icon="IconTransfer" :loading="uploading" :disabled="generating || pendingJob" text title="替换图片" aria-label="替换图片" @click.stop="fileInput?.click()" />
-      <input ref="fileInput" type="file" accept="image/*" hidden aria-label="选择替换图片" :disabled="generating || pendingJob || uploading" @change="replaceOutput($event).catch(error => showNodeError(error, '替换失败'))" />
+      <mediaHistory mediaType="image" :current="outputFile" :disabled="generating || controlsBlocked || uploading" @select="selectOutput" />
+      <el-button :icon="IconTransfer" :loading="uploading" :disabled="generating || controlsBlocked" text title="替换图片" aria-label="替换图片" @click.stop="fileInput?.click()" />
+      <input ref="fileInput" type="file" accept="image/*" hidden aria-label="选择替换图片" :disabled="generating || controlsBlocked || uploading" @change="replaceOutput($event).catch(error => showNodeError(error, '替换失败'))" />
     </template>
     <div v-loading="generating || uploading" class="imageContent nopan" :aria-busy="generating || uploading">
       <img
@@ -41,7 +41,7 @@
             class="modelSelect"
             filterable
             :loading="modelsLoading"
-            :disabled="generating || pendingJob"
+            :disabled="generating || controlsBlocked"
             placeholder="选择模型"
             aria-label="生成模型"
             noDataText="请先在设置中添加图片模型"
@@ -61,13 +61,13 @@
             v-model:ratio="data.ratio"
             :sizes="sizeOptions"
             :ratios="ratioChoices"
-            :disabled="generating || pendingJob || !selectedModel" />
+            :disabled="generating || controlsBlocked || !selectedModel" />
           <el-button
             class="sendButton"
             :icon="generating ? IconPlayerStop : IconArrowUp"
-            :disabled="uploading || (!generating && !pendingJob && (!generationPrompt || !selectedModel))"
-            :title="generating ? '停止生成' : '生成图片'"
-            :aria-label="generating ? '停止生成' : '生成图片'"
+            :disabled="uploading || (generating && !canCancelObservation) || (!generating && !pendingJob && (!generationPrompt || !selectedModel))"
+            :title="generating ? cancelLabel : '生成图片'"
+            :aria-label="generating ? cancelLabel : '生成图片'"
             @click="generating ? cancelGeneration() : startFromButton().catch((error) => showNodeError(error, '图片生成失败'))" />
         </div>
       </el-card>
@@ -84,7 +84,7 @@
 import { computed, nextTick, onMounted, onScopeDispose, reactive, ref, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElMessageBox, ElLoading, ElImageViewer } from "element-plus";
 import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, showNodeError, useNode, useNodeReferences, type NodeMediaModel, type NodeMediaJobView, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
+import { groupNodeModels, nodeSkeleton, useNodeError, useNode, useNodeReferences, type NodeMediaModel, type NodeMediaJobView, type NodeMediaValue } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
@@ -92,8 +92,9 @@ import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
 import generationSettings from "./components/generationSettings.vue";
 
 type PromptModel = NonNullable<InstanceType<typeof promptInput>["$props"]["modelValue"]>;
+const showNodeError = useNodeError();
 type ConfigState = { config: { providerId: string; modelId: string; size?: string; ratio: string; }; models: NodeMediaModel[] };
-type GenerationState = { status: string; jobId?: string; mediaJob?: NodeMediaJobView; error?: string };
+type GenerationState = { status: string; jobId?: string; mediaJob?: NodeMediaJobView; error?: string; controlsBlocked: boolean; canCancelObservation: boolean };
 defineOptions({ inheritAttrs: false, icon: IconPhotoAi });
 const vLoading = ElLoading.directive;
 const { node, nodeProps, outputs, files, execution, updateNodeInternals } = useNode({ label: "图片生成" });
@@ -116,6 +117,9 @@ const imageWidth = ref(0);
 
 const generating = ref(false);
 const pendingJob = computed(() => !!nodeData.value.pendingMediaJob);
+const controlsBlocked = ref(pendingJob.value);
+const canCancelObservation = ref(false);
+const cancelLabel = computed(() => canCancelObservation.value ? "取消本地等待" : "供应商任务仍在运行");
 const selectedModel = computed(() => models.value.find(item => JSON.stringify([item.providerId, item.modelId]) === data.model));
 
 const sizeOptions = computed(() => selectedModel.value?.imageSizes ?? []);
@@ -130,6 +134,7 @@ let controlsSaving = Promise.resolve();
 let promptTimer: ReturnType<typeof setTimeout> | undefined;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let statusError = "";
+watch(pendingJob, value => { if (value) controlsBlocked.value = true; }, { flush: "sync" });
 
 function applyConfig(state: ConfigState) {
   applying = true;
@@ -209,6 +214,7 @@ async function replaceOutput(event: Event) {
 async function startFromButton() {
   await controlsSaving;
   const state = await execution.call<GenerationState>("getGenerationStatus");
+  applyGenerationState(state);
   if (state.mediaJob?.status === "collectionFailed") {
     await execution.call("retryCollection");
     return;
@@ -223,21 +229,36 @@ async function startFromButton() {
   await savePrompt();
   await execution.call("generateImage");
   generating.value = true;
+  controlsBlocked.value = true;
+  canCancelObservation.value = true;
+  statusError = "";
 }
+function applyGenerationState(state: GenerationState) {
+  generating.value = ["accepted", "running"].includes(state.status);
+  controlsBlocked.value = state.controlsBlocked;
+  canCancelObservation.value = state.canCancelObservation;
+  if (state.error && state.error !== statusError) {
+    statusError = state.error;
+    showNodeError(state.error, "图片生成失败");
+  }
+}
+
 async function cancelGeneration() {
-  try { await execution.call("cancelGeneration"); }
-  catch (error) { showNodeError(error, "停止生成失败"); }
+  try { applyGenerationState(await execution.call<GenerationState>("cancelGeneration")); }
+  catch (error) { showNodeError(error, "取消本地等待失败"); }
 }
 async function poll() {
   try {
     if (!document.hidden) {
       const id = nodeData.value.generationJobId;
-      const job = typeof id === "string" ? await execution.getJob(id) : undefined;
-      if (!job && pendingJob.value) {
-        const state = await execution.call<GenerationState>("getGenerationStatus");
-        generating.value = ["accepted", "running"].includes(state.status);
-      } else generating.value = !!job && ["accepted", "running"].includes(job.status);
-      if (job?.errorMessage && job.errorMessage !== statusError) { statusError = job.errorMessage; showNodeError(job.errorMessage, "图片生成失败"); }
+      const job = !pendingJob.value && typeof id === "string" ? await execution.getJob(id) : undefined;
+      if (pendingJob.value || job && ["cancelled", "failed", "needsReview"].includes(job.status)) {
+        applyGenerationState(await execution.call<GenerationState>("getGenerationStatus"));
+      } else {
+        generating.value = !!job && ["accepted", "running"].includes(job.status);
+        controlsBlocked.value = generating.value;
+        canCancelObservation.value = generating.value;
+      }
     }
   } catch (error) { if (!disposed) showNodeError(error, "任务状态读取失败"); }
   finally { if (!disposed) pollTimer = setTimeout(() => { void poll(); }, 2000); }

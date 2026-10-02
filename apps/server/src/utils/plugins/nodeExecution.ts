@@ -256,6 +256,11 @@ export async function loadNodeExecution(name: string, expectedRevision?: string)
   return { ...result, builtin };
 }
 
+export async function getNodeExecutionModule(name: string, revision: string): Promise<Record<string, unknown>> {
+  await loadNodeExecution(name, revision);
+  return import(pathToFileURL(resolve(revisionsDirectory, name, `r${revision}.node.js`)).href);
+}
+
 export async function getNodeExecutionArtifact(name: string, revision: string, fileName: string): Promise<{ path: string; revision: string }> {
   nodeNameSchema.parse(name);
   revisionSchema.parse(revision);

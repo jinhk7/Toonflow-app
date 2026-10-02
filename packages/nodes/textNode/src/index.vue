@@ -1,6 +1,7 @@
 <template>
   <nodeSkeleton
     v-bind="nodeProps"
+    :outputs="{ text: { dataType: 'STRING', value: savedText } }"
     v-model:bottomVisible="node.selected"
     :topVisible="node.selected"
     topWidth="max-content"
@@ -54,6 +55,7 @@ const { node, nodeProps, execution, nodeEvent } = useNode({ label: "文本" });
 const nodeData = computed(() => node.data as typeof node.data & Record<string, unknown>);
 const { refList, referenceMentions, setReferencePreview, removeReference } = useNodeReferences();
 const text = ref("");
+const savedText = ref("");
 const textReady = ref(false);
 const textPath = `assets/${node.id}/content.md`;
 const editing = ref(false);
@@ -84,6 +86,7 @@ function showError(error: unknown) {
 function applyText(content: string, nextRevision: string) {
   applying = true;
   text.value = content;
+  savedText.value = content;
   revision = nextRevision;
   applying = false;
 }
@@ -101,6 +104,7 @@ watch(text, value => {
     if (saveError) throw saveError;
     const result = await execution.writeText(textPath, value, revision);
     revision = result.revision;
+    savedText.value = value;
     if (text.value === value) dirty = false;
   }).catch(error => { saveError = error; showError(error); });
 }, { flush: "sync" });

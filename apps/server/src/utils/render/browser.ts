@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-type PendingCall = { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
+type PendingCall = { method: string; resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
 
 export async function findBrowser(configured?: string) {
   const candidates = configured ? [configured] : [
@@ -25,13 +25,19 @@ export async function startBrowser(browserPath: string, profile: string, signal:
     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows", "--mute-audio", "about:blank",
-  ], { stdin: "ignore", stdout: "ignore", stderr: "ignore", windowsHide: true });
+  ], { stdin: "ignore", stdout: "ignore", stderr: "pipe", windowsHide: true });
+  let diagnostic = "";
+  const diagnostics = (async () => {
+    const decoder = new TextDecoder();
+    for await (const chunk of child.stderr) diagnostic = (diagnostic + decoder.decode(chunk, { stream: true })).slice(-8192);
+  })();
+  void diagnostics.catch(() => {});
   let socket: WebSocket | undefined;
   const pending = new Map<number, PendingCall>();
   let nextId = 0;
   let closing: Promise<void> | undefined;
   function rejectPending(error: Error) {
-    for (const call of pending.values()) { clearTimeout(call.timer); call.reject(error); }
+    for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error(`${error.message}（${call.method}）`)); }
     pending.clear();
   }
   function call(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<unknown> {
@@ -39,7 +45,7 @@ export async function startBrowser(browserPath: string, profile: string, signal:
     return new Promise((resolve, reject) => {
       const id = ++nextId;
       const timer = setTimeout(() => { pending.delete(id); reject(new Error(`渲染浏览器响应超时：${method}`)); }, 30000);
-      pending.set(id, { resolve, reject, timer });
+      pending.set(id, { method, resolve, reject, timer });
       socket!.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
@@ -64,7 +70,7 @@ export async function startBrowser(browserPath: string, profile: string, signal:
     let activePort = "";
     while (!activePort) {
       signal.throwIfAborted();
-      if (child.exitCode !== null) throw new Error(`渲染浏览器启动失败（退出码 ${child.exitCode}）`);
+      if (child.exitCode !== null) throw new Error(`渲染浏览器启动失败（退出码 ${child.exitCode}）：${diagnostic.trim()}`);
       if (Date.now() - started > 15000) throw new Error("渲染浏览器启动超时");
       activePort = await readFile(join(profile, "DevToolsActivePort"), "utf8").catch((error: NodeJS.ErrnoException) => {
         // Windows 上 Chromium 写此文件时短暂独占；仅在本次启动的 15 秒期限内等待。
@@ -91,7 +97,7 @@ export async function startBrowser(browserPath: string, profile: string, signal:
       if (message.error) entry.reject(new Error(message.error.message));
       else entry.resolve(message.result);
     });
-    socket.addEventListener("close", () => rejectPending(new Error("渲染浏览器连接断开")));
+    socket.addEventListener("close", () => rejectPending(new Error(`渲染浏览器连接断开（退出码 ${child.exitCode ?? "未退出"}）：${diagnostic.trim()}`)));
     signal.throwIfAborted();
     return {
       call,

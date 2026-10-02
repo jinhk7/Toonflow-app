@@ -32,6 +32,7 @@
         "@earendil-works/pi-coding-agent": "^0.85.1",
         "@toonflow/ffmpeg": "workspace:*",
         "@toonflow/mcp": "workspace:*",
+        "@toonflow/node-director3d": "workspace:*",
         "@toonflow/nodes-scaffold": "workspace:*",
         "@toonflow/providers": "workspace:*",
         "@toonflow/teams-scaffold": "workspace:*",
@@ -214,12 +215,15 @@
       "name": "@toonflow/node-director3d",
       "version": "2.0.0",
       "dependencies": {
+        "@earendil-works/pi-agent-core": "0.85.1",
+        "@earendil-works/pi-ai": "0.85.1",
         "@tabler/icons-vue": "^3.46.0",
         "@tweenjs/tween.js": "25.0.0",
         "html2canvas-pro": "2.0.2",
         "three": "0.184.0",
         "threejson": "0.1.0-alpha.9",
         "vue-draggable-plus": "^0.6.1",
+        "zod": "^4.6.2",
       },
       "devDependencies": {
         "@toonflow/nodes-scaffold": "workspace:*",

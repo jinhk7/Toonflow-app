@@ -148,7 +148,7 @@ import {
 } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
 import { useCanvasTools } from "./useCanvasTools";
-import { fetchNodeCatalog, getExecutionClientId, isExecutableNode, createExecutionClient, type NodeExecutionHost } from "@toonflow/nodes-scaffold/runtime";
+import { fetchNodeCatalog, getExecutionClientId, isExecutableNode, createExecutionClient, useNodeCopyData, type NodeExecutionHost } from "@toonflow/nodes-scaffold/runtime";
 import type { NodeExecutionDescriptor } from "@toonflow/nodes-scaffold/execution";
 import { useWorkspaceEvents } from "@/lib/workspaceEvents";
 import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
@@ -289,6 +289,33 @@ provide<NodeExecutionHost>("nodeExecution", {
   },
   async refresh(target) { if (target.directory === project.value?.directory && target.canvasPath === canvasId.value) await refreshGraph(); },
 });
+useNodeCopyData(async nodeId => {
+  const node = findNode(nodeId);
+  const descriptor = node?.type ? nodeDescriptors.value[node.type] : undefined;
+  const action = descriptor?.actions.find(item => item.name === "getCopyData" || item.name === "node:getCopyData");
+  if (!node || !descriptor || !action) return;
+  const directory = project.value?.directory;
+  const path = canvasId.value;
+  const signal = canvasController.signal;
+  if (!directory || !path) throw new Error("画布尚未就绪，无法复制节点");
+  const checkBinding = () => {
+    signal.throwIfAborted();
+    if (project.value?.directory !== directory || canvasId.value !== path || findNode(nodeId)?.type !== node.type
+      || nodeDescriptors.value[node.type!]?.executionRevision !== descriptor.executionRevision) throw new Error("节点上下文已切换，请重新复制");
+  };
+  await flushCanvasSave();
+  checkBinding();
+  const patch = await createExecutionClient(directory).execute<Record<string, unknown>>({
+    canvasPath: path, name: "nodeTools",
+    args: { nodeId, name: action.name.startsWith("node:") ? action.name : `node:${action.name}`, args: {}, expectedNodeRevision: descriptor.executionRevision },
+    expectedVersions: { [nodeId]: graphSnapshots.get(path)?.toonflowGraph.nodes[nodeId] ?? 0 },
+  }, signal);
+  checkBinding();
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw new Error("节点复制数据无效");
+  await refreshGraph();
+  checkBinding();
+  return patch;
+}, flow);
 defineExpose({ canvasId, canvasReady, getCanvasContext, readDocumentNode, saveDocumentNode, flushSave: flushCanvasSave, cancelSave: cancelCanvasSave,
   getSelectedNodeIds: () => flow.getSelectedNodes.value.map(node => node.id),
   getMentionNodes: () => flow.nodes.value, findMentionNode: flow.findNode,

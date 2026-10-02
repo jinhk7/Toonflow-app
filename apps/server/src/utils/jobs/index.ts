@@ -22,6 +22,7 @@ export type NodeJobContext = {
   signal: AbortSignal;
   reportProgress(progress: number): void;
   saveResult(result: unknown): void;
+  beginCommit(): void;
 };
 
 type JobHandler = (input: Record<string, unknown>, context: NodeJobContext) => Promise<unknown>;
@@ -51,6 +52,7 @@ type JobRecord = {
 
 const handlers = new Map<string, { handler: JobHandler; recoveryMode: "safe" | "review"; revision: string }>();
 const activeJobs = new Map<string, AbortController>();
+const committingJobs = new Set<string>();
 const listeners = new Map<string, Set<(event: NodeJobEvent) => void>>();
 let tablesReady = false;
 let ready: Promise<void> | undefined;
@@ -117,11 +119,14 @@ function getRecord(jobId: string) {
 }
 
 function view(record: JobRecord): NodeJobView {
+  const summary = jobSummary(record);
   return {
     jobId: record.jobId,
     commandId: record.commandId,
     directory: record.directory,
     kind: record.kind,
+    ...(canResume(record) ? { canResume: true } : {}),
+    ...(summary ? { summary } : {}),
     ...(record.nodeId ? { nodeId: record.nodeId } : {}),
     ...(record.canvasPath ? { canvasPath: record.canvasPath } : {}),
     status: record.status,
@@ -131,6 +136,30 @@ function view(record: JobRecord): NodeJobView {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
+}
+
+function canResume(record: JobRecord) {
+  const registered = handlers.get(record.kind);
+  return record.recoveryMode === "safe" && registered?.recoveryMode === "safe"
+    && record.handlerRevision === registered.revision && !record.activationRequired
+    && (record.status === "failed" || record.status === "needsReview");
+}
+
+function jobSummary(record: JobRecord) {
+  const request = JSON.parse(record.requestJson) as NodeJobRequest;
+  if (record.kind === "text" && request.input.purpose === "errorExplanation" && typeof request.input.explanationLabel === "string")
+    return { modelLabel: request.input.explanationLabel.slice(0, 500) };
+  if (record.kind !== "directorDraft" && record.kind !== "render") return;
+  const payload = request.input.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+  const input = payload as Record<string, unknown>;
+  const summary: { instruction?: string; format?: "image" | "video"; anchorId?: string } = {};
+  if (typeof input.instruction === "string") summary.instruction = input.instruction.slice(0, 500);
+  if (input.format === "image" || input.format === "video") summary.format = input.format;
+  const anchor = input.anchor;
+  if (anchor && typeof anchor === "object" && !Array.isArray(anchor) && typeof (anchor as Record<string, unknown>).id === "string")
+    summary.anchorId = (anchor as { id: string }).id;
+  return Object.keys(summary).length ? summary : undefined;
 }
 
 function flushWorkspaceEvents() {
@@ -251,6 +280,7 @@ function startJob(jobId: string) {
       scratchDirectory,
       signal: controller.signal,
       saveResult(result) { controller.signal.throwIfAborted(); canonicalJson(result); updateJob(jobId, "running", result); },
+      beginCommit() { controller.signal.throwIfAborted(); committingJobs.add(jobId); },
       reportProgress(progress) {
         if (controller.signal.aborted || !Number.isFinite(progress)) return;
         const value = Math.max(0, Math.min(1, progress));
@@ -260,13 +290,17 @@ function startJob(jobId: string) {
         appendEvent(jobId, "progress", { progress: value });
       },
     });
-    controller.signal.throwIfAborted();
+    if (!committingJobs.has(jobId)) controller.signal.throwIfAborted();
     updateJob(jobId, "completed", result);
   })().catch((error: unknown) => {
     const needsReview = error && typeof error === "object" && "code" in error && error.code === "JOB_NEEDS_REVIEW";
     updateJob(jobId, needsReview ? "needsReview" : controller.signal.aborted ? "cancelled" : "failed", undefined,
       error instanceof Error ? error.message : String(error));
-  }).finally(() => { activeJobs.delete(jobId); });
+  }).finally(() => {
+    committingJobs.delete(jobId);
+    activeJobs.delete(jobId);
+    if (getRecord(jobId)?.status === "accepted") startJob(jobId);
+  });
 }
 
 export function registerNodeJobHandler(kind: string, handler: JobHandler, recoveryMode: "safe" | "review", handlerRevision?: string) {
@@ -346,6 +380,24 @@ export function activateNodeJob(jobId: string): NodeJobView {
   return getNodeJob(jobId)!;
 }
 
+export function resumeNodeJob(jobId: string): NodeJobView {
+  const record = getRecord(jobId);
+  if (!record) throw Object.assign(new Error("任务不存在"), { status: 404 });
+  const registered = handlers.get(record.kind);
+  if (record.recoveryMode !== "safe" || registered?.recoveryMode !== "safe"
+    || record.handlerRevision !== registered.revision || record.activationRequired)
+    throw Object.assign(new Error("任务不能安全恢复，请核对原任务和执行器版本"), { status: 409 });
+  if (record.status === "accepted" || record.status === "running") {
+    startJob(jobId);
+    return getNodeJob(jobId)!;
+  }
+  if (!canResume(record)) throw Object.assign(new Error("只有失败或需要核对的安全任务可以恢复"), { status: 409 });
+  database().prepare("UPDATE node_jobs SET cancelRequested = 0 WHERE jobId = ?").run(jobId);
+  updateJob(jobId, "accepted");
+  startJob(jobId);
+  return getNodeJob(jobId)!;
+}
+
 export function getNodeJob(jobId: string): NodeJobView | undefined {
   const record = getRecord(jobId);
   return record ? view(record) : undefined;
@@ -420,6 +472,7 @@ export function cancelNodeJob(jobId: string): NodeJobView {
   const record = getRecord(jobId);
   if (!record) throw Object.assign(new Error("任务不存在"), { status: 404 });
   if (terminal(record.status)) return view(record);
+  if (committingJobs.has(jobId)) return view(record);
   database().prepare("UPDATE node_jobs SET cancelRequested = 1 WHERE jobId = ?").run(jobId);
   const controller = activeJobs.get(jobId);
   if (controller) {

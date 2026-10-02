@@ -13,12 +13,17 @@
 - POST /api/agent/accept：保留 /api/agent 的原输入，增加 clientMessageId；返回 runId、sessionFile、重复受理标记，再订阅既有 /api/agent/events/get。
 - GET /api/agent/accept/get：directory、clientMessageId；查询受理记录。
 - GET /api/jobs/get、GET /api/jobs/list、POST /api/jobs/cancel、GET /api/jobs/events：持久本地节点/FFmpeg/渲染任务。既有媒体接口和账本保留，jobId 可关联其任务。
+- POST /api/jobs/resume：`{directory,jobId,confirmed:true}`；仅恢复处理器版本匹配、已完成绑定的 safe 任务，保留原输入、commandId 和结果。只有 `canResume:true` 的 failed/needsReview 任务提供入口，不自动重提模型或供应商生成。
+- POST /api/ai/explain：`{directory,commandId,message,context?}`；返回持久 text 作业，固定首次受理模型配置与解释输入，同命令重复请求返回原任务。
+- POST /api/workspaces/canvas/modify：原 Graph 批量修改接口继续使用协议头 `X-Toonflow-Protocol: 2`；新增/删除的 lifecycle 在同一个持久 canvasModify 作业内执行。
 
 参数中的 directory 为服务端规范化的绝对项目目录，canvasPath/path 为项目内相对路径。客户端每次操作固定目录快照。commandId/clientMessageId 在重试时保持不变；同标识不同内容返回409。
 
 CanvasCommand name 沿用现有 canvasOperations。nodeTools 参数沿用 nodeId/name/args/expectedNodeRevision。额外 node actions 仍从后端注册表发现，禁止节点名称能力白名单。expectedVersions 在图修改时对应现有节点/连线/输出版本。
 
 查询快照提供 cursor，必须与返回内容同一逻辑边界。WorkspaceEvent 为 {seq,eventId,directory,commandId?,canvasId?,nodeId?,type,payload,createdAt}；type 包括 graphChanged/contentChanged/jobChanged/pluginsChanged/uiIntent。事件用于显示，不触发客户端执行。AgentEvent 协议继续沿用，移除对 canvasCall 客户端执行的依赖。
+
+子/孙会话的 eventCursor.runId 指向所属 root run，afterSeq 使用该 run 的全局序号；客户端过滤当前子会话内容，但推进所有收到事件的序号。完成会话继续返回游标，activeRun 仅在所属运行未完成时存在。父会话发起新运行不改变旧子会话归属。
 
 ## 节点模块
 
@@ -40,9 +45,15 @@ NodeExecutionContext 绑定 directory/canvasPath/node/commandId/revision；提�
 
 内置 job kind：text 输入 {providerId,modelId,prompt,systemPrompt?,references?,path?,expectedRevision?}，结果 {text,path?,revision?}；media 输入 {mediaType,request,binding?}，request 为既有 MediaGenerationRequest，结果 GeneratedMedia[]；render 使用下列渲染契约。nodeId/canvasPath/pluginRevision 使用外层 NodeJobRequest 固定，不相信客户端额外伪造目标。自定义任务按后端 handler 注册发现。
 
+导演复制动作 getCopyData 在后端读取权威模型文件，返回 modelSnapshot 并清空路径和版本；副本初始化独立文件。撤销恢复优先保留该节点已经存在的有效文件，不用旧复制快照覆盖。canvasModify 固定新增/删除节点快照、revision、配置，逐 lifecycle 保存 completedLifecycle；失败保留原意图和任务供核对、显式恢复。
+
 ## 作业与渲染
 
 NodeJobRequest {kind,input,pluginRevision?,nodeId?,canvasPath?}。kind 按后端注册处理器发现，不限制节点名称。接受、执行、进度、产物提交和订阅分离。
+
+NodeJobView.summary 提供从固定输入抽取的展示信息（指令、格式、锚点等），不公开供应商密钥。beginCommit 只保护最终发布阶段；进入该阶段后取消返回当前运行状态，避免已写产物却报告取消。此前取消仍中止工作。媒体包装任务的取消仅停止观察，客户端仍查询原媒体任务，明确区分供应商状态与 observerStatus。
+
+directorDraft 与 render 的持久输入为 `{payload,host}`：payload 是业务快照，host 固定命令、节点/画布版本、配置摘要、插件 revision、父分组版本，以及 AI 配置/引用或渲染 worker/输出节点 revision。directorDraft 为 review 恢复策略，render 为 safe。生成成果先写 checkpoint，再 CAS 发布；目标变化时进入 needsReview，保留结果，不覆盖后续编辑。
 
 渲染 worker 输入 RenderJobInput：scene、plan、anchor、lighting、settings、aspect、width、height、frameRate、time、duration、format（image/video）、assets。所有资产都是后端预先校验的任务快照引用。
 

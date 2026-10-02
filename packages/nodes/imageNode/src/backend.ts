@@ -65,4 +65,3 @@ export default {
   layoutSize: { width: 258, height: 162 },
   actions: [setFile, uploadFile],
 } satisfies NodeExecutionDefinition;
-

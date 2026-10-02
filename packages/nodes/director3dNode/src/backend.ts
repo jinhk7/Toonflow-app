@@ -8,13 +8,15 @@ export { directorDraftInputSchema, generateDirectorDraft } from "./draftRunner";
 function getModelPath(context: NodeExecutionContext) {
   const id = context.node.id;
   if (!id || /[\\/\x00-\x1f]/.test(id) || id === "." || id === "..") throw new Error("节点 ID 不能作为模型文件目录");
-  return typeof context.node.data.modelPath === "string" && context.node.data.modelPath
-    ? context.node.data.modelPath : `assets/${id}/model.json`;
+  const path = `assets/${id}/model.json`;
+  if (context.node.data.modelPath && context.node.data.modelPath !== path) throw new Error("导演模型文件路径无效");
+  return path;
 }
 
 async function readModel(context: NodeExecutionContext) {
   const path = getModelPath(context);
-  const { content, revision } = await context.readText(path);
+  const { content, revision, exists } = await context.readText(path);
+  if (exists === false) throw Object.assign(new Error("导演模型文件不存在"), { code: "ENOENT" });
   if (new TextEncoder().encode(content).byteLength > 2000000) throw new Error("导演模型文件不能超过 2 MB");
   return { path, revision, document: modelDocumentSchema.parse(JSON.parse(content)), directory: context.directory, canvasPath: context.canvasPath };
 }
@@ -31,7 +33,7 @@ async function writeModel(context: NodeExecutionContext, document: ModelDocument
 
 function action<Schema extends z.ZodType>(name: string, description: string, parameters: Schema,
   execute: (args: z.output<Schema>, context: NodeExecutionContext) => unknown | Promise<unknown>, snapshotInputs = false): NodeExecutionAction {
-  return { name, description, parameters, ...(snapshotInputs ? { snapshotInputs: true } : {}), execute: (args, context) => execute(parameters.parse(args), context) };
+  return { name, description, parameters, snapshotInputs, execute: (args, context) => execute(parameters.parse(args), context) };
 }
 
 const preferencesSchema = z.strictObject({
@@ -49,19 +51,24 @@ const definition: NodeExecutionDefinition = {
   layoutSize: { width: 320, height: 240 },
   async initialize(context) {
     if (context.node.data.modelPath) { await readModel(context); return; }
-    try {
-      const existing = await readModel(context);
-      await context.patchData({ modelPath: existing.path, modelRevision: existing.revision, modelSnapshot: null });
+    const path = getModelPath(context);
+    const current = await context.readText(path);
+    if (current.exists !== false) {
+      // 撤销恢复或落盘后重试沿用此节点的权威文件，不用旧复制快照覆盖后续编辑。
+      modelDocumentSchema.parse(JSON.parse(current.content));
+      await context.patchData({ modelPath: path, modelRevision: current.revision, modelSnapshot: null });
       return;
-    } catch (error) {
-      if ((error as { code?: string }).code !== "ENOENT") throw error;
     }
     const snapshot = context.node.data.modelSnapshot;
     const document = snapshot ? modelDocumentSchema.parse(snapshot) : { version: 1 as const, scene: createEmptyScene(), plans: [] };
-    await writeModel(context, document);
+    await writeModel(context, document, current.revision);
   },
   actions: [
     action("getDocument", "读取导演模型和文件版本", z.strictObject({}), (_args, context) => readModel(context)),
+    action("getCopyData", "从后台模型文件生成独立节点复制快照，不共享原节点文件", z.strictObject({}), async (_args, context) => {
+      const current = await readModel(context);
+      return { modelPath: null, modelRevision: null, modelSnapshot: structuredClone(current.document) };
+    }),
     action("saveDocument", "按原文件版本提交导演模型，冲突时保留原文件", z.strictObject({
       document: modelDocumentSchema, expectedRevision: z.string().min(1),
     }), (args, context) => writeModel(context, args.document, args.expectedRevision)),
