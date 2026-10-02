@@ -45,12 +45,15 @@ export async function startBrowser(browserPath: string, profile: string, signal:
   }
   function close() {
     closing ??= (async () => {
-      if (socket?.readyState === WebSocket.OPEN) await call("Browser.close").catch(() => undefined);
-      socket?.close();
       const timer = setTimeout(() => { if (child.exitCode === null) child.kill(); }, 2000);
-      await child.exited;
-      clearTimeout(timer);
-      rejectPending(new Error("渲染浏览器已停止"));
+      try {
+        if (socket?.readyState === WebSocket.OPEN) await call("Browser.close").catch(() => undefined);
+        socket?.close();
+        await child.exited;
+      } finally {
+        clearTimeout(timer);
+        rejectPending(new Error("渲染浏览器已停止"));
+      }
     })();
     return closing;
   }

@@ -131,14 +131,16 @@ export function createRenderer(options: RendererOptions) {
         metadata: { ...metadata, frameCount, frameRate: input.frameRate, duration: input.format === "video" ? frameCount / input.frameRate : undefined, outputSize },
       };
     } finally {
-      await browser?.close();
-      server?.stop(true);
-      // 仅清理本次 mkdtemp 创建且仍直属任务目录的暂存目录，成功时保留产物供核心发布。
-      if (dirname(scratch) === directory) {
-        if (completed) {
-          await rm(profile, { recursive: true, force: true });
-          await rm(frames, { recursive: true, force: true });
-        } else await rm(scratch, { recursive: true, force: true });
+      try { await browser?.close(); }
+      finally {
+        server?.stop(true);
+        // 仅清理本次 mkdtemp 创建且仍直属任务目录的暂存目录，成功时保留产物供核心发布。
+        if (dirname(scratch) === directory) {
+          if (completed) {
+            await rm(profile, { recursive: true, force: true });
+            await rm(frames, { recursive: true, force: true });
+          } else await rm(scratch, { recursive: true, force: true });
+        }
       }
     }
   }

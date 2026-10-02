@@ -17,6 +17,10 @@ export const directorDraftInputSchema = z.strictObject({
   document: modelDocumentSchema, modelPath: z.string().min(1), modelRevision: z.string().min(1),
   selectedPlanId: z.string().max(100), anchors: z.array(anchorSchema).max(120),
   references: directorReferencesSchema,
+}).superRefine((input, context) => {
+  if (new TextEncoder().encode(JSON.stringify(input)).byteLength > 2000000) {
+    context.addIssue({ code: "custom", message: "导演任务快照不能超过 2 MB" });
+  }
 });
 
 /** 核心提供现有 streamAi 适配后的 stream 函数；此处不读取设置、不执行 HTTP、不持有画布。 */
@@ -54,5 +58,6 @@ export async function generateDirectorDraft(value: unknown, model: Model<Api>, s
   const document = modelDocumentSchema.parse({ version: 1, scene: result.scene,
     plans: [...previousPlans, { ...result.plan, id: input.id, instruction: input.instruction }],
   });
+  if (new TextEncoder().encode(JSON.stringify(document, null, 2)).byteLength > 2000000) throw new Error("导演模型文件不能超过 2 MB");
   return { document, modelPath: input.modelPath, expectedRevision: input.modelRevision, selectedPlanId: input.id, basePlanId: input.selectedPlanId };
 }

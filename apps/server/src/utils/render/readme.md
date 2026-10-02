@@ -10,4 +10,6 @@
 
 集成还需在 server 包声明已有工作区依赖 `@toonflow/node-director3d`，更新锁文件，并确认 NodeExecution SDK 已包含包 A 的 `useNodeExecution`、`createExecutionClient`。导演节点只发送命令和读取任务，不在卸载时取消后端作业。
 
+复制节点时，核心应从权威模型文件生成 `modelSnapshot`、清除源 `modelPath`/`modelRevision`，再让新节点 initialize 建立自己的模型文件。当前执行契约没有独立 copy hook，不能沿用网页卸载/复制回调，否则复制节点会引用源模型文件。任务列表当前不提供请求摘要，重开网页后草稿标题和图片锚点的按钮区分仍待核心提供只读摘要；任务状态和进度已按 nodeId/canvasPath 重新查询。
+
 已在临时目录用合成方块完成 PNG、3 帧 MP4 解码和取消清理验证。尚未运行真实项目、模型生成、完整持久任务恢复或真实操作系统/手机锁屏验证。本机 PATH 的 FFmpeg 可编码，但没有 ffprobe；现有生产 FFmpeg 工厂要求两者，集成时须使用现有合法配置或补齐可执行依赖，不能将本轮直接注入 FFmpeg 的小样例当作生产配置已就绪。

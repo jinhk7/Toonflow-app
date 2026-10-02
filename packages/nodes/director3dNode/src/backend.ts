@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { NodeExecutionAction, NodeExecutionContext, NodeExecutionDefinition } from "@toonflow/nodes-scaffold/execution";
 import { anchorSchema, createEmptyScene, createMannequinObject, modelDocumentSchema, type ModelDocument } from "./document";
 import { getRenderSize, lightingSchema, renderJobSchema, sceneSettingsSchema } from "./renderJob";
-import { directorReferencesSchema } from "./draftRunner";
+import { directorDraftInputSchema, directorReferencesSchema } from "./draftRunner";
 export { directorDraftInputSchema, generateDirectorDraft } from "./draftRunner";
 
 function getModelPath(context: NodeExecutionContext) {
@@ -15,6 +15,7 @@ function getModelPath(context: NodeExecutionContext) {
 async function readModel(context: NodeExecutionContext) {
   const path = getModelPath(context);
   const { content, revision } = await context.readText(path);
+  if (new TextEncoder().encode(content).byteLength > 2000000) throw new Error("导演模型文件不能超过 2 MB");
   return { path, revision, document: modelDocumentSchema.parse(JSON.parse(content)), directory: context.directory, canvasPath: context.canvasPath };
 }
 
@@ -84,11 +85,11 @@ const definition: NodeExecutionDefinition = {
       const inputs = await context.getInputs("in");
       if (inputs.some(input => input.value === undefined)) throw new Error("参考节点尚未提供输出，请先完成参考内容");
       const references = directorReferencesSchema.parse(inputs.map(({ dataType, value }) => ({ dataType, value })));
+      const input = directorDraftInputSchema.parse({ ...args, id: context.commandId, document: current.document, modelPath: current.path,
+        modelRevision: current.revision, selectedPlanId: context.node.data.selectedPlanId ?? "", anchors: context.node.data.anchors ?? [], references });
       return context.runJob({
         kind: "directorDraft", pluginRevision: context.revision, nodeId: context.node.id, canvasPath: context.canvasPath,
-        input: { ...args, id: context.commandId, document: current.document, modelPath: current.path,
-          modelRevision: current.revision, selectedPlanId: context.node.data.selectedPlanId ?? "",
-          anchors: context.node.data.anchors ?? [], references },
+        input,
       });
     }, true),
     action("exportVideo", "按固定时间采样接受后台无音轨 MP4 渲染任务", z.strictObject({ aspect: aspectSchema }), async (args, context) => {
