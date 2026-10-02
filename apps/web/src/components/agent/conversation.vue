@@ -81,6 +81,8 @@
       <span>正在压缩上下文…</span>
     </div>
     <div class="messageInput">
+      <div v-if="connectionError" class="connectionStatus" role="status">{{ connectionError }}</div>
+      <el-button v-if="pendingInput" size="small" :disabled="busy" @click="retryPendingMessage">查询并恢复待确认消息</el-button>
       <div v-if="editingId" class="editingBanner"><span>编辑消息</span><el-button text size="small" :disabled="busy" @click="cancelEdit">取消</el-button></div>
       <div
         class="senderResizeHandle"
@@ -109,7 +111,7 @@
         <el-button v-if="currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="pauseRun">暂停后续</el-button>
         <el-button v-if="currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="terminateRun">终止流程</el-button>
         <el-button v-if="currentRunId && resumableRun" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="resumeRun">继续运行</el-button>
-        <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="createCanvasContext?.()?.id" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
+        <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="currentCanvasId" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
         <skillMenu ref="skillMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="skillQuery" :editor="senderElement" @select="selectSkill" @dismiss="skillQuery = undefined" />
         <el-popover
           v-model:visible="contextMenuVisible"
@@ -162,7 +164,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, reactive, ref, shallowRef, watch, type ComponentPublicInstance } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch, type ComponentPublicInstance } from "vue";
 import { defaultRangeExtractor, observeElementRect, useVirtualizer } from "@tanstack/vue-virtual";
 import axios from "axios";
 import {
@@ -187,10 +189,11 @@ import { modelChoices } from "@/stores/settings";
 import { useWorkspaceStore } from "@/stores/workspace";
 import type { AgentAttachment, AgentConversation, AgentMessage } from "./types";
 import type { AgentEvent, AgentMention } from "@toonflow/server/agent/types";
-import { createConversationStream, readAgentEvents } from "./replyStream";
-import { controlAgentRun, fetchAgentRunSnapshot, reviewAgentRun, subscribeAgentRunEvents, type AgentRunSnapshot } from "./runClient";
+import { createConversationStream } from "./replyStream";
+import { acceptAgentMessage, controlAgentRun, fetchAgentRunSnapshot, getAcceptedAgentMessage, clearPendingAgentMessage, pendingAgentMessages, reviewAgentRun, subscribeAgentRunEvents, type AgentAcceptInput, type AgentRunSnapshot } from "./runClient";
 import authorizationPrompt from "./authorizationPrompt.vue";
 import type { CanvasContext } from "@toonflow/tool-canvas/runtime";
+import { ExecutionRequestError, getExecutionClientId } from "@toonflow/nodes-scaffold/runtime";
 import chatItem from "@tdesign-vue-next/chat/es/chat-item";
 import chatReasoning from "@tdesign-vue-next/chat/es/chat-reasoning";
 import messageMarkdown from "@/components/messageMarkdown.vue";
@@ -199,23 +202,31 @@ import "tdesign-vue-next/es/style/index.css";
 import "@tdesign-vue-next/chat/es/style/index.css";
 import "x-sender/lib/XSender.css";
 
-const props = defineProps<{ active: boolean; initialSession: AgentConversation | null; sessionFile?: string; disabled: boolean }>();
+const props = defineProps<{ active: boolean; initialSession: AgentConversation | null; sessionFile?: string; disabled: boolean; directory?: string; canvasId?: string; selectedNodeIds?: string[] }>();
 const emit = defineEmits<{ session: [file: string]; sent: [prompt: string]; event: [event: AgentEvent] }>();
 const workspaceStore = useWorkspaceStore();
-const directory = workspaceStore.project?.directory;
+const directory = props.directory ?? workspaceStore.project?.directory;
 const draftAttachments = ref<AgentAttachment[]>([]);
 const createCanvasContext = inject<(() => CanvasContext | undefined) | undefined>("canvas", undefined);
+const getAgentCanvasContext = inject<(() => { id: string; selectedNodeIds: string[] } | undefined) | undefined>("agentCanvasContext", undefined);
 const messages = ref<AgentMessage[]>((props.initialSession?.messages ?? []).map(message => ({ ...message })));
 const stream = createConversationStream(messages);
 const remoteRunning = ref(props.initialSession?.running ?? false);
-const currentRunId = ref(props.initialSession?.activeRun?.runId);
+const currentRunId = ref(props.initialSession?.eventCursor?.runId ?? props.initialSession?.activeRun?.runId);
 const runStatus = ref(props.initialSession?.activeRun?.status);
 const authorizationError = ref<string>();
 const reviewOpen = ref(false);
 const reviewCalls = ref<NonNullable<AgentRunSnapshot["reviewCalls"]>>([]);
 const reviewingId = ref<string>();
-let eventCursor = props.initialSession?.activeRun?.lastEventSeq ?? 0;
+let eventCursor = props.initialSession?.eventCursor?.afterSeq ?? props.initialSession?.activeRun?.lastEventSeq ?? 0;
 let reconnectController: AbortController | undefined;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+let reconnectDelay = 1000;
+let disposed = false;
+const connectionError = ref("");
+const pendingInput = ref<AgentAcceptInput>();
+const boundSessionFile = ref(props.sessionFile);
+const currentCanvasId = computed(() => props.canvasId ?? getAgentCanvasContext?.()?.id ?? createCanvasContext?.()?.id);
 const stats = ref(props.initialSession?.stats);
 const contextUsage = ref(props.initialSession?.contextUsage);
 const busy = ref(false);
@@ -223,7 +234,7 @@ const compacting = ref(false);
 const deletingId = ref<string>();
 const locked = computed(() => props.disabled || busy.value || deletingId.value !== undefined);
 const resumableRun = computed(() => {
-  return Boolean(currentRunId.value && runStatus.value && ["paused", "needsReview", "error"].includes(runStatus.value));
+  return Boolean(currentRunId.value && runStatus.value && ["paused", "needsReview", "error", "waitingApproval"].includes(runStatus.value));
 });
 const editingId = ref<string>();
 const draftMentions = ref<AgentMention[]>([]);
@@ -307,57 +318,167 @@ watch([locked, () => props.active], ([locked, active]) => {
 });
 watch([() => props.active, () => props.initialSession?.activeRun?.runId], ([active, runId]) => {
   if (!active) contextMenuVisible.value = false;
-  else if (runId && !controller && !reconnectController) void reconnectActiveRun();
+  else if ((runId || boundSessionFile.value) && !controller && !reconnectController) void reconnectActiveRun();
 }, { immediate: true });
 
-async function refreshRunStatus(runId: string) {
-  const snapshot = await fetchAgentRunSnapshot(runId);
+async function refreshRunStatus(runId: string, signal?: AbortSignal) {
+  const snapshot = await fetchAgentRunSnapshot(runId, signal);
   if (currentRunId.value !== runId) return snapshot;
   runStatus.value = snapshot.status;
   remoteRunning.value = snapshot.live;
   return snapshot;
 }
 
+function scheduleReconnect(delay = reconnectDelay) {
+  clearTimeout(reconnectTimer);
+  if (disposed || document.hidden || !props.active) return;
+  reconnectTimer = setTimeout(() => { void reconnectActiveRun(); }, delay);
+}
+
+async function reloadConversation(signal: AbortSignal) {
+  const file = boundSessionFile.value;
+  if (!directory || !file) return;
+  const { data } = await axios.get<{ code: number; data: AgentConversation; message?: string }>("/api/agent/get", {
+    params: { directory, sessionFile: file }, signal,
+  });
+  signal.throwIfAborted();
+  if (data.code !== 200) throw new Error(data.message || "读取会话快照失败");
+  const session = data.data;
+  const oldTools = new Map(messages.value.flatMap(message => message.parts ?? []).flatMap(part => part.type === "tool" ? [[part.tool.id, part] as const] : []));
+  stream.suspend();
+  messages.value = session.messages.map(message => ({
+    ...message,
+    parts: message.parts?.map(part => {
+      if (part.type !== "tool") return part;
+      const old = oldTools.get(part.tool.id);
+      if (!old) return part;
+      const question = old.tool.question?.callId === part.tool.question?.callId ? old.tool.question : part.tool.question;
+      Object.assign(old.tool, part.tool, { question });
+      return old;
+    }),
+  }));
+  stats.value = session.stats;
+  contextUsage.value = session.contextUsage;
+  for (const agent of session.subAgents ?? []) emit("event", { type: "subAgent", agent });
+  if (session.eventCursor) { currentRunId.value = session.eventCursor.runId; eventCursor = session.eventCursor.afterSeq; }
+  if (session.activeRun) {
+    currentRunId.value = session.activeRun.runId;
+    runStatus.value = session.activeRun.status;
+    eventCursor = session.eventCursor?.runId === session.activeRun.runId ? session.eventCursor.afterSeq : session.activeRun.lastEventSeq;
+    for (const question of session.activeRun.waitingQuestions) {
+      const part = messages.value.flatMap(message => message.parts ?? []).find(part => part.type === "tool" && part.tool.id === question.toolCallId);
+      if (part?.type === "tool" && part.tool.question?.callId !== question.callId) part.tool.question = question as NonNullable<typeof part.tool.question>;
+    }
+  }
+  remoteRunning.value = session.running ?? false;
+}
+
 async function reconnectActiveRun() {
-  const runId = currentRunId.value ?? props.initialSession?.activeRun?.runId;
-  if (!runId || !directory || controller || reconnectController) return;
-  currentRunId.value = runId;
+  if (!directory || controller || reconnectController || disposed || document.hidden) return;
+  if (!currentRunId.value && !boundSessionFile.value) return;
+  clearTimeout(reconnectTimer);
   const connection = new AbortController();
   reconnectController = connection;
-  const canvasContext = createCanvasContext?.();
-  const handledCanvasCalls = new Set<string>();
+  let interrupted = false;
   try {
-    const snapshot = await refreshRunStatus(runId);
-    if (connection.signal.aborted || (!snapshot.live && snapshot.lastEventSeq <= eventCursor)) return;
+    await reloadConversation(connection.signal);
+    const runId = currentRunId.value;
+    if (!runId) return;
+    const snapshot = await refreshRunStatus(runId, connection.signal);
+    if (connection.signal.aborted || !snapshot.live && snapshot.lastEventSeq <= eventCursor) return;
     busy.value = snapshot.live;
-    await subscribeAgentRunEvents(runId, eventCursor, async (event, meta) => {
-      let toolEvent = event;
-      while (toolEvent.type === "subAgentEvent") toolEvent = toolEvent.event;
-      if (toolEvent.type === "canvasCall") {
-        if (!handledCanvasCalls.has(toolEvent.callId)) {
-          await sendCanvasResult(toolEvent, canvasContext, connection.signal);
-          handledCanvasCalls.add(toolEvent.callId);
-        }
+    connectionError.value = "";
+    await subscribeAgentRunEvents(runId, eventCursor, (event, meta) => {
+      if (props.initialSession?.parentFile) {
+        if (event.type === "subAgentEvent" && event.file === boundSessionFile.value) applyEvent(event.event);
       } else applyEvent(event);
-      if (meta?.seq) eventCursor = meta.seq;
+      if (meta?.seq !== undefined) eventCursor = meta.seq;
+      reconnectDelay = 1000;
     }, connection.signal);
   } catch (error) {
-    if (!connection.signal.aborted) ElMessage.error(error instanceof Error ? error.message : "重连运行事件失败");
+    if (!connection.signal.aborted) {
+      interrupted = true;
+      connectionError.value = error instanceof Error ? error.message : "连接中断，正在恢复后台运行";
+      reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+    }
   } finally {
     if (reconnectController === connection) {
       reconnectController = undefined;
-      stream.finish();
+      stream.suspend();
       compacting.value = false;
       busy.value = false;
-      await refreshRunStatus(runId).catch(() => {});
+      scheduleReconnect(interrupted ? reconnectDelay : 10_000);
     }
   }
 }
 
+async function retryPendingMessage() {
+  const input = pendingInput.value;
+  if (!input || busy.value || controller || disposed) return;
+  const connection = new AbortController();
+  controller = connection;
+  busy.value = true;
+  try {
+    const accepted = await getAcceptedAgentMessage(input.directory, input.clientMessageId, connection.signal)
+      ?? await acceptAgentMessage(input, connection.signal);
+    clearPendingAgentMessage(input.clientMessageId);
+    pendingInput.value = undefined;
+    currentRunId.value = accepted.runId;
+    boundSessionFile.value = accepted.sessionFile;
+    emit("session", accepted.sessionFile);
+    connectionError.value = "";
+  } catch (error) {
+    if (error instanceof ExecutionRequestError && error.status < 500 && error.status !== 409) pendingInput.value = undefined;
+    if (!connection.signal.aborted) connectionError.value = error instanceof Error ? error.message : "查询受理记录失败，消息已保留";
+  } finally {
+    controller = undefined;
+    busy.value = false;
+    if (!pendingInput.value) void reconnectActiveRun();
+  }
+}
+
+function restoreConnection() {
+  if (document.hidden) {
+    clearTimeout(reconnectTimer);
+    reconnectController?.abort();
+    return;
+  }
+  if (!props.active) return;
+  if (pendingInput.value) void retryPendingMessage();
+  else void reconnectActiveRun();
+}
+
+onMounted(() => {
+  pendingInput.value = directory ? pendingAgentMessages(directory, boundSessionFile.value)[0] : undefined;
+  document.addEventListener("visibilitychange", restoreConnection);
+  window.addEventListener("online", restoreConnection);
+  window.addEventListener("pageshow", restoreConnection);
+  restoreConnection();
+});
+onBeforeUnmount(() => {
+  disposed = true;
+  clearTimeout(reconnectTimer);
+  controller?.abort();
+  reconnectController?.abort();
+  stream.suspend();
+  document.removeEventListener("visibilitychange", restoreConnection);
+  window.removeEventListener("online", restoreConnection);
+  window.removeEventListener("pageshow", restoreConnection);
+});
+
 function applyEvent(event: AgentEvent) {
   switch (event.type) {
-    case "subAgent":
-    case "subAgentEvent": emit("event", event); break;
+    case "canvasCall":
+      connectionError.value = "服务端仍使用旧画布执行协议，请完成后端迁移";
+      break;
+    case "subAgent": emit("event", event); break;
+    case "subAgentEvent": {
+      let inner = event.event;
+      while (inner.type === "subAgentEvent") inner = inner.event;
+      if (inner.type === "canvasCall") connectionError.value = "子任务仍使用旧画布执行协议，请完成后端迁移";
+      else emit("event", event);
+      break;
+    }
     case "report":
       if (event.parentFile !== props.sessionFile) { emit("event", event); break; }
       if (!messages.value.some(message => message.id === event.id)) messages.value.push({
@@ -373,7 +494,7 @@ function applyEvent(event: AgentEvent) {
       remoteRunning.value = true;
       authorizationError.value = undefined;
       break;
-    case "session": emit("session", event.file); break;
+    case "session": boundSessionFile.value = event.file; emit("session", event.file); break;
     case "stats": stats.value = event.stats; contextUsage.value = event.contextUsage; break;
     case "done":
       remoteRunning.value = false;
@@ -587,12 +708,11 @@ async function pauseRun() {
 
 async function resumeRun() {
   if (!currentRunId.value) return;
-  const canvasContext = createCanvasContext?.();
   try {
     const snapshot = await fetchAgentRunSnapshot(currentRunId.value);
     reviewCalls.value = snapshot.reviewCalls ?? [];
     if (reviewCalls.value.length) { reviewOpen.value = true; return; }
-    await controlAgentRun(currentRunId.value, "resume", canvasContext ? { id: canvasContext.id, tools: canvasContext.tools } : undefined);
+    await controlAgentRun(currentRunId.value, "resume");
     runStatus.value = "running";
     remoteRunning.value = true;
     ElMessage.success("已继续运行");
@@ -652,30 +772,6 @@ async function uploadAttachments(attachments: AgentAttachment[], directory: stri
   }
 }
 
-async function sendCanvasResult(event: Extract<AgentEvent, { type: "canvasCall" }>, canvasContext: CanvasContext | undefined, signal: AbortSignal) {
-  let body: string;
-  try {
-    if (!canvasContext) throw new Error("当前页面没有激活的画布");
-    const result = await canvasContext.call(event, signal);
-    body = JSON.stringify({ directory, callId: event.callId, result: result ?? null });
-  } catch (error) {
-    body = JSON.stringify({ directory, callId: event.callId, error: (error instanceof Error && error.message ? error.message : "画布操作失败").slice(0, 8000) });
-  }
-  const cancelled = signal.aborted;
-  if (cancelled) body = JSON.stringify({ directory, callId: event.callId, error: "画布操作已取消" });
-  const response = await fetch("/api/agent/canvasResult", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
-    body,
-    keepalive: cancelled,
-    signal: cancelled ? AbortSignal.timeout(5000) : signal,
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => null);
-    throw new Error(error?.message || "画布操作结果回传失败");
-  }
-}
-
 async function sendMessage(source?: AgentMessage) {
   const instance = sender;
   const editing = source && editingId.value === source.id;
@@ -684,134 +780,71 @@ async function sendMessage(source?: AgentMessage) {
   const mentionedIds = source && !editing ? (source.mentions ?? []).filter(mention => prompt.includes(`{{mention:${mention.id}}}`)).map(mention => mention.id)
     : instance?.getTagData().mention.map(mention => mention.id) ?? [];
   const references = source && !editing ? source.mentions ?? [] : draftMentions.value;
-  const mentions = references.filter(mention => mentionedIds.includes(mention.id)).map(mention => ({ ...mention }));
+  const mentions = JSON.parse(JSON.stringify(references.filter(mention => mentionedIds.includes(mention.id)))) as AgentMention[];
   if (mentionedIds.some(id => !mentions.some(mention => mention.id === id))) return ElMessage.warning("存在无法读取的提及，请删除后重新选择");
   if (!source && editingId.value !== undefined) return;
   const resendIndex = source ? messages.value.findIndex(item => item.id === source.id) : -1;
   if (source && (source.role !== "user" || resendIndex < 0)) return;
   const resendFrom = source ? source.entryId ?? messages.value.slice(resendIndex + 1).find(item => item.role === "user" && item.entryId)?.entryId : undefined;
-  if (locked.value || !instance || (!prompt && !attachments.length)) return;
+  if (locked.value || pendingInput.value || !instance || !prompt && !attachments.length) return;
   const model = selectedModelChoice.value;
   if (!directory) return ElMessage.warning("请先打开项目");
   if (!model) return ElMessage.warning("请先选择模型");
 
   const requestController = new AbortController();
-  const canvasContext = createCanvasContext?.();
+  const canvasId = currentCanvasId.value;
+  const selectedNodeIds = [...(props.selectedNodeIds ?? getAgentCanvasContext?.()?.selectedNodeIds ?? [])];
+  const clientMessageId = crypto.randomUUID();
   controller = requestController;
   busy.value = true;
-  compacting.value = false;
+  connectionError.value = "";
   instance.disable();
-  const reply = reactive<AgentMessage>({ id: crypto.randomUUID(), role: "assistant", content: "", parts: [], streaming: true });
-  const userMessage = reactive<AgentMessage>({ id: crypto.randomUUID(), role: "user", content: prompt, attachments, mentions });
-  let ownsStream = !remoteRunning.value;
-  let forwarded = false;
-  let reconnect = false;
-  if (!source) {
-    messages.value.push(userMessage);
-    if (ownsStream) messages.value.push(reply);
-    draftAttachments.value = [];
-    draftMentions.value = [];
-  }
-  let accepted = false;
-  if (ownsStream) stream.begin(reply);
-  const handledCanvasCalls = new Set<string>();
-  const pendingQuestions = new Map<string, string>();
-  const activeChildFiles = new Set<string>();
+  const userMessage = reactive<AgentMessage>({ id: clientMessageId, role: "user", content: prompt, attachments, mentions });
   const finishStats = anonymousData.startAgent();
+  let accepted = false;
   try {
-    if (!source) await instance.reset();
-    requestController.signal.throwIfAborted();
     await uploadAttachments(attachments, directory, requestController.signal);
-    const response = await fetch("/api/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-toonflow-workspace": "1" },
-      body: JSON.stringify({ prompt, mentions, attachments: attachments.map(({ name, path, mimeType }) => ({ name, path, mimeType })), directory, providerId: model.providerId, modelId: model.modelId, thinkingLevel: reasoningEffort.value || undefined, sessionFile: props.sessionFile, resendFrom, canvas: canvasContext ? { id: canvasContext.id, tools: canvasContext.tools } : undefined }),
-      signal: requestController.signal,
-    });
-    for await (const event of readAgentEvents(response, requestController.signal)) {
-      const seq = (event as AgentEvent & { runSeq?: number }).runSeq;
-      // 子任务复用发起委派时的画布与取消通道，界面切换不改变工具执行目标。
-      let toolEvent: AgentEvent = event;
-      let scope = "";
-      while (toolEvent.type === "subAgentEvent") {
-        if (toolEvent.event.type === "done" || toolEvent.event.type === "error") activeChildFiles.delete(toolEvent.file);
-        else activeChildFiles.add(toolEvent.file);
-        scope += `${toolEvent.file}/`;
-        toolEvent = toolEvent.event;
-      }
-      if (toolEvent.type === "question") pendingQuestions.set(`${scope}${toolEvent.toolCallId}`, toolEvent.callId);
-      if (toolEvent.type === "tool" && toolEvent.tool.status !== "running") pendingQuestions.delete(`${scope}${toolEvent.tool.id}`);
-      if (toolEvent.type === "canvasCall") {
-        if (handledCanvasCalls.has(toolEvent.callId)) throw new Error("收到重复的画布调用");
-        handledCanvasCalls.add(toolEvent.callId);
-        await sendCanvasResult(toolEvent, canvasContext, requestController.signal);
-        if (seq !== undefined) eventCursor = seq;
-        continue;
-      }
-      switch (event.type) {
-        case "accepted":
-          forwarded = true;
-          if (ownsStream) {
-            stream.finish();
-            messages.value = messages.value.filter(message => message !== reply);
-          }
-          break;
-        case "userMessage":
-          if (!ownsStream) {
-            messages.value.push(reply);
-            stream.begin(reply);
-          }
-          userMessage.entryId = event.id;
-          reply.replyTo = event.id;
-          if (source && !accepted) {
-            messages.value.splice(resendIndex, messages.value.length - resendIndex, userMessage, reply);
-            stats.value = undefined;
-            contextUsage.value = undefined;
-            await restoreEditingDraft();
-          }
-          accepted = true;
-          ownsStream = true;
-          applyEvent(event);
-          break;
-        case "stats":
-          if (source && !accepted) break;
-          applyEvent(event);
-          break;
-        default:
-          if ((event.type !== "done" && event.type !== "error") || (ownsStream && !forwarded)) applyEvent(event);
-      }
-      if (seq !== undefined) eventCursor = seq;
+    const input: AgentAcceptInput = {
+      clientMessageId, clientId: getExecutionClientId(), prompt, directory, mentions,
+      attachments: attachments.map(({ name, path, mimeType }) => ({ name, path, mimeType })),
+      providerId: model.providerId, modelId: model.modelId,
+      thinkingLevel: reasoningEffort.value || undefined, sessionFile: boundSessionFile.value, resendFrom,
+      canvas: canvasId ? { id: canvasId, selectedNodeIds } : undefined,
+    };
+    pendingInput.value = input;
+    const receipt = await acceptAgentMessage(input, requestController.signal);
+    accepted = true;
+    pendingInput.value = undefined;
+    boundSessionFile.value = receipt.sessionFile;
+    currentRunId.value = receipt.runId;
+    eventCursor = 0;
+    remoteRunning.value = true;
+    runStatus.value = "running";
+    emit("session", receipt.sessionFile);
+    if (source) {
+      messages.value.splice(resendIndex, messages.value.length - resendIndex, userMessage);
+      stats.value = undefined;
+      contextUsage.value = undefined;
+      await restoreEditingDraft();
+    } else {
+      messages.value.push(userMessage);
+      draftAttachments.value = [];
+      draftMentions.value = [];
+      if (sender === instance) await instance.reset();
     }
-    if (source && !accepted) throw new Error("服务端未确认重发，请重新打开对话后重试");
     finishStats("success");
     emit("sent", mentionPlainText(prompt, mentions) || attachments[0]?.name || "新对话");
   } catch (error) {
-    finishStats(requestController.signal.aborted ? "cancelled" : "failed");
-    reconnect = !requestController.signal.aborted && Boolean(currentRunId.value && remoteRunning.value);
-    const responseMessage = (error as { response?: { data?: { message?: string } } })?.response?.data?.message;
-    const message = requestController.signal.aborted ? "已停止生成" : responseMessage || (error instanceof Error ? error.message : "发送失败，请重试");
-    if ((source && !accepted) || !ownsStream) { userMessage.error = message; ElMessage.error(message); }
-    else if (!reconnect) reply.error = message;
-    if (ownsStream && props.initialSession?.parentFile && props.sessionFile) {
-      emit("event", { type: "subAgentEvent", file: props.sessionFile, event: { type: "error", message } });
+    finishStats("failed");
+    if (error instanceof ExecutionRequestError && error.status < 500 && error.status !== 409) pendingInput.value = undefined;
+    if (!disposed && !requestController.signal.aborted) {
+      connectionError.value = error instanceof Error ? error.message : "发送结果待确认，消息草稿已保留";
+      ElMessage.error(connectionError.value);
     }
   } finally {
-    for (const file of activeChildFiles) emit("event", { type: "subAgentEvent", file, event: { type: "error", message: "委派连接已结束，请重新打开子会话查看结果" } });
-    // ACT: Bun 的流断开事件可能不触发；主动结束仍在等待的提问，不依赖断开通知。
-    if (!currentRunId.value) {
-      for (const callId of pendingQuestions.values()) {
-        void fetch("/api/agent/answer", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ directory, callId, cancelled: true }), keepalive: true,
-        }).catch(() => {});
-      }
-    }
-    if (ownsStream && !forwarded && !reconnect) stream.finish();
-    compacting.value = false;
+    if (controller === requestController) controller = undefined;
     busy.value = false;
-    controller = undefined;
-    if (reconnect) void reconnectActiveRun();
-    else if (currentRunId.value) void refreshRunStatus(currentRunId.value).catch(() => {});
+    if (accepted && !disposed) void reconnectActiveRun();
   }
 }
 
@@ -901,7 +934,7 @@ watch(senderElement, (element, _previous, onCleanup) => {
   });
 });
 
-watch(() => !props.initialSession?.parentFile && !!workspaceStore.pendingAgentMessage && props.active && !locked.value && !!senderElement.value && !!createCanvasContext?.(), async ready => {
+watch(() => !props.initialSession?.parentFile && !!workspaceStore.pendingAgentMessage && props.active && !locked.value && !!senderElement.value && !!currentCanvasId.value, async ready => {
   const message = workspaceStore.pendingAgentMessage;
   const instance = sender;
   if (!ready || !message || !instance || message.directory !== directory) return;

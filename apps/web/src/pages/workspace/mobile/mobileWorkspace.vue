@@ -10,7 +10,8 @@
     <div class="actions">
       <el-button type="primary" :disabled="!graph" @click="addNodeVisible = true">新增节点</el-button>
       <el-button :disabled="!selectedIds.length || !graph" @click="groupSelected">归组</el-button>
-      <el-button @click="openTasks">任务与 Agent</el-button>
+      <el-button @click="openAgent">Agent</el-button>
+      <el-button @click="openTasks">任务</el-button>
       <el-button :icon="IconRefresh" :loading="loading" aria-label="刷新画布" @click="reload" />
     </div>
     <el-alert v-if="graphError" type="error" :title="graphError" showIcon :closable="false" />
@@ -40,13 +41,15 @@ import mobileNodeList from "./components/mobileNodeList.vue";
 import mobileAddNodeSheet from "./components/mobileAddNodeSheet.vue";
 import { listProjectCanvases } from "./lib/canvasList";
 import { buildGroupTree, flattenTreeForSearch, nodeLabel, type CanvasNode, type GroupTreeItem } from "./lib/mobileGraphModel";
-import { changeForNode, createGroupAroundNodes, createNodePayload } from "./lib/mobileGraphOps";
-import { fetchEnabledNodeTypes, loadNodeHandles, type MobileNodeType } from "./lib/nodeCatalog";
+import { createGroupAroundNodes, createNodePayload } from "./lib/mobileGraphOps";
+import { fetchEnabledNodeTypes, type MobileNodeType } from "./lib/nodeCatalog";
+import useWorkspaceExecution from "@/lib/workspaceExecution";
 import { useMobileGraph } from "./lib/useMobileGraph";
 
 const route = useRoute();
 const router = useRouter();
 const directory = computed(() => String(route.query.directory ?? ""));
+const getExecution = useWorkspaceExecution(directory);
 const projectName = computed(() => String(route.query.name ?? "项目"));
 const canvasId = ref(String(route.query.canvas ?? ""));
 const canvases = ref<{ id: string; name: string }[]>([]);
@@ -126,6 +129,9 @@ function openNode(nodeId: string) {
 function openTasks() {
   void router.push({ path: "/mobile/tasks", query: { directory: directory.value, name: projectName.value, canvas: canvasId.value } });
 }
+function openAgent() {
+  void router.push({ path: "/mobile/agent", query: { directory: directory.value, name: projectName.value, canvas: canvasId.value, selected: JSON.stringify(selectedIds.value) } });
+}
 
 async function createNode(payload: { type: string; label: string }) {
   if (!graph.value) return;
@@ -133,10 +139,10 @@ async function createNode(payload: { type: string; label: string }) {
   if (!definition) throw new Error("节点类型已不可用");
   const node = createNodePayload(payload.type, payload.label, graph.value.nodes.length);
   try {
-    node.data = { ...node.data, handles: await loadNodeHandles(definition) };
-    await applyChanges([changeForNode(graph.value, node, node.id)]);
+    const added = await getExecution().execute<{ node: { id: string } }>({ canvasPath: canvasId.value, name: "addNode", args: { type: payload.type, label: payload.label, position: node.position } });
+    await load();
     ElMessage.success("已添加节点");
-    openNode(node.id);
+    openNode(added.node.id);
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : "添加节点失败");
   }

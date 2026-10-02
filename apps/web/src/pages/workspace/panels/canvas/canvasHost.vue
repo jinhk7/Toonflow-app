@@ -156,6 +156,7 @@ const mentionSource: MentionCanvasSource = {
 };
 
 defineExpose({ canvasId, canvasReady, getCanvasContext, readDocumentNode, saveDocumentNode, flushSave, cancelSave,
+  getSelectedNodeIds: () => activeInstance.value?.getSelectedNodeIds() ?? [],
   mentionSource,
   get saveBusy() { return [...instances.values()].some(panel => panel.saveBusy); },
 });

@@ -4,9 +4,9 @@ import type { Node, Edge } from "@vue-flow/core";
 import { useWorkspaceStore } from "@/stores/workspace";
 
 type WorkspaceEntry = { name: string; path: string; type: "file" | "directory" };
-export type WorkspaceGraph = { toonflowCanvas: true; nodes: Node[]; edges: Edge[]; viewport: { x: number; y: number; zoom: number }; toonflowGraph: { id: string; revision: number; nodes: Record<string, number>; edges: Record<string, number>; outputs: Record<string, number>; viewport: number } };
+export type WorkspaceGraph = { toonflowCanvas: true; cursor?: number; nodes: Node[]; edges: Edge[]; viewport: { x: number; y: number; zoom: number }; toonflowGraph: { id: string; revision: number; nodes: Record<string, number>; edges: Record<string, number>; outputs: Record<string, number>; viewport: number } };
 export type GraphChange = { kind: "node" | "edge"; id: string; expectedVersion: number; dependencies?: Record<string, number>; value: Node | Edge | null } | { kind: "output"; nodeId: string; slot: string; expectedVersion: number; value: unknown } | { kind: "viewport"; expectedVersion: number; value: WorkspaceGraph["viewport"] };
-const client = axios.create({ baseURL: "/api/workspaces" });
+const client = axios.create({ baseURL: "/api/workspaces", headers: { "X-Toonflow-Protocol": "2" } });
 const fileUrls = new Map<string, { directory: string; path: string; url: Promise<string>; users: number }>();
 
 function cachePath(path: string) {

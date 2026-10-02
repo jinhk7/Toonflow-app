@@ -2,37 +2,14 @@ import { reactive, type Ref } from "vue";
 import { throttle } from "lodash-es";
 import type { AgentEvent } from "@toonflow/server/agent/types";
 import type { AgentMessage, AgentMessagePart } from "./types";
+import { readExecutionEvents } from "@toonflow/nodes-scaffold/runtime";
 
 export async function* readAgentEvents(response: Response, signal: AbortSignal) {
-  if (!response.ok) {
-    const error = await response.json().catch(() => null);
-    throw new Error(error?.message || `请求失败（${response.status}）`);
+  for await (const event of readExecutionEvents<AgentEvent>(response, signal)) {
+    yield event;
+    if (event.type === "done" || event.type === "error") return;
   }
-  if (!response.body) throw new Error("未收到响应流");
-  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-  let pending = "";
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      signal.throwIfAborted();
-      pending += value ?? "";
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      if (done) lines.push(pending);
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        const event = JSON.parse(line) as AgentEvent;
-        yield event;
-        if (event.type === "error") throw new Error(event.message);
-        if (event.type === "done") return;
-        signal.throwIfAborted();
-      }
-      if (done) throw new Error("连接已中断，请重试");
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
+  throw new Error("连接已中断，正在恢复后台运行");
 }
 
 export function createReplyStream(reply: AgentMessage) {
@@ -60,7 +37,7 @@ export function createReplyStream(reply: AgentMessage) {
     if (event.type === "question") {
       const part = parts.find(part => part.type === "tool" && part.tool.id === event.toolCallId);
       if (part?.type !== "tool") throw new Error("提问缺少对应的工具调用");
-      part.tool.question = { callId: event.callId, title: event.title, question: event.question, options: event.options, fields: event.fields };
+      if (part.tool.question?.callId !== event.callId) part.tool.question = { callId: event.callId, title: event.title, question: event.question, options: event.options, fields: event.fields };
       return;
     }
     if (event.type === "tool") {
@@ -102,7 +79,13 @@ export function createReplyStream(reply: AgentMessage) {
     }
   }
 
-  return { receive, finish };
+  function suspend() {
+    flushContent.flush();
+    flushContent.cancel();
+    finishThinking();
+  }
+
+  return { receive, finish, suspend };
 }
 
 // 父会话请求和转发的子会话事件共用消息归并，切换界面不改变正在接收的回复。
@@ -151,5 +134,11 @@ export function createConversationStream(messages: Ref<AgentMessage[]>) {
     } else if (event.type === "done") finish();
   }
 
-  return { begin, receive, finish };
+  function suspend() {
+    stream?.suspend();
+    stream = undefined;
+    reply = undefined;
+  }
+
+  return { begin, receive, finish, suspend };
 }
