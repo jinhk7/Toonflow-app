@@ -12,6 +12,9 @@
     <div class="providerEditor">
       <messageMarkdown v-if="provider?.readme" class="providerReadme" :content="provider.readme" />
       <el-form labelPosition="top" :disabled="saving">
+        <el-form-item v-if="provider?.id === 'agnesLocalVideo'" label="Agnes 本地适配器地址">
+          <el-input v-model="baseUrl" placeholder="http://127.0.0.1:8788" aria-label="Agnes 本地适配器地址" />
+        </el-form-item>
         <el-form-item label="API Key">
           <el-input v-model="apiKey" :prefixIcon="IconKey" type="password" showPassword autocomplete="off" aria-label="媒体供应商 API Key" />
         </el-form-item>
@@ -76,6 +79,7 @@ const modelEditorVisible = ref(false);
 const editingModelIndex = ref<number>();
 const saving = ref(false);
 const apiKey = ref("");
+const baseUrl = ref("http://127.0.0.1:8788");
 const formError = ref("");
 const modelTypes = { image: "图片", video: "视频", audio: "音频", text: "文本" };
 const modeLabels: Record<string, string> = {
@@ -89,9 +93,11 @@ watch(visible, isVisible => {
   formError.value = "";
   modelEditorVisible.value = false;
   editingModelIndex.value = undefined;
-  const configs = settings.value.mediaProviderConfigs as Record<string, { apiKey?: unknown }> | undefined;
+  const configs = settings.value.mediaProviderConfigs as Record<string, { apiKey?: unknown; baseUrl?: unknown }> | undefined;
   const configuredKey = provider && configs?.[provider.id]?.apiKey;
   apiKey.value = typeof configuredKey === "string" ? configuredKey : "";
+  const configuredUrl = provider && configs?.[provider.id]?.baseUrl;
+  baseUrl.value = typeof configuredUrl === "string" && configuredUrl.trim() ? configuredUrl : "http://127.0.0.1:8788";
   models.value = JSON.parse(JSON.stringify(provider?.models ?? []));
 }, { immediate: true });
 
@@ -134,13 +140,22 @@ async function saveModels() {
     if (apiKey.value.length > 8192) throw new Error("API Key 过长");
     saving.value = true;
     const nextKey = apiKey.value.trim();
+    let nextBaseUrl: string | undefined;
+    if (providerId === "agnesLocalVideo") {
+      const url = new URL(baseUrl.value.trim() || "http://127.0.0.1:8788");
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash
+        || !["/", "/v1", "/v1/"].includes(url.pathname) || /(?:^|\.)agnes-ai\.(?:cn|com)$/.test(url.hostname))
+        throw new Error("请填写 Agnes 本地适配器的 HTTP(S) 服务根地址，不能含凭据、查询参数或其他路径");
+      nextBaseUrl = url.origin;
+    }
     configSaved = await saveSettings(settings => {
       const configs = settings.mediaProviderConfigs as Record<string, Record<string, unknown>> | undefined;
       if (configs !== undefined && (!configs || typeof configs !== "object" || Array.isArray(configs))) throw new Error("媒体供应商配置格式无效");
       const current = configs?.[providerId];
       if (current !== undefined && (!current || typeof current !== "object" || Array.isArray(current))) throw new Error("当前供应商配置格式无效");
-      if (nextKey === (current?.apiKey ?? "")) return;
-      return { mediaProviderConfigs: { ...configs, [providerId]: { ...current, apiKey: nextKey } } };
+      if (nextKey === (current?.apiKey ?? "") && (nextBaseUrl === undefined || nextBaseUrl === current?.baseUrl)) return;
+      return { mediaProviderConfigs: { ...configs, [providerId]: { ...current, apiKey: nextKey,
+        ...(nextBaseUrl !== undefined ? { baseUrl: nextBaseUrl } : {}) } } };
     });
     const { data } = await axios.put<{ data: MediaProvider }>("/api/providers/media/save", {
       fileName, revision, models: values,
