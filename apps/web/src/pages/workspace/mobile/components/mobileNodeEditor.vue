@@ -52,7 +52,7 @@ type EditorAction = NodeExecutionDescriptor["actions"][number];
 type EditorField = { name: string; schema: ParameterSchema; required: boolean; editor?: NonNullable<NodeActionEditor["fields"]>[string] };
 type EditorDraft = { values: Record<string, any>; jsonValues: Record<string, string>; baseVersion: number; baselineValues?: Record<string, any>; ownerId?: string; draftId?: string; editedAt?: number };
 type EditorCommand = { command: CanvasCommand; sent: EditorDraft; createdAt?: number };
-type EditorSection = EditorDraft & { action: EditorAction; fields: EditorField[]; current: unknown; readVersion?: number; readWithoutVersion?: boolean; dirty: boolean; loading: boolean; ready: boolean; saving: boolean; readRevision: number; error: string; reviewing: boolean; remote?: EditorDraft; pending?: CanvasCommand; sent?: EditorDraft; pendingCommands: EditorCommand[] };
+type EditorSection = EditorDraft & { action: EditorAction; fields: EditorField[]; current: unknown; readVersion?: number; dirty: boolean; loading: boolean; ready: boolean; saving: boolean; readRevision: number; error: string; reviewing: boolean; remote?: EditorDraft; pending?: CanvasCommand; sent?: EditorDraft; pendingCommands: EditorCommand[] };
 type ModelChoice = Record<string, any>;
 
 const props = defineProps<{ directory: string; canvasPath: string; node: CanvasNode; graph: WorkspaceGraph; catalog: NodeCatalogEntry[] }>();
@@ -230,23 +230,16 @@ async function readCurrentSection(section: EditorSection, signal: AbortSignal, g
   try {
     const client = createExecutionClient(props.directory);
     const readAction = section.action.editor!.readAction!;
-    let current = section.readWithoutVersion ? undefined : await client.execute(commandFor(readAction, {}), signal);
-    let readVersion: number | undefined;
+    graph ??= await useWorkspaceFiles(props.directory).readGraph(props.canvasPath, signal);
     signal.throwIfAborted();
-    const nodeVersion = at(current, "nodeVersion");
-    if (section.readWithoutVersion || !Number.isSafeInteger(nodeVersion) || nodeVersion < 0) {
-      graph = await useWorkspaceFiles(props.directory).readGraph(props.canvasPath, signal);
-      signal.throwIfAborted();
-      readVersion = graph.toonflowGraph.nodes[props.node.id];
-      if (!graph.nodes.some(node => node.id === props.node.id) || !Number.isSafeInteger(readVersion) || readVersion! < 0) throw new Error("节点版本无法确认，草稿已保留");
-      // ACT: 无版本结果仅绑定执行前的图版本；CAS 读取失败时保留原草稿，不能采用响应时的最新版本。
-      current = await client.execute(commandFor(readAction, {}, readVersion), signal);
-    }
+    const readVersion = graph.toonflowGraph.nodes[props.node.id];
+    if (!graph.nodes.some(node => node.id === props.node.id) || !Number.isSafeInteger(readVersion) || readVersion < 0) throw new Error("节点版本无法确认，草稿已保留");
+    // ACT: 读取动作不保证幂等，固定图版本后只执行一次；无版本回执沿用这次读取的 CAS 基线。
+    const current = await client.execute(commandFor(readAction, {}, readVersion), signal);
     signal.throwIfAborted();
     if (revision !== section.readRevision) return false;
     section.current = current;
     section.readVersion = readVersion;
-    section.readWithoutVersion = !Number.isSafeInteger(at(current, "nodeVersion")) || at(current, "nodeVersion") < 0;
     section.ready = true;
     section.error = "";
     fillSection(section, graph);
@@ -323,7 +316,7 @@ async function finishSection(section: EditorSection, response: CanvasCommandResu
     section.draftId = undefined;
     section.editedAt = undefined;
     if (section.action.editor?.readAction) await readSection(section, signal);
-    else if (!Number.isSafeInteger(version) || version < 0) {
+    else {
       const graph = await useWorkspaceFiles(command.directory).readGraph(command.canvasPath, signal);
       signal.throwIfAborted();
       if (!graph.nodes.some(node => node.id === props.node.id)) throw new Error("节点已不存在，草稿已保留");

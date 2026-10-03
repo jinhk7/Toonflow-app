@@ -169,3 +169,13 @@ Codex 对 26668d6d 发现：显式接受远端版本时，仅同步 expectedRevi
 最终完整 mobileNodeEditor SFC、真实 Vue 生命周期、正式 SDK 与隔离 createApp HTTP 的六组针对验证全部通过：自定义 etag/revisionToken 及内置文件 CAS 冲突后保稿、接受新令牌再保存成功；原 providerId/modelId 与自定义 vendor/engine 保留用户 A/X 配对，接受远端 B/Y 的节点版本后以版本 3 保存至 4；缺失 JSON 缓存清除且参数不复活旧令牌，可见同名参数保留；延迟正式保存回执期间禁止接受远端，新输入和 editedAt 保持，显式再次接受后可保存。另两组受控完整 SFC/Vue/Zod 验证确认模型尺寸与选项依赖隐藏值被清除后不会复活。证据 pr9HiddenTokenRecoveryEvidence.json；120 次正式 API，外部／供应商请求 0。自定义字段元数据、请求别名和读回执增补／省略、回执延迟属于受控部分；实际文件与模型配置持久化、原节点／文件 CAS、Zod 由正式接口完成。两组隐藏依赖使用受控只读状态，没有第三方后端实现或 HTTP 保存，不代表真实第三方插件验证；此项非浏览器 DOM。
 
 最终 Web 类型检查、随后构建与独立只读复核通过，产物 mobileNodeDetail-CGu93xMw.js；编辑器 SHA256 9149d17b78fd12e30f0d234ba5cd4d28647683816d5042afb5f037cd21f2e0d0。未新增测试、脚本、插件实现文件或检查入口，未访问生产或发出模型请求。
+
+## 单次读取与无 reader 节点映射
+
+Codex 对 f7a1025e 发现：首次无版本读取曾通过两次动作执行确认基线；无 reader 但有有效 nodeVersion 的保存曾跳过节点映射回填。reader 现在复用调用方提供的图，或先读取图，确认节点存在和非负安全版本后只执行一次带 expectedVersions 的动作；无版本回执绑定本次执行前的 readVersion，不使用响应时的新 props。删除 readWithoutVersion 探测状态。所有无 reader 的 clean 成功保存都在原 saving 屏障内核对最新图并回填 values.node；输入中的 dirty 草稿、跨 owner 草稿及取消保持既有保护，图读取不生成 ownVersions 证明。
+
+当前统一读取路径会为带版本的内置 reader 预读图，已有 retry/sibling 图可复用；每次请求的动作 execute 为一次，空闲／任务列表／订阅链无新增逻辑。前文“内置明确版本不增加图读取”的证据对应旧轮次源码；最新行为与覆盖以本节为准。
+
+完整实际 SFC、真实 Vue 生命周期、原 SDK 与隔离正式 HTTP 的六组针对验证全部通过：内置与定向删可选版本的 reader 首次／刷新／核对分别执行一次，CAS 全部为 2，核对复用图仅一次图 GET；受控非幂等 reader 首次分配计数 1，旧 CAS／缺节点在执行前拒绝，取消保稿。无 reader 使用原 imageNode.setImage、有效 nodeVersion 回执和实际 PNG 资源：隐藏字段 etag 映射 data.outputs.image，父 props 保持旧值，连续保存采用 null→imageFirst→imageSecond 输出令牌，每次 clean 保存一次图读取；原后台输出 CAS、Zod、文件读取和持久化真实。图屏障期间第二次写入为 0，新输入与 editedAt 保留；外部输出冲突保留，取消后持久草稿及 foreign owner 旧令牌保护通过，原命令 POST 一次。证据 pr9SingleReadAndNodeMappingEvidence.json，73 次正式 API，外部／供应商请求 0。
+
+可选版本回执删除、隐藏 expectedOutput→etag 元数据／请求别名及图／回执延迟是受控部分；节点版本和输出回执未改。非幂等分配计数及其 CAS 使用 inline 合法元数据／原 Zod／受控 SDK，未验证真实第三方插件执行；跨 owner 使用共享 localStorage 的两个实际 Vue scope，此项非浏览器 DOM。未新增测试、脚本或插件实现文件。最终 Web 类型检查、随后构建、独立只读复核及差异检查通过，产物 mobileNodeDetail-CwDcoylL.js，编辑器 SHA256 effc68ab3c7b87d93cc8d315bfc824050ae8f343714ab32af5f6ff47b5d6e41b。
