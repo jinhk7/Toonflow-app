@@ -52,7 +52,7 @@ type EditorAction = NodeExecutionDescriptor["actions"][number];
 type EditorField = { name: string; schema: ParameterSchema; required: boolean; editor?: NonNullable<NodeActionEditor["fields"]>[string] };
 type EditorDraft = { values: Record<string, any>; jsonValues: Record<string, string>; baseVersion: number; baselineValues?: Record<string, any>; ownerId?: string; draftId?: string; editedAt?: number };
 type EditorCommand = { command: CanvasCommand; sent: EditorDraft; createdAt?: number };
-type EditorSection = EditorDraft & { action: EditorAction; fields: EditorField[]; current: unknown; dirty: boolean; loading: boolean; ready: boolean; saving: boolean; readRevision: number; error: string; reviewing: boolean; remote?: EditorDraft; pending?: CanvasCommand; sent?: EditorDraft; pendingCommands: EditorCommand[] };
+type EditorSection = EditorDraft & { action: EditorAction; fields: EditorField[]; current: unknown; readVersion?: number; readWithoutVersion?: boolean; dirty: boolean; loading: boolean; ready: boolean; saving: boolean; readRevision: number; error: string; reviewing: boolean; remote?: EditorDraft; pending?: CanvasCommand; sent?: EditorDraft; pendingCommands: EditorCommand[] };
 type ModelChoice = Record<string, any>;
 
 const props = defineProps<{ directory: string; canvasPath: string; node: CanvasNode; graph: WorkspaceGraph; catalog: NodeCatalogEntry[] }>();
@@ -120,7 +120,8 @@ function snapshotFor(section: EditorSection, graph?: WorkspaceGraph): EditorDraf
     values[field.name] = JSON.parse(JSON.stringify(value));
     if (isJson(field)) jsonValues[field.name] = JSON.stringify(value, null, 2);
   }
-  const baseVersion = section.action.editor?.readAction ? (at(section.current, "nodeVersion") ?? section.baseVersion) : (graph ?? props.graph).toonflowGraph.nodes[props.node.id] ?? 0;
+  const nodeVersion = at(section.current, "nodeVersion");
+  const baseVersion = section.action.editor?.readAction ? (Number.isSafeInteger(nodeVersion) && nodeVersion >= 0 ? nodeVersion : section.readVersion ?? section.baseVersion) : (graph ?? props.graph).toonflowGraph.nodes[props.node.id] ?? 0;
   return { values, jsonValues, baseVersion, baselineValues: JSON.parse(JSON.stringify(values)) };
 }
 function fillSection(section: EditorSection, graph?: WorkspaceGraph) {
@@ -227,10 +228,25 @@ async function readCurrentSection(section: EditorSection, signal: AbortSignal, g
   const revision = ++section.readRevision;
   section.loading = true;
   try {
-    const current = await createExecutionClient(props.directory).execute(commandFor(section.action.editor!.readAction!, {}), signal);
+    const client = createExecutionClient(props.directory);
+    const readAction = section.action.editor!.readAction!;
+    let current = section.readWithoutVersion ? undefined : await client.execute(commandFor(readAction, {}), signal);
+    let readVersion: number | undefined;
+    signal.throwIfAborted();
+    const nodeVersion = at(current, "nodeVersion");
+    if (section.readWithoutVersion || !Number.isSafeInteger(nodeVersion) || nodeVersion < 0) {
+      graph = await useWorkspaceFiles(props.directory).readGraph(props.canvasPath, signal);
+      signal.throwIfAborted();
+      readVersion = graph.toonflowGraph.nodes[props.node.id];
+      if (!graph.nodes.some(node => node.id === props.node.id) || !Number.isSafeInteger(readVersion) || readVersion! < 0) throw new Error("节点版本无法确认，草稿已保留");
+      // ACT: 无版本结果仅绑定执行前的图版本；CAS 读取失败时保留原草稿，不能采用响应时的最新版本。
+      current = await client.execute(commandFor(readAction, {}, readVersion), signal);
+    }
     signal.throwIfAborted();
     if (revision !== section.readRevision) return false;
     section.current = current;
+    section.readVersion = readVersion;
+    section.readWithoutVersion = !Number.isSafeInteger(at(current, "nodeVersion")) || at(current, "nodeVersion") < 0;
     section.ready = true;
     section.error = "";
     fillSection(section, graph);

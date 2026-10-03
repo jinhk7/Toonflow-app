@@ -120,3 +120,12 @@ Codex 对 9f948dc0 提出手机恢复竞态：目录先返回旧值、任务快�
 当前完整 mobileExecutePanel SFC、真实 Vue 生命周期和正式 SDK 的 16 个精确时序／失败边界验证全部通过：快照 100 后延迟旧目录期间产生插件 101、任务 102，订阅从 100 重放后目录与任务更新，实时 103 继续工作；20 秒空闲新增请求为 0。拒绝或非法快照、媒体／目录／编辑读取失败、旧响应取消、切换节点、完成瞬间取消和卸载均不提前提交游标或覆盖新状态，卸载后活跃订阅为 0。证据 pr9MobileRecoveryBarrierEvidence.json；传输与父编辑读取回调受控，不代替部署后的真实 DOM 验收。
 
 Web 类型检查、构建及 git diff --check 均实际通过，组件 SHA256 为 e97e3a6ef5487541570aea20594b5e2a50647dcf7510bd451b6abb37f138449a，产物 mobileNodeDetail-DiBEkxTI.js。没有新增测试文件、脚本文件或检查入口，没有发送真实 Agent、模型或供应商请求。
+
+
+## 可选节点版本回执兼容
+
+Codex 对 e68795eb 发现：第三方 editor.readAction 可以只返回编辑值，协议没有要求 nodeVersion，原基线因此停在首次保存前。缺少有效版本的读取现在补读最新图，并使用执行前固定的 expectedVersions 重读；快照绑定对应读取版本，后续该编辑区直接使用此 CAS 读取。内置明确版本路径不增加请求。旧响应不会绑定当时更新后的 props 图版本。没有可证明自身版本的回执时，保存期间继续输入或跨 owner 草稿仍保留旧基线，核对并显式接受当前版本后再保存。
+
+完整真实 SFC、Vue 生命周期、正式 SDK 与全新隔离 HTTP 的六项验证通过：无版本结果连续保存使用 expectedVersions 2、3，最终版本 4；外部写入仍拒绝旧草稿，显式接受后可保存；旧读取与取消不抬草稿版本；内置初次 getText/getConfig 各一次，已确认保存的兄弟 CAS 推进和文件 revision 保持；保存中继续输入保留编辑优先级和原版本。证据 pr9OptionalVersionReceiptEvidence.json。验证仅定向移除内置 getConfig/setConfig 的成功 HTTP 回执版本字段，其余值、原后端 CAS 与 152 次正式 API 请求均真实；未创建第三方插件实现，不代表已验证真实第三方后端。外部请求尝试为 0，临时服务已关闭。
+
+Web 类型检查、构建、独立只读审查及 git diff --check 通过；组件 SHA256 f64c56ba5103b338c5f189ba8ced573d641627309503a7403706d65c2630e4d6，产物 mobileNodeDetail-Ckpqu5zt.js。未新增测试文件、脚本文件或自动检查入口。
