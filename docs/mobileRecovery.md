@@ -193,3 +193,15 @@ Codex 对 3d2eec3f 发现保存完成后 readSection=false 被忽略，随后错
 同轮独立复核发现官方导演 setPreferences 只返回 NodeExecutionSnapshot.version。该动作现在保留全部原快照字段，并将本次写入的 version 明确附为 nodeVersion；前端不接受通用业务 version。原动作类型检查、production 单包构建以及最终 30d7d4ef 完整 SFC／真实 Vue／正式隔离 HTTP 通过：保存期间续输的草稿持久 baseVersion=2，两次写 expectedVersions 为 1、2，回执 version=nodeVersion 为 2、3，最终新内容和节点版本 3 保持。证据 pr9DirectorPreferencesVersionEvidence.json；未调用模型，随机隔离端口确认关闭。其它七类官方编辑保存已明确 nodeVersion，没有第二处同根返回遗漏；此项非浏览器 DOM。
 
 最终 Web 类型检查、随后构建、导演类型检查与单包构建、独立完整只读复核和 git diff --check 通过。Web 产物 mobileNodeDetail-CbQXZqSA.js，编辑器 SHA256 30d7d4eff3db36bb34c75a5b0db74601b3f951bd2fbd07326970d7ae5201f6cf，导演后端 SHA256 8d1eb62c293917dd4b411118647e0505491ad919ce333640f0ce2d1fe16f3ae7。未新增测试、脚本或插件实现文件，未访问生产或发出真实 Agent／模型／供应商请求。
+
+## 全局插件事件与订阅空窗
+
+Codex 对 9dd0d96a 发现首次连接／断线恢复仍有目录快照至订阅建立的空窗：没有在线订阅时，插件变更不会持久化，后续订阅无法补回。公共通知入口现在在现有 workspace_events 中以空目录内部标记持久化一份全局 pluginsChanged，再将事件投影为各在线工作区。快照游标和订阅重放使用完全相同的本目录加全局插件事件筛选；实时与重放都输出合法目标 directory，原 SDK 过滤保持。空目录非插件事件不参与全局游标或重放，图、正文、任务及 UI 事件继续按工作区隔离。旧目录事件兼容，不新增表、协议、目录复读、轮询或订阅。
+
+通知持久化失败仍记录错误并保留已提交插件操作的成功语义，恢复／显式刷新核对目录；没有新增 outbox。前文逐工作区写失败且兄弟通知继续的证据对应旧实现，当前为单次全局持久化，不将旧故障计数当作新实现验证。
+
+完整正式 createApp、原 SDK／NDJSON parser、真实 Vue effectScope 与原 useWorkspaceEvents 的 11 项验证全部通过：无订阅且无私有历史的工作区先固定快照、返回旧目录，随后真实 setEnabled 产生单次全局事件，订阅重放后读到新目录；恢复期间另一工作区保持在线，两者收到相同 seq/eventId 且目录绑定正确、严格递增无重复。各目录 content 不串流，空目录非插件事件不进游标或重放。20 秒空闲新增 API 为 0；scope.stop 后正式服务 res.close 观察连接归零，峰值为两个工作区各一条。
+
+全局 SQLite BEFORE INSERT 故障下 install/save/setEnabled/uninstall 四接口均返回 200 且真实提交，四条明确日志、全局与两工作区新增通知均为 0；恢复核对仍看到已提交禁用状态。沿用既存插件 fixture 的真实只读替换失败返回 403，原源文件保留且无额外事件。证据 pr9GlobalPluginEventGapEvidence.json；首次两次验证端错误数据库路径／Bun 次级计数观察器修正均如实记录。服务已关闭，验证代理及 root 分别实测原随机端口 ConnectionRefused／ECONNREFUSED，所有 scope／订阅释放、触发器与文件属性／节点配置恢复，外部请求为 0。此项为真实 Vue／正式 HTTP 时序验证，非浏览器 DOM；没有新增测试、脚本或插件实现文件。
+
+当前仅 store.ts 与本节文档变更，Server 类型检查、构建、独立只读复核及 git diff --check 实际通过，store SHA256 698ac6934518f9dd4080a3e9b8f5084e1fdc930186e7b2484bb7944ef384fadf。前轮 Web／SDK／七类节点源码保持，部署后真实 DOM 验收仍待最新 HEAD 审查及 CI 门槛通过。
