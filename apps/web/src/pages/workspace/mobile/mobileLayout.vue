@@ -1,5 +1,5 @@
 <template>
-  <div class="mobileLayout" :class="{ conversationLayout: route.path === '/mobile/agent' }">
+  <div class="mobileLayout" :class="{ conversationLayout: route.matched.some(record => record.path === '/mobile/agent') }">
     <mobileOfflineBanner />
     <router-view />
   </div>
