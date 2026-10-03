@@ -129,3 +129,11 @@ Codex 对 e68795eb 发现：第三方 editor.readAction 可以只返回编辑值
 完整真实 SFC、Vue 生命周期、正式 SDK 与全新隔离 HTTP 的六项验证通过：无版本结果连续保存使用 expectedVersions 2、3，最终版本 4；外部写入仍拒绝旧草稿，显式接受后可保存；旧读取与取消不抬草稿版本；内置初次 getText/getConfig 各一次，已确认保存的兄弟 CAS 推进和文件 revision 保持；保存中继续输入保留编辑优先级和原版本。证据 pr9OptionalVersionReceiptEvidence.json。验证仅定向移除内置 getConfig/setConfig 的成功 HTTP 回执版本字段，其余值、原后端 CAS 与 152 次正式 API 请求均真实；未创建第三方插件实现，不代表已验证真实第三方后端。外部请求尝试为 0，临时服务已关闭。
 
 Web 类型检查、构建、独立只读审查及 git diff --check 通过；组件 SHA256 f64c56ba5103b338c5f189ba8ced573d641627309503a7403706d65c2630e4d6，产物 mobileNodeDetail-Ckpqu5zt.js。未新增测试文件、脚本文件或自动检查入口。
+
+## 动作 schema 与无读取动作保存基线
+
+Codex 对 e82c26da 又发现两项协议兼容问题：同名 expectedRevision 被前端强制为 SHA-256；无 readAction 且无版本回执的动作在父页面刷新前再次编辑，会保留旧 CAS。修复将格式校验交给动作自身 schema，缺少原文件版本的隐藏正文基线仍禁止保存；接受远端基线与回执自动回写只处理隐藏的版本字段，保留第三方可见同名参数。有效版本必须是非负安全整数；仅无 readAction 且缺少有效版本回执时，在原保存屏障内补读图并回填 clean 区块，内置明确版本路径不增加图读取。新输入、取消或跨 owner 草稿不凭任意新图自动提高原基线。
+
+完整实际 SFC、真实 Vue、正式 SDK 与隔离 HTTP 的六组验证全部通过：隐藏 ETag v12 由原声明 Zod 接受，可见同名参数在接受远端、回执及保存中继续输入时保留，基线仍为原送出值；内置非法 SHA 由真实后端拒绝且文件／草稿保持；旧正文稿缺文件 CAS、文件单独外改而节点版本不变时，提交前写入为 0，明确核对并接受后可保存。无 reader 的连续保存使用版本 2、3，最终为 4，图核对屏障内第二次写入为 0；父 props 保持旧版本不影响下一次保存。继续输入加外部修改、取消后恢复及跨 owner 回执均保留原 CAS。证据 pr9SchemaAndSaveBaselineEvidence.json，107 次正式 API，外部请求尝试为 0，隔离服务已关闭。ETag 和可见同名参数使用原 Zod 的受控命令接收边界，其余使用正式 HTTP，只定向移除九条成功 setPrompt 回执的可选版本字段并延迟真实响应，不代表真实第三方插件后端验证。
+
+最终 Web 类型检查、构建、独立只读审查及 git diff --check 通过；组件 SHA256 cb52719ea2239611ef140e8548a65339669c3d2abc52c116468e85b470196490，产物 mobileNodeDetail-DCpnRuxg.js。没有新增测试、脚本或插件实现文件，没有发送真实 Agent、模型或供应商请求。

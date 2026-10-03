@@ -278,7 +278,7 @@ function acceptRemote(section: EditorSection) {
   section.baseVersion = section.remote.baseVersion;
   section.baselineValues = section.remote.baselineValues;
   for (const name of ["expectedRevision", "expectedOutput"]) {
-    if (!section.fields.some(field => field.name === name)) continue;
+    if (!section.fields.some(field => field.name === name && field.editor?.hidden)) continue;
     section.values[name] = section.remote.values[name];
     if (section.remote.jsonValues[name] !== undefined) section.jsonValues[name] = section.remote.jsonValues[name];
   }
@@ -301,23 +301,29 @@ async function finishSection(section: EditorSection, response: CanvasCommandResu
   }
   const unchanged = isEqual(draftOf(section), sent);
   const version = at(response.result, "nodeVersion") ?? at(response.result, "version");
-  if (Number.isSafeInteger(version)) {
+  if (Number.isSafeInteger(version) && version >= 0) {
     const previousVersion = command.expectedVersions?.[String(command.args.nodeId)];
     if (previousVersion !== undefined && version > previousVersion) ownVersions.set(previousVersion, version);
     section.baseVersion = version;
   }
   const contentRevision = at(response.result, "revision");
-  if (typeof contentRevision === "string" && section.fields.some(field => field.name === "expectedRevision")) section.values.expectedRevision = contentRevision;
-  if (section.fields.some(field => field.name === "expectedOutput") && at(response.result, "dataType")) {
+  if (typeof contentRevision === "string" && section.fields.some(field => field.name === "expectedRevision" && field.editor?.hidden)) section.values.expectedRevision = contentRevision;
+  if (section.fields.some(field => field.name === "expectedOutput" && field.editor?.hidden) && at(response.result, "dataType")) {
     section.values.expectedOutput = { dataType: at(response.result, "dataType"), value: at(response.result, "value") };
     section.jsonValues.expectedOutput = JSON.stringify(section.values.expectedOutput);
   }
-  section.baselineValues = JSON.parse(JSON.stringify({ ...sent?.values, ...at(command, "args.args"), ...Object.fromEntries(["expectedRevision", "expectedOutput"].filter(name => section.values[name] !== undefined).map(name => [name, section.values[name]])) }));
+  section.baselineValues = JSON.parse(JSON.stringify({ ...sent?.values, ...at(command, "args.args"), ...Object.fromEntries(["expectedRevision", "expectedOutput"].filter(name => section.values[name] !== undefined && section.fields.some(field => field.name === name && field.editor?.hidden)).map(name => [name, section.values[name]])) }));
   if (unchanged) {
     section.dirty = false;
     section.draftId = undefined;
     section.editedAt = undefined;
     if (section.action.editor?.readAction) await readSection(section, signal);
+    else if (!Number.isSafeInteger(version) || version < 0) {
+      const graph = await useWorkspaceFiles(command.directory).readGraph(command.canvasPath, signal);
+      signal.throwIfAborted();
+      if (!graph.nodes.some(node => node.id === props.node.id)) throw new Error("节点已不存在，草稿已保留");
+      fillSection(section, graph);
+    }
   } else {
     section.dirty = true;
     changeSection(section, false);
@@ -354,7 +360,7 @@ async function saveSection(section: EditorSection) {
   section.error = "";
   try {
     if (!Number.isSafeInteger(section.baseVersion) || section.baseVersion < 0) throw new Error("草稿缺少原节点版本，请保留草稿并重新核对节点信息");
-    if (section.fields.some(field => field.name === "expectedRevision") && !/^[a-f0-9]{64}$/.test(section.values.expectedRevision ?? "")) throw new Error("草稿缺少原文件版本，请保留草稿并重新核对正文");
+    if (section.action.editor?.readAction && section.action.editor.values?.expectedRevision?.result && section.fields.some(field => field.name === "expectedRevision" && field.editor?.hidden) && [undefined, null, ""].includes(section.values.expectedRevision)) throw new Error("草稿缺少原文件版本，请保留草稿并重新核对正文");
     if (!section.draftId && !changeSection(section, false)) throw new Error(section.error);
     saveWorkspaceDraft(props.directory, props.canvasPath, migrationKind(section), true);
     const command = commandFor(section.action.name, argsFor(section), section.baseVersion);
