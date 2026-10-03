@@ -137,3 +137,15 @@ Codex 对 e82c26da 又发现两项协议兼容问题：同名 expectedRevision �
 完整实际 SFC、真实 Vue、正式 SDK 与隔离 HTTP 的六组验证全部通过：隐藏 ETag v12 由原声明 Zod 接受，可见同名参数在接受远端、回执及保存中继续输入时保留，基线仍为原送出值；内置非法 SHA 由真实后端拒绝且文件／草稿保持；旧正文稿缺文件 CAS、文件单独外改而节点版本不变时，提交前写入为 0，明确核对并接受后可保存。无 reader 的连续保存使用版本 2、3，最终为 4，图核对屏障内第二次写入为 0；父 props 保持旧版本不影响下一次保存。继续输入加外部修改、取消后恢复及跨 owner 回执均保留原 CAS。证据 pr9SchemaAndSaveBaselineEvidence.json，107 次正式 API，外部请求尝试为 0，隔离服务已关闭。ETag 和可见同名参数使用原 Zod 的受控命令接收边界，其余使用正式 HTTP，只定向移除九条成功 setPrompt 回执的可选版本字段并延迟真实响应，不代表真实第三方插件后端验证。
 
 最终 Web 类型检查、构建、独立只读审查及 git diff --check 通过；组件 SHA256 cb52719ea2239611ef140e8548a65339669c3d2abc52c116468e85b470196490，产物 mobileNodeDetail-DCpnRuxg.js。没有新增测试、脚本或插件实现文件，没有发送真实 Agent、模型或供应商请求。
+
+## 动态读取动作与正文事件兼容
+
+Codex 对 3d0879f0 提出三项 P2：业务含义的整数 version 被当作节点 CAS；读取动作可能有必填参数却被固定以 {} 调用；正文同步只识别内置 textPath/modelPath 和 expectedRevision。保存现在只认可 nodeVersion，无版本的 clean 保存继续在屏障内核对图；原定义加载以 parseAsync({}) 校验读取 schema，和后端实际执行一致，SDK 明确空参数约定。安装静态语义、回滚、归档时机与协议均未改，无效读取动作在定义加载阶段被拒绝。
+
+正文事件没有可靠的资源与节点映射，现按已有工作区／画布范围核对当前节点全部 clean readAction，dirty、pending、saving 保持跳过；不因此读取图、任务、目录或媒体。ACT 注释说明当前最多 256 个动作的保守核对范围及后续资源元数据优化方向，不新增轮询、订阅或元数据字段。
+
+九组原函数与原 Zod 验证确认：空 schema、optional、default、nullable default、合法 async 接受 {}，required、nullable required、async 拒绝及 optional 但 refinement 实际要求值均以明确 400 拒绝。七类原后端定义通过，正式隔离 GET /api/nodes/get 返回 200 且全部 ready/protocol2；证据 pr9ReadActionSchemaEvidence.json。未执行读取动作或模型请求，没有验证 HTTP 拒安装。
+
+两完整 SFC、真实 Vue 生命周期、原 workspaceEvents、正式 SDK、实际 Axios 与正式隔离 HTTP/NDJSON 的七条报告全部通过：业务 version=100 不作 CAS，父 props 停在 2 时连续保存仍以 2、3 提交至 4；陌生 assetSource 路径和 assetTag 字段的真实正文事件更新 getText/getConfig，各一次，其余图／任务／目录／媒体读取为 0，changed emit 为 0；dirty/pending/saving 保留草稿与原基线。2200ms 空闲无新增请求，失败后恢复只读一次任务快照和目录，序号无重复，订阅最多 1 条；取消、卸载后订阅／监听器归零，3300ms 后无请求，路由重进恢复 1 条。72 次正式 API、外部请求尝试 0，临时服务已关闭并确认 ConnectionRefused；证据 pr9DynamicEventAndBusinessVersionEvidence.json。该项身份／焦点覆盖真实 Vue host，非浏览器 DOM；UI 元数据只定向改字段名，四条成功回执只将可选 nodeVersion 替换为业务 version100，其余值及真实后端 CAS 保持，没有第三方插件实现文件。
+
+Web、Server、节点 SDK 类型检查，Web／Server 构建和独立只读复核通过，Web 产物 mobileNodeDetail-Dij7QdR2.js。编辑器 SHA256 6f81ea86289f1fac100c624ce9ca6be1befcf02aecb04171adfa9f39c104b2a6，最终 panel SHA256 4a9ddb8955cd37e3a4d548b0b1c3ce6929036e3ad229f7cf308bb0ee934c0079；panel 最后仅新增 ACT 注释，移除此唯一注释的字节与实际执行的 23762057 源码精确一致，证明保留在同 JSON。未新增测试、脚本、插件实现文件或检查入口。

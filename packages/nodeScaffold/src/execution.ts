@@ -95,6 +95,7 @@ export type NodeExecutionContext = {
 
 export type NodeActionEditor = {
   label: string;
+  // 读取动作固定接收 {}，参数 schema 必须接受空对象；可选参数和默认值沿用原 schema。
   readAction?: string;
   values?: Record<string, { node?: string; result?: string }>;
   fields?: Record<string, {

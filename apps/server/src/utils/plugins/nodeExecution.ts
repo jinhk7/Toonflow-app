@@ -181,7 +181,7 @@ export async function retainNodeExecutionRevision(name: string) {
   return artifact.revision;
 }
 
-function validateDefinition(definition: NodeExecutionDefinition, name: string) {
+async function validateDefinition(definition: NodeExecutionDefinition, name: string) {
   const parsed = definitionSchema.parse(definition);
   if (parsed.name !== name) invalid("节点后端名称与文件名不一致");
   const handleNames = parsed.handles.map(handle => `${handle.type}:${handle.id}`);
@@ -191,7 +191,13 @@ function validateDefinition(definition: NodeExecutionDefinition, name: string) {
     if (!action.parameters || typeof action.parameters.parse !== "function") invalid(`节点动作 ${action.name} 缺少参数校验`);
     const parameters = z.toJSONSchema(action.parameters, { io: "input" });
     if (action.editor) {
-      if (action.editor.readAction && !definition.actions.some(item => item.name === action.editor!.readAction)) invalid(`节点编辑器 ${action.name} 的读取动作不存在`);
+      if (action.editor.readAction) {
+        const reader = definition.actions.find(item => item.name === action.editor!.readAction);
+        if (!reader) invalid(`节点编辑器 ${action.name} 的读取动作不存在`);
+        if (!reader.parameters || typeof reader.parameters.parse !== "function" || typeof reader.parameters.parseAsync !== "function") invalid(`节点读取动作 ${reader.name} 缺少参数校验`);
+        try { await reader.parameters.parseAsync({}); }
+        catch { invalid(`节点编辑器 ${action.name} 的读取动作 ${reader.name} 必须接受空对象参数`); }
+      }
       const fields = new Set(Object.keys(parameters.properties ?? {}));
       const names = [...Object.keys(action.editor.values ?? {}), ...Object.keys(action.editor.fields ?? {})];
       for (const field of Object.values(action.editor.fields ?? {})) {
@@ -264,7 +270,7 @@ export async function loadNodeExecution(name: string, expectedRevision?: string)
     promise = (async () => {
       // 安装的节点后端与现有服务端工具一样是可信代码，不是沙箱。
       const module = await import(pathToFileURL(path).href) as { default: NodeExecutionDefinition };
-      const definition = validateDefinition(module.default, name);
+      const definition = await validateDefinition(module.default, name);
       const builtin = apply(mapGet, builtinHashes, [name]) === pinnedRevision;
       const result = { definition, revision: pinnedRevision, builtin };
       apply(mapSet, loadedDefinitions, [key, result]);

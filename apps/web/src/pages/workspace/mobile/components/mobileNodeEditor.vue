@@ -300,7 +300,7 @@ async function finishSection(section: EditorSection, response: CanvasCommandResu
     return;
   }
   const unchanged = isEqual(draftOf(section), sent);
-  const version = at(response.result, "nodeVersion") ?? at(response.result, "version");
+  const version = at(response.result, "nodeVersion");
   if (Number.isSafeInteger(version) && version >= 0) {
     const previousVersion = command.expectedVersions?.[String(command.args.nodeId)];
     if (previousVersion !== undefined && version > previousVersion) ownVersions.set(previousVersion, version);
@@ -434,7 +434,7 @@ async function refresh(signal?: AbortSignal, contentOnly = false, fresh = false)
   if (!connection) return false;
   const current = signal ? AbortSignal.any([connection.signal, signal]) : connection.signal;
   const afterRead = fresh ? readGeneration : undefined;
-  const results = await Promise.all(sections.value.filter(section => !section.dirty && !section.pending && !section.saving && (!contentOnly || section.fields.some(field => field.name === "expectedRevision"))).map(section => readSection(section, current, undefined, afterRead)));
+  const results = await Promise.all(sections.value.filter(section => !section.dirty && !section.pending && !section.saving && (!contentOnly || section.action.editor?.readAction)).map(section => readSection(section, current, undefined, afterRead)));
   return !current.aborted && results.every(Boolean);
 }
 watch(() => props.node, () => { void refresh(); });

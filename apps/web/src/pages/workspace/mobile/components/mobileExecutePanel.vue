@@ -367,9 +367,8 @@ const { error: connectionError } = useWorkspaceEvents({
   receive: async (event, signal) => {
     if (event.type === "pluginsChanged") return syncNode(signal);
     if (event.type === "contentChanged" && props.node && (!event.canvasId || event.canvasId === props.canvasPath)) {
-      const path = typeof event.payload.path === "string" ? event.payload.path.replaceAll("\\", "/").toLowerCase() : "";
-      if (event.nodeId === props.node.id || path && [props.node.data?.textPath, props.node.data?.modelPath].some(value => typeof value === "string" && value.replaceAll("\\", "/").toLowerCase() === path)) return !props.refreshNode || await props.refreshNode(signal, true) !== false;
-      return;
+      // ACT: 协议没有资源关联，保守核对最多 256 个动作中的干净读取区块；未来可按资源元数据收窄。
+      return !props.refreshNode || await props.refreshNode(signal, true) !== false;
     }
     if (event.type === "jobChanged") {
       if (event.seq <= snapshotCursor) return;
