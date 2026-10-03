@@ -82,6 +82,6 @@ onMounted(() => { if (!directory.value) void router.replace("/mobile"); });
   :deep(.welcomeMessage) { padding: 16px 8px; }
   :deep(.welcomeSuggestions) { flex-direction: column; }
   :deep(.messageActions) { opacity: 1; }
-  :deep(.senderEditor) { --senderMaxHeight: max(44px, calc(var(--mobileViewportHeight, 100dvh) * 0.3)); }
+  :deep(.senderEditor) { --senderMaxHeight: max(44px, 50vh); }
 }
 </style>
