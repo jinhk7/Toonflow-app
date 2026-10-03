@@ -47,6 +47,19 @@ const handleSchema = z.object({
   dataType: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
   label: z.string().optional(),
 });
+const editorPathSchema = z.string().min(1).max(1024).regex(/^[a-zA-Z0-9_$]+(?:\.[a-zA-Z0-9_$]+)*$/)
+  .refine(path => path.split(".").every(part => !["__proto__", "prototype", "constructor"].includes(part)), "编辑字段路径无效");
+const editorFieldSchema = z.string().min(1).max(128).refine(field => !["__proto__", "prototype", "constructor"].includes(field), "编辑参数名称无效");
+const editorSchema = z.strictObject({
+  label: z.string().min(1).max(255),
+  readAction: z.string().min(1).max(128).optional(),
+  values: z.record(editorFieldSchema, z.strictObject({ node: editorPathSchema.optional(), result: editorPathSchema.optional() }).refine(value => !!value.node !== !!value.result, "编辑字段必须指定一个值来源")).optional(),
+  fields: z.record(editorFieldSchema, z.strictObject({
+    label: z.string().min(1).max(255).optional(), multiline: z.boolean().optional(), hidden: z.boolean().optional(),
+    model: z.strictObject({ sourcePath: editorPathSchema, providerField: editorFieldSchema.optional() }).optional(),
+    choices: z.strictObject({ sourcePath: editorPathSchema, modelProperty: editorPathSchema.optional(), valueProperty: editorPathSchema.optional(), dependentField: editorFieldSchema.optional(), dependentProperty: editorPathSchema.optional() }).optional(),
+  })).optional(),
+});
 const definitionSchema = z.object({
   protocolVersion: z.literal(2),
   name: nodeNameSchema,
@@ -54,7 +67,7 @@ const definitionSchema = z.object({
   handles: z.array(handleSchema).max(256),
   defaultData: z.record(z.string(), z.json()),
   layoutSize: z.object({ width: z.number().positive().finite(), height: z.number().positive().finite() }),
-  actions: z.array(z.object({ name: z.string().min(1).max(128), description: z.string(), snapshotInputs: z.boolean().optional(), parameters: z.unknown(), execute: z.custom<Function>(value => typeof value === "function") })).max(256),
+  actions: z.array(z.object({ name: z.string().min(1).max(128), description: z.string(), editor: editorSchema.optional(), snapshotInputs: z.boolean().optional(), parameters: z.unknown(), execute: z.custom<Function>(value => typeof value === "function") })).max(256),
 });
 
 export function parseNodeExecution(source: string, name: string) {
@@ -168,7 +181,7 @@ export async function retainNodeExecutionRevision(name: string) {
   return artifact.revision;
 }
 
-function validateDefinition(definition: NodeExecutionDefinition, name: string) {
+async function validateDefinition(definition: NodeExecutionDefinition, name: string) {
   const parsed = definitionSchema.parse(definition);
   if (parsed.name !== name) invalid("节点后端名称与文件名不一致");
   const handleNames = parsed.handles.map(handle => `${handle.type}:${handle.id}`);
@@ -176,7 +189,24 @@ function validateDefinition(definition: NodeExecutionDefinition, name: string) {
   for (const action of definition.actions) {
     // 不依赖 Zod instanceof；共享宿主或兼容 parse/toJSONSchema 的模块均可校验。
     if (!action.parameters || typeof action.parameters.parse !== "function") invalid(`节点动作 ${action.name} 缺少参数校验`);
-    z.toJSONSchema(action.parameters, { io: "input" });
+    const parameters = z.toJSONSchema(action.parameters, { io: "input" });
+    if (action.editor) {
+      if (action.editor.readAction) {
+        const reader = definition.actions.find(item => item.name === action.editor!.readAction);
+        if (!reader) invalid(`节点编辑器 ${action.name} 的读取动作不存在`);
+        if (!reader.parameters || typeof reader.parameters.parse !== "function" || typeof reader.parameters.parseAsync !== "function") invalid(`节点读取动作 ${reader.name} 缺少参数校验`);
+        try { await reader.parameters.parseAsync({}); }
+        catch { invalid(`节点编辑器 ${action.name} 的读取动作 ${reader.name} 必须接受空对象参数`); }
+      }
+      const fields = new Set(Object.keys(parameters.properties ?? {}));
+      const names = [...Object.keys(action.editor.values ?? {}), ...Object.keys(action.editor.fields ?? {})];
+      for (const field of Object.values(action.editor.fields ?? {})) {
+        if (field.model?.providerField) names.push(field.model.providerField);
+        if (field.choices?.dependentField) names.push(field.choices.dependentField);
+      }
+      if (names.some(name => !fields.has(name))) invalid(`节点编辑器 ${action.name} 引用了不存在的参数`);
+      if (!action.editor.readAction && (Object.values(action.editor.values ?? {}).some(value => value.result) || Object.values(action.editor.fields ?? {}).some(field => field.model || field.choices))) invalid(`节点编辑器 ${action.name} 缺少读取动作`);
+    }
     freeze(action);
   }
   for (const key of ["initialize", "remove", "migrate", "readOutputs", "validateConnection"] as const) {
@@ -240,7 +270,7 @@ export async function loadNodeExecution(name: string, expectedRevision?: string)
     promise = (async () => {
       // 安装的节点后端与现有服务端工具一样是可信代码，不是沙箱。
       const module = await import(pathToFileURL(path).href) as { default: NodeExecutionDefinition };
-      const definition = validateDefinition(module.default, name);
+      const definition = await validateDefinition(module.default, name);
       const builtin = apply(mapGet, builtinHashes, [name]) === pinnedRevision;
       const result = { definition, revision: pinnedRevision, builtin };
       apply(mapSet, loadedDefinitions, [key, result]);
@@ -320,7 +350,7 @@ export async function getNodeExecutionDescriptor(name: string): Promise<NodeExec
     handles: structuredClone(definition.handles),
     defaultData: structuredClone(definition.defaultData),
     layoutSize: { ...definition.layoutSize },
-    actions: definition.actions.map(action => ({ name: action.name, description: action.description, parameters: z.toJSONSchema(action.parameters, { io: "input" }) })),
+    actions: definition.actions.map(action => ({ name: action.name, description: action.description, parameters: z.toJSONSchema(action.parameters, { io: "input" }), ...(action.editor ? { editor: structuredClone(action.editor) } : {}) })),
   };
 }
 

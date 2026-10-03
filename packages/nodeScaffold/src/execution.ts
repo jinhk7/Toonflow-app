@@ -93,9 +93,24 @@ export type NodeExecutionContext = {
   waitForJob(jobId: string): Promise<unknown>;
 };
 
+export type NodeActionEditor = {
+  label: string;
+  // 读取动作固定接收 {}，参数 schema 必须接受空对象；可选参数和默认值沿用原 schema。
+  readAction?: string;
+  values?: Record<string, { node?: string; result?: string }>;
+  fields?: Record<string, {
+    label?: string;
+    multiline?: boolean;
+    hidden?: boolean;
+    model?: { sourcePath: string; providerField?: string };
+    choices?: { sourcePath: string; modelProperty?: string; valueProperty?: string; dependentField?: string; dependentProperty?: string };
+  }>;
+};
+
 export type NodeExecutionAction<Schema extends z.ZodType = z.ZodType> = {
   name: string;
   description: string;
+  editor?: NodeActionEditor;
   snapshotInputs?: boolean;
   parameters: Schema;
   execute(args: z.output<Schema>, context: NodeExecutionContext): unknown | Promise<unknown>;
@@ -124,7 +139,7 @@ export type NodeExecutionDescriptor = {
   handles: NodeHandle[];
   defaultData: Record<string, unknown>;
   layoutSize: { width: number; height: number };
-  actions: { name: string; description: string; parameters: Record<string, unknown> }[];
+  actions: { name: string; description: string; parameters: Record<string, unknown>; editor?: NodeActionEditor }[];
 };
 
 export type RenderJobInput = {

@@ -114,14 +114,24 @@ export function appendWorkspaceEvent(directory: string, type: WorkspaceEvent["ty
   return event;
 }
 
+export function notifyPluginsChanged(name: string) {
+  // ACT: 空目录仅存全局插件事件，发送时绑定工作区；离线及订阅空窗沿用同一持久游标。
+  try {
+    const event = insertWorkspaceEvent("", "pluginsChanged", { nodeName: name });
+    for (const directory of subscribers.keys()) notifyWorkspaceEvent({ ...event, directory });
+  } catch (error) {
+    console.error("插件操作已提交，但目录通知失败；恢复连接时将重新核对节点目录", { name }, error);
+  }
+}
+
 export function getWorkspaceCursor(directory: string) {
-  const row = db().query("SELECT COALESCE(MAX(seq),0) AS seq FROM workspace_events WHERE directory=?").get(directory) as { seq: number };
+  const row = db().query("SELECT COALESCE(MAX(seq),0) AS seq FROM workspace_events WHERE (directory=? OR (directory='' AND json_extract(eventJson, '$.type')='pluginsChanged'))").get(directory) as { seq: number };
   return row.seq;
 }
 
 export function subscribeWorkspaceEvents(directory: string, afterSeq: number, listener: (event: WorkspaceEvent) => void) {
-  for (const row of db().query("SELECT seq,eventJson FROM workspace_events WHERE directory=? AND seq>? ORDER BY seq").all(directory, afterSeq) as { seq: number; eventJson: string }[])
-    listener({ ...JSON.parse(row.eventJson), seq: row.seq });
+  for (const row of db().query("SELECT seq,eventJson FROM workspace_events WHERE (directory=? OR (directory='' AND json_extract(eventJson, '$.type')='pluginsChanged')) AND seq>? ORDER BY seq").all(directory, afterSeq) as { seq: number; eventJson: string }[])
+    listener({ ...JSON.parse(row.eventJson), directory, seq: row.seq });
   let listeners = subscribers.get(directory);
   if (!listeners) subscribers.set(directory, listeners = new Set());
   listeners.add(listener);

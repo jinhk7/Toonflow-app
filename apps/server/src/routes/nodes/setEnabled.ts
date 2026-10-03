@@ -33,5 +33,6 @@ export default router.put("/", validateFields({ name: z.string().regex(/^[a-z][a
       if (!(await lstat(markerPath)).isFile()) throw Object.assign(new Error("节点状态文件无效"), { status: 409 });
     });
   }
+  u.canvasStore.notifyPluginsChanged(name);
   res.json(success({ name, enabled }));
 });

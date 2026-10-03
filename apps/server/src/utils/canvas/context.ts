@@ -349,6 +349,10 @@ export async function createBackendCanvasContext(directory: string, target?: { i
         const definition = (await loadNodeExecution(nodeType(node.type), revision)).definition;
         const handle = definition.handles.find(item => item.id === slot && item.type === "source");
         if (!handle || (output && !isTypeCompatible(output.dataType, handle.dataType))) throw Object.assign(new Error("输出槽位或类型不匹配"), { status: 400 });
+        const action = definition.actions.find(item => `node:${item.name}` === command.args.name);
+        const expectedOutput = (command.args.args as Record<string, unknown> | undefined)?.expectedOutput;
+        // 受理快照可能早于排队期间的新输出，写入前核对当前图，再由独立输出版本防并发覆盖。
+        if (action?.editor?.values?.expectedOutput?.node === `data.outputs.${slot}` && expectedOutput !== undefined && requestDigest(expectedOutput) !== requestDigest(requireNode(nodeId).data?.outputs?.[slot] ?? null)) throw Object.assign(new Error("媒体输出已变化，请保留草稿并核对最新素材"), { status: 409 });
         const key = JSON.stringify([nodeId, slot]);
         await apply([{ kind: "output", nodeId, slot, expectedVersion: outputVersions[key] ?? 0, value: output }], { ...command, expectedVersions: undefined }, nextStep());
         outputVersions[key] = requireGraph().toonflowGraph!.outputs[key]!;

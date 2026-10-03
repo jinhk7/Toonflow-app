@@ -87,7 +87,7 @@ export function createExecutionClient(directory: string) {
       } catch (error) {
         if (error instanceof ExecutionRequestError && error.status < 500) throw error;
         signal?.throwIfAborted();
-        const accepted = await getCommand(body.commandId, signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000));
+        const accepted = await getCommand(body.commandId, signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000)).catch(() => { throw error; });
         if (accepted) return accepted;
         if (attempt) throw error;
       }
@@ -147,6 +147,7 @@ export function createExecutionClient(directory: string) {
   return {
     directory, command, execute, getCommand, readContent, writeContent, subscribe,
     listJobs: (signal?: AbortSignal) => executionRequest<NodeJobView[]>(`/api/jobs/list?${query({})}`, { signal }),
+    listJobSnapshot: (signal?: AbortSignal) => executionRequest<{ jobs: NodeJobView[]; cursor: number }>(`/api/jobs/list?${query({ snapshot: 1 })}`, { signal }),
     getJob: (jobId: string, signal?: AbortSignal) => executionRequest<NodeJobView>(`/api/jobs/get?${query({ jobId })}`, { signal }),
     cancelJob: (jobId: string) => executionRequest<NodeJobView>("/api/jobs/cancel", json({ directory, jobId })),
     resumeJob: (jobId: string) => executionRequest<NodeJobView>("/api/jobs/resume", json({ directory, jobId, confirmed: true })),

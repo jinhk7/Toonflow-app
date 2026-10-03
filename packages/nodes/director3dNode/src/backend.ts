@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { NodeExecutionAction, NodeExecutionContext, NodeExecutionDefinition } from "@toonflow/nodes-scaffold/execution";
+import type { NodeActionEditor, NodeExecutionAction, NodeExecutionContext, NodeExecutionDefinition } from "@toonflow/nodes-scaffold/execution";
 import { anchorSchema, createEmptyScene, createMannequinObject, modelDocumentSchema, type ModelDocument } from "./document";
 import { getRenderSize, lightingSchema, renderJobSchema, sceneSettingsSchema } from "./renderJob";
 import { directorDraftInputSchema, directorReferencesSchema } from "./draftRunner";
@@ -18,7 +18,7 @@ async function readModel(context: NodeExecutionContext) {
   const { content, revision, exists } = await context.readText(path);
   if (exists === false) throw Object.assign(new Error("导演模型文件不存在"), { code: "ENOENT" });
   if (new TextEncoder().encode(content).byteLength > 2000000) throw new Error("导演模型文件不能超过 2 MB");
-  return { path, revision, document: modelDocumentSchema.parse(JSON.parse(content)), directory: context.directory, canvasPath: context.canvasPath };
+  return { path, revision, nodeVersion: context.node.version, document: modelDocumentSchema.parse(JSON.parse(content)), directory: context.directory, canvasPath: context.canvasPath };
 }
 
 async function writeModel(context: NodeExecutionContext, document: ModelDocument, expectedRevision?: string) {
@@ -28,12 +28,12 @@ async function writeModel(context: NodeExecutionContext, document: ModelDocument
   const path = getModelPath(context);
   const { revision } = await context.writeText(path, content, expectedRevision);
   await context.patchData({ modelPath: path, modelRevision: revision, modelSnapshot: null });
-  return { path, revision, document: value };
+  return { path, revision, nodeVersion: context.node.version, document: value };
 }
 
 function action<Schema extends z.ZodType>(name: string, description: string, parameters: Schema,
-  execute: (args: z.output<Schema>, context: NodeExecutionContext) => unknown | Promise<unknown>, snapshotInputs = false): NodeExecutionAction {
-  return { name, description, parameters, snapshotInputs, execute: (args, context) => execute(parameters.parse(args), context) };
+  execute: (args: z.output<Schema>, context: NodeExecutionContext) => unknown | Promise<unknown>, snapshotInputs = false, editor?: NodeActionEditor): NodeExecutionAction {
+  return { name, description, parameters, snapshotInputs, editor, execute: (args, context) => execute(parameters.parse(args), context) };
 }
 
 const preferencesSchema = z.strictObject({
@@ -65,19 +65,34 @@ const definition: NodeExecutionDefinition = {
   },
   actions: [
     action("getDocument", "读取导演模型和文件版本", z.strictObject({}), (_args, context) => readModel(context)),
+    action("getPreferences", "读取导演设置、可选文本模型和导演方案，不启动生成", z.strictObject({}), async (_args, context) => {
+      const current = await readModel(context);
+      return { nodeVersion: context.node.version, config: structuredClone(context.node.data), models: await context.getModels("text"), plans: current.document.plans.map(plan => ({ label: plan.name, value: plan.id })) };
+    }),
     action("getCopyData", "从后台模型文件生成独立节点复制快照，不共享原节点文件", z.strictObject({}), async (_args, context) => {
       const current = await readModel(context);
       return { modelPath: null, modelRevision: null, modelSnapshot: structuredClone(current.document) };
     }),
     action("saveDocument", "按原文件版本提交导演模型，冲突时保留原文件", z.strictObject({
       document: modelDocumentSchema, expectedRevision: z.string().min(1),
-    }), (args, context) => writeModel(context, args.document, args.expectedRevision)),
+    }), (args, context) => writeModel(context, args.document, args.expectedRevision), false, {
+      label: "导演场景与方案", readAction: "getDocument", values: { document: { result: "document" }, expectedRevision: { result: "revision" } },
+      fields: { document: { label: "导演文档" }, expectedRevision: { hidden: true } },
+    }),
     action("setPreferences", "保存导演指令、模型、镜头锚点、灯光和显示设置", preferencesSchema, async (args, context) => {
       if (args.selectedPlanId) {
         const current = await readModel(context);
         if (!current.document.plans.some(plan => plan.id === args.selectedPlanId)) throw new Error("选择的导演方案不存在");
       }
-      return context.patchData(args);
+      const node = await context.patchData({ ...args, ...(args.prompt !== undefined && args.prompt !== (context.node.data.prompt ?? "") && args.promptModel === undefined ? { promptModel: args.prompt.split("\n").map(text => [{ type: "Write", text }]) } : {}) });
+      return { ...node, nodeVersion: node.version };
+    }, false, {
+      label: "导演设置", readAction: "getPreferences",
+      values: { prompt: { result: "config.prompt" }, model: { result: "config.model" }, selectedPlanId: { result: "config.selectedPlanId" }, anchors: { result: "config.anchors" }, lighting: { result: "config.lighting" }, sceneSettings: { result: "config.sceneSettings" } },
+      fields: {
+        prompt: { label: "导演指令", multiline: true }, promptModel: { hidden: true }, model: { label: "模型", model: { sourcePath: "models" } },
+        selectedPlanId: { label: "导演方案", choices: { sourcePath: "plans" } }, anchors: { label: "镜头锚点" }, lighting: { label: "灯光" }, sceneSettings: { label: "显示设置" },
+      },
     }),
     action("addMannequin", "向当前导演模型添加内置关节人偶", z.strictObject({}), async (_args, context) => {
       const current = await readModel(context);

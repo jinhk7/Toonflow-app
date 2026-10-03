@@ -5,9 +5,9 @@ import type { WorkspaceEvent } from "@toonflow/nodes-scaffold/execution";
 export function useWorkspaceEvents(options: {
   directory(): string | undefined;
   context?(): string;
-  refresh(): Promise<void | boolean>;
+  refresh(signal: AbortSignal): Promise<void | boolean>;
   cursor?(): number;
-  receive(event: WorkspaceEvent): void | boolean | Promise<void | boolean>;
+  receive(event: WorkspaceEvent, signal: AbortSignal): void | boolean | Promise<void | boolean>;
 }) {
   const error = ref("");
   let connection: AbortController | undefined;
@@ -26,16 +26,16 @@ export function useWorkspaceEvents(options: {
     const current = new AbortController();
     connection = current;
     try {
-      const refreshed = await options.refresh();
+      const refreshed = await options.refresh(current.signal);
       current.signal.throwIfAborted();
-      if (refreshed === false) throw new Error("画布正在忙碌，等待尾随同步");
+      if (refreshed === false) throw new Error("后台快照尚未同步，等待重试");
       cursor = Math.max(cursor, options.cursor?.() ?? 0);
       error.value = "";
       await createExecutionClient(directory).subscribe(cursor, async event => {
         current.signal.throwIfAborted();
-        const received = await options.receive(event);
+        const received = await options.receive(event, current.signal);
         current.signal.throwIfAborted();
-        if (received === false) throw new Error("画布正在忙碌，事件待确认");
+        if (received === false) throw new Error("后台事件尚未同步，等待重试");
         cursor = Math.max(cursor, event.seq);
       }, current.signal);
     } catch (reason) {
@@ -44,7 +44,7 @@ export function useWorkspaceEvents(options: {
       if (!disposed && !current.signal.aborted) timer = setTimeout(() => { void recover(); }, 3000);
     }
   }
-  watch(() => [options.directory(), options.context?.()], () => { void recover(); }, { immediate: true });
+  watch(() => JSON.stringify([options.directory(), options.context?.()]), () => { void recover(); }, { immediate: true });
   const restore = () => { void recover(); };
   document.addEventListener("visibilitychange", restore);
   window.addEventListener("online", restore);

@@ -46,7 +46,8 @@ export function useMcpControl() {
   const readSettings = () => JSON.parse(JSON.stringify(settings.value, (key, value) =>
     /(?:api.?key|token|password|secret)$/i.test(key) && value ? "[REDACTED]" : value));
   const getState = () => ({
-    directory: null, canvasId: null, panel: router.currentRoute.value.path.slice(1), tools: [] as NodeToolInfo[],
+    directory: null, canvasId: null, panel: router.currentRoute.value.matched.at(-1)?.path.slice(1) || "home", tools: [] as NodeToolInfo[],
+    navigation: { path: router.currentRoute.value.path, params: router.currentRoute.value.params, query: router.currentRoute.value.query },
     ...workspaceControl.value?.getState(),
     projectList: workspaceStore.projectList,
   });

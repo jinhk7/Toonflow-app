@@ -1014,13 +1014,27 @@ function refreshInstalled(event: WindowEventMap["toonflow:plugin-installed"]) {
 }
 
 const refreshNodeConfig = () => { void loadRemoteNodes(); };
+let synchronizedCursor = 0;
 useWorkspaceEvents({
   directory: () => project.value?.directory,
   context: () => canvasId.value,
-  refresh: refreshGraph,
-  cursor: () => graphSnapshots.get(canvasId.value)?.cursor ?? 0,
-  async receive(event) {
-    if (event.type === "pluginsChanged") { await loadRemoteNodes(); return; }
+  async refresh(signal) {
+    let graph = false;
+    let nodes = false;
+    let cursor = 0;
+    try {
+      graph = await refreshGraph();
+      cursor = graphSnapshots.get(canvasId.value)?.cursor ?? 0;
+    } finally {
+      if (!signal.aborted) nodes = await loadRemoteNodes(undefined, signal);
+    }
+    if (!graph || !nodes || signal.aborted) return false;
+    synchronizedCursor = cursor;
+    return true;
+  },
+  cursor: () => synchronizedCursor,
+  async receive(event, signal) {
+    if (event.type === "pluginsChanged") return loadRemoteNodes(undefined, signal);
     if (event.type === "graphChanged") {
       const previous = event.payload.renamedFrom;
       const target = event.payload.path;
@@ -1045,7 +1059,6 @@ onMounted(() => {
   window.addEventListener("toonflow:plugin-installed", refreshInstalled);
   window.addEventListener("toonflow:node-config-updated", refreshNodeConfig);
   document.addEventListener("paste", pasteNode);
-  void loadRemoteNodes();
 });
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", updateCanvasKeys, true);
@@ -1123,22 +1136,30 @@ async function loadNode(name: string, url: string, force = false, revision?: str
   return nodeLoad;
 }
 
-async function loadRemoteNodes(reloadName?: string) {
+async function loadRemoteNodes(reloadName?: string, refreshSignal?: AbortSignal): Promise<boolean> {
   if (reloadName) nodeReloads.add(reloadName);
   const requestId = ++loadRequest;
-  const signal = canvasController.signal;
+  const signal = refreshSignal ? AbortSignal.any([canvasController.signal, refreshSignal]) : canvasController.signal;
   nodeListLoading.value = true;
   try {
-    const catalog = await fetchNodeCatalog();
-    if (requestId !== loadRequest) return;
+    const catalog = await fetchNodeCatalog(signal);
+    signal.throwIfAborted();
+    if (requestId !== loadRequest) return false;
     const nodes = catalog.filter(isExecutableNode);
-    nodeDescriptors.value = Object.fromEntries(nodes.map(node => [`remote-${node.name}`, node]));
+    const descriptors = Object.fromEntries(nodes.map(node => [`remote-${node.name}`, node]));
+    if (graphValueJson(descriptors) !== graphValueJson(nodeDescriptors.value)) nodeDescriptors.value = descriptors;
     for (const node of catalog.filter(node => !isExecutableNode(node))) nodeErrors.value[`remote-${node.name}`] = typeof node.executionStatus === "object" ? node.executionStatus.message || "节点需要迁移后端执行协议" : "节点需要迁移后端执行协议";
-    nodeConfigs.value = Object.fromEntries(nodes.map(node => [`remote-${node.name}`, node.config ?? {}]));
+    const configs = Object.fromEntries(nodes.map(node => {
+      const type = `remote-${node.name}`;
+      const config = node.config ?? {};
+      return [type, graphValueJson(config) === graphValueJson(nodeConfigs.value[type]) ? nodeConfigs.value[type] : config];
+    }));
+    if (graphValueJson(configs) !== graphValueJson(nodeConfigs.value)) nodeConfigs.value = configs;
     const enabledNodes = nodes.filter(node => node.enabled !== false);
     // 节点各自加载完成后即可出现在菜单中，不等待其他节点的脚本。
-    nodeOptions.value = enabledNodes.map(node => ({ type: `remote-${node.name}`, label: node.displayName, handles: node.handles }))
+    const options = enabledNodes.map(node => ({ type: `remote-${node.name}`, label: node.displayName, handles: node.handles }))
       .sort((left, right) => left.type.localeCompare(right.type));
+    if (graphValueJson(options) !== graphValueJson(nodeOptions.value)) nodeOptions.value = options;
     // ACT: 安装事件合并到最新列表请求，避免连续更新不同节点时丢失较早的刷新名称。
     const reloadNames = new Set(nodeReloads);
     nodeReloads.clear();
@@ -1159,8 +1180,11 @@ async function loadRemoteNodes(reloadName?: string) {
         }
       })
     );
+    signal.throwIfAborted();
+    return requestId === loadRequest;
   } catch (error) {
-    if (requestId === loadRequest) console.error("获取远端节点列表失败", error);
+    if (requestId === loadRequest && !signal.aborted) console.error("获取远端节点列表失败", error);
+    return false;
   } finally {
     if (requestId === loadRequest) nodeListLoading.value = false;
   }

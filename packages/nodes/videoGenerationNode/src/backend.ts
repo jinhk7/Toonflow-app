@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { NodeExecutionContext, NodeExecutionDefinition } from "@toonflow/nodes-scaffold/execution";
 import type { NodeMediaModel } from "@toonflow/nodes-scaffold/nodeAi";
-import type { NodeInputValue } from "@toonflow/nodes-scaffold/values";
+import type { NodeInputValue, NodeOutputs } from "@toonflow/nodes-scaffold/values";
 
 const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"] as const;
 
@@ -81,13 +82,14 @@ async function getConfig(context: NodeExecutionContext) {
   const resolutions = getResolutions(choice, duration);
   const mode = matches.find(item => JSON.stringify(item) === context.node.data.mode) ?? matches.find(Array.isArray) ?? matches.find(item => item === "singleImage") ?? matches.find(item => item === "endFrameOptional") ?? matches[0];
   return {
+    nodeVersion: context.node.version,
     config: {
       providerId: choice?.providerId ?? "", modelId: choice?.modelId ?? "", duration,
       resolution: typeof context.node.data.resolution === "string" && resolutions.includes(context.node.data.resolution) ? context.node.data.resolution : resolutions[0] ?? "",
       ratio: typeof context.node.data.ratio === "string" && ratioOptions.includes(context.node.data.ratio as typeof ratioOptions[number]) ? context.node.data.ratio : "9:16",
       mode, generateAudio: choice?.audio === "optional" ? context.node.data.generateAudio !== false : choice?.audio === true,
     },
-    models, ratios: [...ratioOptions], matchingModes: matches,
+    models: models.map(model => ({ ...model, matchingModes: getMatchingModes(model, inputs), audioChoices: model.audio === "optional" ? [true, false] : [model.audio === true] })), ratios: [...ratioOptions], matchingModes: matches,
   };
 }
 
@@ -111,6 +113,18 @@ const definition: NodeExecutionDefinition = {
     {
       name: "setConfig",
       description: "修改此视频生成节点的模型、时长、分辨率、比例、模式或声音；先用 getConfig 查询能力，providerId 与 modelId 必须同时提供；mode 使用返回的原始字符串或数组，须匹配当前引用；不修改提示词、不启动生成",
+      editor: {
+        label: "视频生成参数", readAction: "getConfig",
+        values: { providerId: { result: "config.providerId" }, modelId: { result: "config.modelId" }, duration: { result: "config.duration" }, resolution: { result: "config.resolution" }, ratio: { result: "config.ratio" }, mode: { result: "config.mode" }, generateAudio: { result: "config.generateAudio" } },
+        fields: {
+          providerId: { hidden: true }, modelId: { label: "模型", model: { sourcePath: "models", providerField: "providerId" } },
+          duration: { label: "时长（秒）", choices: { sourcePath: "models", modelProperty: "durationResolutionMap", valueProperty: "duration" } },
+          resolution: { label: "分辨率", choices: { sourcePath: "models", modelProperty: "durationResolutionMap", valueProperty: "resolution", dependentField: "duration", dependentProperty: "duration" } },
+          ratio: { label: "比例", choices: { sourcePath: "ratios" } },
+          mode: { label: "生成模式", choices: { sourcePath: "models", modelProperty: "matchingModes" } },
+          generateAudio: { label: "生成声音", choices: { sourcePath: "models", modelProperty: "audioChoices" } },
+        },
+      },
       parameters: setConfigSchema,
       async execute(args: z.output<typeof setConfigSchema>, context) {
         await requireAvailable(context);
@@ -135,10 +149,11 @@ const definition: NodeExecutionDefinition = {
       name: "setPrompt",
       snapshotInputs: false,
       description: "修改此节点的视频生成提示词，支持 {{ref 1}} 等参考标记；只修改提示词，不启动生成",
+      editor: { label: "生成提示词", values: { prompt: { node: "data.prompt" } }, fields: { prompt: { label: "提示词", multiline: true } } },
       parameters: z.strictObject({ prompt: z.string() }),
       async execute({ prompt }, context) {
         await context.patchData({ prompt, promptModel: prompt.split("\n").map((text: string) => [{ type: "Write", text }]) });
-        return { prompt };
+        return { prompt, nodeVersion: context.node.version };
       },
     },
     {
@@ -223,14 +238,16 @@ const definition: NodeExecutionDefinition = {
       name: "setVideo",
       snapshotInputs: false,
       description: "选择工作区内已有的视频文件作为此节点的输出，保留生成历史",
-      parameters: z.strictObject({ path: z.string().min(1).max(4096), mimeType: z.string().regex(/^video\/[a-zA-Z0-9.+-]+$/) }),
-      async execute({ path, mimeType }, context) {
+      editor: { label: "视频素材", values: { path: { node: "data.outputs.video.value.url" }, mimeType: { node: "data.outputs.video.value.mimeType" }, expectedOutput: { node: "data.outputs.video" } }, fields: { path: { label: "工作区视频路径" }, mimeType: { label: "媒体类型" }, expectedOutput: { hidden: true } } },
+      parameters: z.strictObject({ path: z.string().min(1).max(4096), mimeType: z.string().regex(/^video\/[a-zA-Z0-9.+-]+$/), expectedOutput: z.json().optional().meta({ default: null }) }),
+      async execute({ path, mimeType, expectedOutput }, context) {
+        if (expectedOutput !== undefined && !isDeepStrictEqual(expectedOutput, (context.node.data.outputs as NodeOutputs | undefined)?.video ?? null)) throw Object.assign(new Error("视频输出已被其他操作修改，请保留草稿并核对当前输出"), { status: 409 });
         await requireAvailable(context);
         const content = await context.read(path);
         if (!content.byteLength || content.byteLength > 100 * 1024 * 1024) throw new Error("视频不能为空且不能超过 100 MB");
         const output = { dataType: "VIDEO" as const, value: { url: path, mimeType } };
         await context.setOutput("video", output);
-        return output;
+        return { ...output, nodeVersion: context.node.version };
       },
     },
     {
@@ -253,7 +270,7 @@ const definition: NodeExecutionDefinition = {
         context.signal.throwIfAborted();
         const output = { dataType: "VIDEO" as const, value: { url: path, mimeType } };
         await context.setOutput("video", output);
-        return output;
+        return { ...output, nodeVersion: context.node.version };
       },
     },
   ],

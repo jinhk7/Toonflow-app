@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { NodeExecutionAction, NodeExecutionContext, NodeExecutionDefinition } from "@toonflow/nodes-scaffold/execution";
-import type { NodeOutput } from "@toonflow/nodes-scaffold/values";
+import type { NodeOutput, NodeOutputs } from "@toonflow/nodes-scaffold/values";
 
 const maxFileBytes = 100 * 1024 * 1024;
 const mimeTypeSchema = z.string().regex(/^image\/[a-zA-Z0-9.+-]+$/);
 const setFileSchema = z.strictObject({
   path: z.string().min(1).max(4096),
   mimeType: mimeTypeSchema,
+  expectedOutput: z.json().optional().meta({ default: null }),
 });
 const uploadFileSchema = z.strictObject({
   name: z.string().min(1).max(255),
@@ -18,16 +20,18 @@ const uploadFileSchema = z.strictObject({
 async function setOutput(path: string, mimeType: string, context: NodeExecutionContext) {
   const output: NodeOutput = { dataType: "IMAGE", value: { url: path, mimeType } };
   await context.setOutput("image", output);
-  return output;
+  return { ...output, nodeVersion: context.node.version };
 }
 
 const setFile: NodeExecutionAction<typeof setFileSchema> = {
   name: "setImage",
   snapshotInputs: false,
   description: "选择工作区内已有的图片文件作为此节点的输出，path 使用工作区相对路径",
+  editor: { label: "图片素材", values: { path: { node: "data.outputs.image.value.url" }, mimeType: { node: "data.outputs.image.value.mimeType" }, expectedOutput: { node: "data.outputs.image" } }, fields: { path: { label: "工作区图片路径" }, mimeType: { label: "媒体类型" }, expectedOutput: { hidden: true } } },
   parameters: setFileSchema,
-  async execute({ path, mimeType }, context) {
+  async execute({ path, mimeType, expectedOutput }, context) {
     context.signal.throwIfAborted();
+    if (expectedOutput !== undefined && !isDeepStrictEqual(expectedOutput, (context.node.data.outputs as NodeOutputs | undefined)?.image ?? null)) throw Object.assign(new Error("图片输出已被其他操作修改，请保留草稿并核对当前输出"), { status: 409 });
     const content = await context.read(path);
     context.signal.throwIfAborted();
     if (!content.byteLength || content.byteLength > maxFileBytes) throw new Error("图片不能为空且不能超过 100 MB");
