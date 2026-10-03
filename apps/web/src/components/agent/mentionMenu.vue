@@ -46,6 +46,7 @@ import { IconAt, IconBox, IconCheck, IconChevronLeft, IconChevronRight, IconFile
 import type { AgentMention } from "@toonflow/server/agent/types";
 import { mentionAssetType } from "@toonflow/server/agent/mentionSources";
 import { useMentionSources, type MentionAsset, type MentionNode, type MentionOutput } from "./mentionSources";
+import { agentPopupPosition } from "./popupPosition";
 import mentionThumbnail from "./mentionThumbnail.vue";
 
 const props = defineProps<{ directory?: string; active: boolean; disabled: boolean; query?: string; editor?: HTMLElement; currentCanvasId?: string }>();
@@ -289,28 +290,20 @@ watch([visible, () => props.editor], ([open, editor], _previous, onCleanup) => {
   if (!open || !editor) return;
   const input = editor.closest(".messageInput") ?? editor;
   function updatePopupPosition() {
-    const bounds = input.getBoundingClientRect();
-    const above = Math.max(0, bounds.top - 16);
-    const below = Math.max(0, window.innerHeight - bounds.bottom - 16);
-    const openBelow = above < 220 && below > above;
-    const available = openBelow ? below : above;
-    const width = Math.min(bounds.width, Math.max(0, window.innerWidth - 16));
-    popupHeight.value = Math.min(420, available);
-    popupStyle.value = {
-      width: `${width}px`,
-      left: `${Math.max(8, Math.min(bounds.left, window.innerWidth - width - 8))}px`,
-      top: openBelow ? `${bounds.bottom + 8}px` : "auto",
-      bottom: openBelow ? "auto" : `${window.innerHeight - bounds.top + 8}px`,
-    };
+    const position = agentPopupPosition(input);
+    popupHeight.value = position.height;
+    popupStyle.value = position.style;
   }
   const observer = new ResizeObserver(updatePopupPosition);
   for (const element of [input, editor.closest(".agentConversation"), editor.closest(".floatingAgent")]) if (element) observer.observe(element);
   window.addEventListener("resize", updatePopupPosition);
+  window.addEventListener("mobileViewportChange", updatePopupPosition);
   window.addEventListener("scroll", updatePopupPosition, true);
   updatePopupPosition();
   onCleanup(() => {
     observer.disconnect();
     window.removeEventListener("resize", updatePopupPosition);
+    window.removeEventListener("mobileViewportChange", updatePopupPosition);
     window.removeEventListener("scroll", updatePopupPosition, true);
   });
 }, { flush: "post" });

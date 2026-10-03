@@ -1,30 +1,42 @@
 <template>
-  <div v-click-outside:[editor]="closeMenu" class="skillMenu" @keydown.capture="handleKeydown">
+  <div v-click-outside:[clickOutsideExclude]="closeMenu" class="skillMenu" @keydown.capture="handleKeydown">
     <el-button class="skillButton" text circle :disabled="disabled" :aria-expanded="visible" :aria-controls="listId" aria-label="选择技能" title="选择技能" @click="visible ? closeMenu() : buttonVisible = true"><icon-book :size="15" /></el-button>
-    <el-card v-if="visible" class="skillPopup" shadow="always" :bodyStyle="{ padding: '6px' }">
-      <el-scrollbar maxHeight="260px">
-        <div :id="listId" role="listbox" aria-label="技能指令" :aria-busy="loading">
-          <div v-if="loading || loadError || !filteredSkills.length" class="skillStatus" role="status">{{ loading ? "正在加载技能…" : loadError || (skills.length ? "没有匹配的技能" : "暂无可用技能") }}</div>
-          <button v-for="(skill, index) in filteredSkills" v-else :id="`${listId}-${index}`" :key="skill.name" class="skillItem" :class="{ active: index === activeIndex }" type="button" role="option" :aria-selected="index === activeIndex" @mouseenter="activeIndex = index" @mousedown.prevent @click="selectSkill(skill.name)">
-            <span class="skillName"><icon-book :size="15" />/skill:{{ skill.name }}</span>
-            <span class="skillDescription">{{ skill.description }}</span>
-          </button>
-        </div>
-      </el-scrollbar>
-    </el-card>
+    <teleport to="body" :disabled="!mobile">
+      <div v-if="visible" ref="popupElement" class="skillMenu" :class="{ skillOverlay: mobile }" :style="mobile ? popupStyle : undefined" @keydown.capture="handleKeydown">
+        <el-card class="skillPopup" shadow="always" :bodyStyle="{ padding: '6px' }" :style="mobile ? { maxHeight: `${popupHeight}px`, overflowY: 'auto' } : undefined">
+          <el-scrollbar maxHeight="260px">
+            <div :id="listId" role="listbox" aria-label="技能指令" :aria-busy="loading">
+              <div v-if="loading || loadError || !filteredSkills.length" class="skillStatus" role="status">{{ loading ? "正在加载技能…" : loadError || (skills.length ? "没有匹配的技能" : "暂无可用技能") }}</div>
+              <button v-for="(skill, index) in filteredSkills" v-else :id="`${listId}-${index}`" :key="skill.name" class="skillItem" :class="{ active: index === activeIndex }" type="button" role="option" :aria-selected="index === activeIndex" @mouseenter="activeIndex = index" @mousedown.prevent @click="selectSkill(skill.name)">
+                <span class="skillName"><icon-book :size="15" />/skill:{{ skill.name }}</span>
+                <span class="skillDescription">{{ skill.description }}</span>
+              </button>
+            </div>
+          </el-scrollbar>
+        </el-card>
+      </div>
+    </teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, useId, watch } from "vue";
+import { computed, nextTick, ref, useId, watch, type CSSProperties } from "vue";
+import { useRoute } from "vue-router";
 import axios from "axios";
 import { IconBook } from "@tabler/icons-vue";
 import { ClickOutside as vClickOutside } from "element-plus";
+import { agentPopupPosition } from "./popupPosition";
 
 const props = defineProps<{ directory?: string; active: boolean; disabled: boolean; query?: string; editor?: HTMLElement }>();
 const emit = defineEmits<{ select: [name: string]; dismiss: [] }>();
 const listId = useId();
 const buttonVisible = ref(false);
+const route = useRoute();
+const mobile = computed(() => route.path === "/mobile" || route.path.startsWith("/mobile/"));
+const popupElement = ref<HTMLElement>();
+const clickOutsideExclude = computed(() => [props.editor, popupElement.value]);
+const popupStyle = ref<CSSProperties>({});
+const popupHeight = ref(280);
 const visible = computed(() => props.active && !props.disabled && (buttonVisible.value || props.query !== undefined));
 const skills = ref<{ name: string; description: string }[]>([]);
 const loading = ref(false);
@@ -34,6 +46,26 @@ const filteredSkills = computed(() => {
   const query = (props.query ?? "").toLowerCase();
   return skills.value.filter(skill => `skill:${skill.name} ${skill.description}`.toLowerCase().includes(query));
 });
+
+watch([visible, mobile], ([open, isMobile], _previous, onCleanup) => {
+  const input = props.editor?.closest(".messageInput");
+  if (!open || !isMobile || !input) return;
+  function updatePopupPosition() {
+    const position = agentPopupPosition(input!, 280);
+    popupStyle.value = position.style;
+    popupHeight.value = position.height;
+  }
+  const observer = new ResizeObserver(updatePopupPosition);
+  observer.observe(input);
+  window.addEventListener("mobileViewportChange", updatePopupPosition);
+  window.addEventListener("scroll", updatePopupPosition, true);
+  updatePopupPosition();
+  onCleanup(() => {
+    observer.disconnect();
+    window.removeEventListener("mobileViewportChange", updatePopupPosition);
+    window.removeEventListener("scroll", updatePopupPosition, true);
+  });
+}, { flush: "post" });
 
 function closeMenu() {
   buttonVisible.value = false;
@@ -98,6 +130,12 @@ defineExpose({ handleKeydown });
 <style lang="scss" scoped>
 .skillMenu {
   flex-shrink: 0;
+
+  &.skillOverlay {
+    position: fixed;
+    z-index: 3001;
+    .skillPopup { position: static; }
+  }
 
   .skillButton {
     width: 24px;

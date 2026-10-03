@@ -20,6 +20,7 @@
 import { onBeforeUnmount, ref, shallowRef, watch, watchEffect } from "vue";
 import { ElMessage, useZIndex } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
+import { useRoute } from "vue-router";
 import { saveSettings, settings, uiSettings } from "@/stores/settings";
 import { desktopUpdateSnapshot } from "@/stores/desktopUpdate";
 import { useMcpControl } from "@/lib/mcpControl";
@@ -28,6 +29,7 @@ import updateBox from "@/components/updateBox.vue";
 import "element-plus/theme-chalk/dark/css-vars.css";
 
 useMcpControl();
+const route = useRoute();
 
 const updateBoxVisible = ref(false);
 const updateBoxBuild = shallowRef<{ version: string; hash: string }>();
@@ -55,9 +57,11 @@ function rememberUpdateBox() {
 }
 
 function preventPageZoom(event: WheelEvent) {
+  if (route.path === "/mobile" || route.path.startsWith("/mobile/")) return;
   if (event.ctrlKey || event.metaKey) event.preventDefault();
 }
 function preventPageZoomShortcut(event: KeyboardEvent) {
+  if (route.path === "/mobile" || route.path.startsWith("/mobile/")) return;
   if ((event.ctrlKey || event.metaKey) && !event.altKey && ["+", "=", "-", "0"].includes(event.key)) event.preventDefault();
 }
 // 仅取消浏览器默认缩放，继续传递事件供 Vue Flow 缩放画布。

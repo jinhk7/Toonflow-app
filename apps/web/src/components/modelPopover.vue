@@ -1,16 +1,19 @@
 <template>
-  <div class="modelPopover">
+  <div v-click-outside:[clickOutsideExclude]="closeMobilePopover" class="modelPopover" @keydown.esc.capture="handleMobileEscape">
     <el-popover
-      v-model:visible="visible"
+      ref="popoverRef"
+      v-bind="popoverVisibility"
+      @hide="closeMobilePopover"
       trigger="click"
       placement="top-start"
       :width="340"
       :offset="10"
       :showArrow="false"
       popperClass="agentModelPopover"
+      :popperOptions="mobile ? mobilePopupOptions : undefined"
       :popperStyle="{ padding: '20px', maxWidth: 'calc(100vw - 24px)' }">
       <template #reference>
-        <el-button class="modelButton" text :disabled="disabled" aria-label="模型与推理设置">
+        <el-button ref="modelButtonRef" class="modelButton" text :disabled="disabled" aria-label="模型与推理设置" @click="toggleMobilePopover">
           <modelIcon v-if="selectedModelChoice" :model="selectedModelChoice.modelId" :size="14" />
           <span class="modelName">{{ selectedModelChoice?.label ?? "选择模型" }}</span>
           ·
@@ -18,9 +21,9 @@
           <icon-chevron-down :size="12" />
         </el-button>
       </template>
-      <el-form class="modelOptions" labelPosition="top">
+      <el-form class="modelOptions" labelPosition="top" @keydown.esc.capture="handleMobileEscape">
         <el-form-item label="模型">
-          <el-select v-model="selectedModel" filterable :disabled="disabled" :teleported="false" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型">
+          <el-select ref="selectRef" v-model="selectedModel" filterable :disabled="disabled" :teleported="mobile" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型" @visible-change="modelDropdownVisible = $event">
             <template #prefix><modelIcon v-if="selectedModelChoice" :model="selectedModelChoice.modelId" :size="18" /></template>
             <el-option-group v-for="provider in modelGroups" :key="provider.id" :label="provider.label">
               <el-option v-for="model in provider.models" :key="model.id" :label="model.label" :value="JSON.stringify([provider.id, model.id])">
@@ -41,7 +44,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { useRoute } from "vue-router";
+import { ClickOutside as vClickOutside, ElButton, ElPopover, ElSelect } from "element-plus";
+import { mobilePopupOptions } from "./agent/popupPosition";
 import { IconChevronDown } from "@tabler/icons-vue";
 import { modelIcon } from "@toonflow/model-icons";
 import { customProviders, modelChoices } from "@/stores/settings";
@@ -50,6 +56,31 @@ const selectedModel = defineModel<string>({ default: "" });
 const reasoningEffort = defineModel<string>("reasoningEffort", { default: "" });
 const props = withDefaults(defineProps<{ active?: boolean; disabled?: boolean }>(), { active: true, disabled: false });
 const visible = ref(false);
+const modelDropdownVisible = ref(false);
+const modelButtonRef = ref<InstanceType<typeof ElButton>>();
+const route = useRoute();
+const mobile = computed(() => route.path === "/mobile" || route.path.startsWith("/mobile/"));
+const popoverRef = ref<InstanceType<typeof ElPopover>>();
+const selectRef = ref<InstanceType<typeof ElSelect>>();
+const clickOutsideExclude = computed(() => [popoverRef.value?.popperRef?.contentRef, selectRef.value?.popperRef]);
+// 移动子下拉在 body 中，关闭父层时排除该下拉；桌面保持库的原有 v-model 行为。
+const popoverVisibility = computed(() => mobile.value
+  ? { visible: visible.value }
+  : { visible: visible.value, "onUpdate:visible": updateVisible });
+
+function updateVisible(value: boolean) { visible.value = value; }
+function toggleMobilePopover() { if (mobile.value) visible.value = !visible.value; }
+function closeMobilePopover() { if (mobile.value) visible.value = false; }
+
+function handleMobileEscape(event: KeyboardEvent) {
+  // Select 会阻止 Escape 冒泡；捕获阶段先保留子层处理，再关闭父层。
+  if (!mobile.value || !visible.value || modelDropdownVisible.value || event.isComposing || event.repeat) return;
+  event.preventDefault();
+  event.stopPropagation();
+  visible.value = false;
+  nextTick(() => modelButtonRef.value?.ref?.focus({ preventScroll: true }));
+}
+
 const reasoningOptions = [
   { label: "默认", value: "" },
   { label: "低", value: "low" },
@@ -129,3 +160,4 @@ watch(() => !props.active || props.disabled, close => { if (close) visible.value
   }
 }
 </style>
+
