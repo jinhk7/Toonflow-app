@@ -205,3 +205,21 @@ Codex 对 9dd0d96a 发现首次连接／断线恢复仍有目录快照至订阅�
 全局 SQLite BEFORE INSERT 故障下 install/save/setEnabled/uninstall 四接口均返回 200 且真实提交，四条明确日志、全局与两工作区新增通知均为 0；恢复核对仍看到已提交禁用状态。沿用既存插件 fixture 的真实只读替换失败返回 403，原源文件保留且无额外事件。证据 pr9GlobalPluginEventGapEvidence.json；首次两次验证端错误数据库路径／Bun 次级计数观察器修正均如实记录。服务已关闭，验证代理及 root 分别实测原随机端口 ConnectionRefused／ECONNREFUSED，所有 scope／订阅释放、触发器与文件属性／节点配置恢复，外部请求为 0。此项为真实 Vue／正式 HTTP 时序验证，非浏览器 DOM；没有新增测试、脚本或插件实现文件。
 
 当前仅 store.ts 与本节文档变更，Server 类型检查、构建、独立只读复核及 git diff --check 实际通过，store SHA256 698ac6934518f9dd4080a3e9b8f5084e1fdc930186e7b2484bb7944ef384fadf。前轮 Web／SDK／七类节点源码保持，部署后真实 DOM 验收仍待最新 HEAD 审查及 CI 门槛通过。
+
+## 通用动作的节点来源参数快照
+
+Codex 对 66f90b6d 发现：五类官方素材 setter 的 expectedOutput schema 声明默认 null，通用动作表单仅载入 schema 默认值，遗漏 editor.values.node 指向的当前输出；已有输出替换被原后台 CAS 拒绝。不能删除 null 默认值或提交时换成最新输出，因为输出可以独立于节点版本变化，空输出同样需要 CAS。后台 schema、双重 CAS、桌面 setter 与省略可选字段的既有兼容保持。
+
+公共通用表单现在仅对 hidden 且有 values.node 的字段捕获深拷贝节点快照：映射值优先于默认值，只在 undefined 时使用默认；随参数草稿保存字段来源、节点版本与 executionRevision。自动管理字段不显示，内部 JSON 缓存不能覆写，结果来源字段仍可填写。提交固定使用捕获的值和节点 CAS；刷新 props 不重基线。旧草稿无证明或插件版本／来源改变时，明确核对当前节点并保留可见参数；固定目录实例读取图，延迟回复校验作用域、动作、版本、路径与待确认状态，切换／取消／卸载丢弃旧回复，读期间输入保留。坏 JSON 与错误草稿结构保原槽并阻执行，缺少可选旧字段允许迁移，持久化失败先停止提交。
+
+最终 dde1bf4e 完整实际 SFC、真实 Vue、原 SDK／workspaceFiles／workspaceEvents 与隔离 createApp HTTP 的 25 项全部通过，254 次正式 API、外部与未知动作 0。五类原有输出实际替换并落盘；output-only 变化不改 nodeVersion 仍拒绝旧快照，null 基线也拒绝外部输出新增，草稿、原 requestJson 与外部输出保持。这两项公开 command 请求实际 HTTP202，随后真实 terminal failed，不是接口 HTTP409。明确核对后可连续保存，旧 null／JSON 缓存与缺字段草稿迁移、读期间续输、七类取消／作用域边界、pending 互斥、坏 JSON／合法坏结构／无节点映射坏稿、quota 零 POST、必填与结果来源参数全部通过；20 秒空闲新增 API 为 0，矩阵结束实际订阅 0、峰值 1。元数据与延迟/配额属于受控部分，原五类 setter、文件读取、输出/节点 CAS、命令状态与持久化由正式隔离接口完成，没有真实生成请求。首次冲突断言选了相同输出而实际完成，已记录修正并用第三个不同资源重跑；非产品失败。证据 pr9GenericOutputSnapshotEvidence.json。
+
+最终纯函数／Vue／原 schema 内联补查 5/5，覆盖 null/default/undefined、JSON 与 props 深拷贝、源版本／路径变化、结果来源可见及七类坏结构／四类旧缺字段；证据 pr9GenericSnapshotInlineEvidence.json，不当作 HTTP 或浏览器验证。顺序 Web 类型检查与构建、独立只读复核和 git diff --check 通过，产物 mobileNodeDetail-BfciLpXT.js，panel SHA256 dde1bf4e937bdc8b6925b936a009ec0327abc9332129f0dd0cdfa59ff25af720。未新增测试、脚本、插件实现或轮询，独立节点编辑器、SDK、官方 backend schema/CAS 未改变。
+
+原 25 组中，两项程序化切换使用未列动作名，仅覆盖受控 binding 保护；没有把它们当作真实该动作执行。另以相同冻结源码补两项实际 catalog 动作：imageNode.setImage→uploadImage 的延迟核对切换保护，textNode.setPrompt（无 nodeFields）坏草稿逐字保留／零 POST／零核对读图，均通过。证据 pr9GenericOutputSnapshotActionSupplementEvidence.json；总 27 含这两项增量，没有重跑原全矩阵。
+
+真实本机 Edge／CDP DOM 的 25 条断言全部通过：390×844 五类实际替换与五类整页刷新重进持久化，旧草稿缺证明阻执行、真实图核对后成功；正式 operationId/outputVersion 制造输出单独变化，nodeVersion保持，实际 CAS 冲突保同一 DOM、焦点、3–7选区及路径/MIME，外部输出未覆盖，明确核对后成功。实际 31.718 秒稳态全部 API／命令／SSE 新开 0，同输入值、焦点、光标与未保存草稿保持。1440×960 覆盖同 mobile 路由五类通用表单、一次音频实际替换、坏 JSON／错误结构阻执行与原槽保留，以及独立 Agent 只读窗口；没有创建或发送 Agent 请求，也没有声称本轮重跑桌面画布全矩阵。七次实际 mobileNodeDetail-BfciLpXT.js 响应与本地 94fc1b74 bundle SHA一致。证据 mediaOutputDomEvidence20261003.json，两张实际截图 mediaOutputMobile20261003.png／mediaOutputAgentViewport20261003.png，root 均作视觉复核。
+
+浏览器控制请求首次缺 operationId 被正式 HTTP400 拒绝，纠正后 HTTP200 才实际制造输出变化；已记录为验证端修正。一次 CDP routing abort 的 InvalidInterceptionId 及最初 non-TTY helper 启动也保留，没有算产品失败。历史 CDP 请求 ID 跨刷新累计，不能作为当前 SSE；20 秒以上无新增、正式 TCP upper bound 3（含 keepalive，pr9GenericOutputDomTcpEvidence.json）以及最终服务 res.close 观察归零分别记录，不虚报精确当前订阅数。所有浏览器断言结束时外部／未知动作拦截尝试 0。
+
+自有 Edge／helper已关闭，原profile保留，18999调试端口拒连；共享64979正式服务随后实际退出0，Express res.close activeStreamsAfterClose=0、原探针ConnectionRefused，root另独立确认两个端口ECONNREFUSED。证据 mediaOutputBrowserShutdown20261003.json／最终pr9GenericOutputSnapshotEvidence.json。正式服务在全生命周期阻止所有非自身loopback目标，实际外部派发0；matrix-ready尝试计数0及独立浏览器拦截尝试0分别记录，保留服务阶段没有另序列化最终尝试计数，不将其冒充额外测量。
