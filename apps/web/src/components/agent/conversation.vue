@@ -94,7 +94,7 @@
         :aria-valuenow="senderHeight"
         tabindex="0"
         title="拖动调整输入框高度"
-        @focus="senderHeight = sender?.chatElement.rollBox.clientHeight ?? 44"
+        @focus="updateSenderMaxHeight(); senderHeight = sender?.chatElement.rollBox.clientHeight ?? 44"
         @pointerdown="startSenderResize"
         @pointermove="moveSenderResize"
         @pointerup="stopSenderResize"
@@ -667,9 +667,15 @@ async function deleteMessage(item: AgentMessage) {
   }
 }
 
+function updateSenderMaxHeight() {
+  if (!sender) return;
+  const maxHeight = Number.parseFloat(getComputedStyle(sender.chatElement.rollBox).maxHeight);
+  senderMaxHeight.value = Math.max(44, Number.isFinite(maxHeight) ? maxHeight : window.innerHeight / 2);
+}
+
 function setSenderHeight(height: number) {
   if (!sender) return;
-  senderMaxHeight.value = Math.max(44, window.innerHeight / 2);
+  updateSenderMaxHeight();
   senderHeight.value = Math.max(44, Math.min(senderMaxHeight.value, Math.round(height)));
   sender.chatElement.rollBox.style.height = `${senderHeight.value}px`;
 }
@@ -872,11 +878,12 @@ watch(senderElement, (element, _previous, onCleanup) => {
   const instance = new xSender(element, {
     autoFocus: props.active,
     placeholder: "输入消息，@ 提及节点输出或全局素材…",
-    chatStyle: { minHeight: "44px", maxHeight: "50vh", fontSize: "14px", lineHeight: "24px" },
+    chatStyle: { minHeight: "44px", maxHeight: "var(--senderMaxHeight, 50vh)", fontSize: "14px", lineHeight: "24px" },
     keyboardSendFun: event => event.key === "Enter" && !event.shiftKey && !event.isComposing,
     keyboardWrapFun: event => event.key === "Enter" && event.shiftKey && !event.isComposing,
   });
   sender = instance;
+  updateSenderMaxHeight();
   if (!props.active || locked.value) instance.disable();
   instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_SEND, () => void submitMessage());
   instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_CHANGE, () => {
