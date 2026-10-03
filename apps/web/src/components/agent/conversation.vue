@@ -948,8 +948,8 @@ watch(senderElement, (element, _previous, onCleanup) => {
     const marginHeight = Number.parseFloat(inputStyle.marginTop) + Number.parseFloat(inputStyle.marginBottom);
     conversation.style.setProperty("--mobileConversationMinHeight", `${44 + extraHeight + marginHeight + 24}px`);
     const available = conversation.clientHeight - extraHeight - marginHeight - 24;
-    const viewportHeight = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobileViewportHeight")) || window.innerHeight;
-    const maxHeight = Math.max(44, Math.min(available, viewportHeight * 0.3));
+    const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
+    const maxHeight = Math.max(44, Math.min(available, layoutHeight / 2));
     senderContainer.style.setProperty("--senderMaxHeight", `${maxHeight}px`);
     updateSenderMaxHeight();
     senderHeight.value = instance.chatElement.rollBox.clientHeight;

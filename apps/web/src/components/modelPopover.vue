@@ -23,7 +23,13 @@
       </template>
       <el-form class="modelOptions" labelPosition="top" @keydown.esc.capture="handleMobileEscape">
         <el-form-item label="模型">
-          <el-select ref="selectRef" v-model="selectedModel" filterable :disabled="disabled" :teleported="mobile" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型" @visible-change="modelDropdownVisible = $event">
+          <template v-if="mobile" #label>
+            <div class="modelFieldLabel">
+              <span>模型</span>
+              <el-button ref="modelSearchButtonRef" class="modelSearchButton" text :disabled="disabled" :aria-pressed="modelSearchActive" @pointerdown="modelSearchButtonRef?.ref?.focus({ preventScroll: true })" @click.prevent="toggleMobileSearch">{{ modelSearchActive ? "结束搜索" : "搜索模型" }}</el-button>
+            </div>
+          </template>
+          <el-select ref="selectRef" v-model="selectedModel" :filterable="!mobile || modelSearchActive" :automaticDropdown="mobile && modelSearchActive" :disabled="disabled" :teleported="mobile" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型" @visible-change="handleModelDropdown">
             <template #prefix><modelIcon v-if="selectedModelChoice" :model="selectedModelChoice.modelId" :size="18" /></template>
             <el-option-group v-for="provider in modelGroups" :key="provider.id" :label="provider.label">
               <el-option v-for="model in provider.models" :key="model.id" :label="model.label" :value="JSON.stringify([provider.id, model.id])">
@@ -57,7 +63,9 @@ const reasoningEffort = defineModel<string>("reasoningEffort", { default: "" });
 const props = withDefaults(defineProps<{ active?: boolean; disabled?: boolean }>(), { active: true, disabled: false });
 const visible = ref(false);
 const modelDropdownVisible = ref(false);
+const modelSearchActive = ref(false);
 const modelButtonRef = ref<InstanceType<typeof ElButton>>();
+const modelSearchButtonRef = ref<InstanceType<typeof ElButton>>();
 const route = useRoute();
 const mobile = computed(() => route.path === "/mobile" || route.path.startsWith("/mobile/"));
 const popoverRef = ref<InstanceType<typeof ElPopover>>();
@@ -69,8 +77,39 @@ const popoverVisibility = computed(() => mobile.value
   : { visible: visible.value, "onUpdate:visible": updateVisible });
 
 function updateVisible(value: boolean) { visible.value = value; }
-function toggleMobilePopover() { if (mobile.value) visible.value = !visible.value; }
+function toggleMobilePopover() {
+  if (!mobile.value) return;
+  visible.value = !visible.value;
+  if (visible.value) modelButtonRef.value?.ref?.focus({ preventScroll: true });
+}
 function closeMobilePopover() { if (mobile.value) visible.value = false; }
+
+async function toggleMobileSearch() {
+  if (!mobile.value || props.disabled) return;
+  const search = !modelSearchActive.value;
+  modelSearchActive.value = false;
+  selectRef.value?.blur();
+  await nextTick();
+  if (!visible.value || !props.active || props.disabled) return;
+  modelSearchActive.value = search;
+  await nextTick();
+  if (!visible.value || !props.active || props.disabled) return;
+  if (modelSearchActive.value) selectRef.value?.focus();
+  else modelButtonRef.value?.ref?.focus({ preventScroll: true });
+}
+
+function handleModelDropdown(value: boolean) {
+  modelDropdownVisible.value = value;
+  if (value || !mobile.value || !modelSearchActive.value) return;
+  // 切换按钮先移走输入焦点；由其 click 决定下一模式，避免关闭回调抢先反转。
+  if (document.activeElement === modelSearchButtonRef.value?.ref) return;
+  const restoreFocus = selectRef.value?.$el.contains(document.activeElement);
+  modelSearchActive.value = false;
+  nextTick(() => {
+    selectRef.value?.blur();
+    if (restoreFocus && visible.value && props.active && !props.disabled) modelButtonRef.value?.ref?.focus({ preventScroll: true });
+  });
+}
 
 function handleMobileEscape(event: KeyboardEvent) {
   // Select 会阻止 Escape 冒泡；捕获阶段先保留子层处理，再关闭父层。
@@ -91,6 +130,12 @@ const modelGroups = computed(() => customProviders.value.toSorted((left, right) 
 const selectedModelChoice = computed(() => modelChoices.value.find(item => item.value === selectedModel.value));
 const reasoningLabel = computed(() => reasoningOptions.find(item => item.value === reasoningEffort.value)?.label ?? "默认");
 watch(selectedModel, () => { reasoningEffort.value = ""; });
+watch(visible, value => {
+  if (!value) {
+    modelSearchActive.value = false;
+    if (mobile.value) selectRef.value?.blur();
+  }
+});
 watch(modelChoices, items => {
   if (!selectedModel.value) selectedModel.value = items[0]?.value ?? "";
 }, { immediate: true });
@@ -146,7 +191,10 @@ watch(() => !props.active || props.disabled, close => { if (close) visible.value
         margin-bottom: 10px;
         font-weight: 500;
         color: var(--el-text-color-primary);
+        &:has(.modelFieldLabel) { height: auto; }
       }
+      .modelFieldLabel { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 12px; }
+      .modelSearchButton { min-height: 44px; min-width: 44px; padding: 0 8px; }
       .el-segmented {
         width: 100%;
 
