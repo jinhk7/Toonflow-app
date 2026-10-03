@@ -879,15 +879,28 @@ function pasteAttachments(event: ClipboardEvent) {
 watch(senderElement, (element, _previous, onCleanup) => {
   if (!element) return;
   const instance = new xSender(element, {
-    autoFocus: props.active,
+    autoFocus: false,
     placeholder: "输入消息，@ 提及节点输出或全局素材…",
     chatStyle: { minHeight: "44px", maxHeight: "var(--senderMaxHeight, 50vh)", fontSize: "var(--senderFontSize, 14px)", lineHeight: "24px" },
     keyboardSendFun: event => event.key === "Enter" && !event.shiftKey && !event.isComposing,
     keyboardWrapFun: event => event.key === "Enter" && event.shiftKey && !event.isComposing,
   });
   sender = instance;
+  const resetSender = instance.reset.bind(instance);
+  instance.reset = async options => {
+    try {
+      await resetSender(options);
+    } catch (error) {
+      // reset 内部等待动画帧后仍会聚焦；销毁后的调用已失效。
+      if (sender === instance) throw error;
+    }
+  };
   updateSenderMaxHeight();
   if (!props.active || locked.value) instance.disable();
+  // 库的首次聚焦回调不会随 destroy 取消，由组件负责调度和清理。
+  const senderFocusFrame = props.active ? requestAnimationFrame(() => {
+    if (sender === instance && props.active && !locked.value) instance.focus("last");
+  }) : 0;
   instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_SEND, () => void submitMessage());
   instance.bus.on("agentConversation", xSender.EventSet.EVENT_COMMON_CHANGE, () => {
     skillQuery.value = /^\/([^\s/]*)$/.exec(instance.getText())?.[1];
@@ -955,6 +968,7 @@ watch(senderElement, (element, _previous, onCleanup) => {
   editor.addEventListener("keyup", updateCursor);
   editor.addEventListener("compositionend", updateCursor);
   onCleanup(() => {
+    cancelAnimationFrame(senderFocusFrame);
     cancelAnimationFrame(senderFrame);
     sizeObserver.disconnect();
     window.removeEventListener("mobileViewportChange", scheduleSenderHeight);
