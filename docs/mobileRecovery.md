@@ -149,3 +149,15 @@ Codex 对 3d0879f0 提出三项 P2：业务含义的整数 version 被当作节�
 两完整 SFC、真实 Vue 生命周期、原 workspaceEvents、正式 SDK、实际 Axios 与正式隔离 HTTP/NDJSON 的七条报告全部通过：业务 version=100 不作 CAS，父 props 停在 2 时连续保存仍以 2、3 提交至 4；陌生 assetSource 路径和 assetTag 字段的真实正文事件更新 getText/getConfig，各一次，其余图／任务／目录／媒体读取为 0，changed emit 为 0；dirty/pending/saving 保留草稿与原基线。2200ms 空闲无新增请求，失败后恢复只读一次任务快照和目录，序号无重复，订阅最多 1 条；取消、卸载后订阅／监听器归零，3300ms 后无请求，路由重进恢复 1 条。72 次正式 API、外部请求尝试 0，临时服务已关闭并确认 ConnectionRefused；证据 pr9DynamicEventAndBusinessVersionEvidence.json。该项身份／焦点覆盖真实 Vue host，非浏览器 DOM；UI 元数据只定向改字段名，四条成功回执只将可选 nodeVersion 替换为业务 version100，其余值及真实后端 CAS 保持，没有第三方插件实现文件。
 
 Web、Server、节点 SDK 类型检查，Web／Server 构建和独立只读复核通过，Web 产物 mobileNodeDetail-Dij7QdR2.js。编辑器 SHA256 6f81ea86289f1fac100c624ce9ca6be1befcf02aecb04171adfa9f39c104b2a6，最终 panel SHA256 4a9ddb8955cd37e3a4d548b0b1c3ce6929036e3ad229f7cf308bb0ee934c0079；panel 最后仅新增 ACT 注释，移除此唯一注释的字节与实际执行的 23762057 源码精确一致，证明保留在同 JSON。未新增测试、脚本、插件实现文件或检查入口。
+
+## 待确认命令与恢复游标
+
+Codex 对 5770c024 发现待确认命令查询临时失败后，恢复仍采纳已覆盖完成事件的快照游标。任务快照现在先固定游标并核对媒体、目录与编辑内容，再核对待确认命令，且 await 后重新检查取消／作用域；全部成功才推进游标。查询 accepted/running 是有效状态，后续原命令 terminal 事件继续工作；忙碌、失败或取消返回 false，jobChanged／graphChanged 的失败同样传回原订阅恢复链，不吞完成事件。不修改公共订阅 hook 或新增轮询。
+
+完整调用链还发现两条同根凭据保护缺口：公共 SDK 在提交结果未知后，补查回执的 4xx 曾覆盖原提交错误；编辑器已得到受理回执后，settle 的查询 4xx 曾被当成提交拒绝。SDK 仅一行保留原 POST 错误，补查失败不伪装写入拒绝；编辑器取得回执后保留 pending/sent/draft，只有 command() 本身的明确 4xx 才按原逻辑清理该 ID。面板区分读取错误与查无原命令后的提交拒绝，公开查询语义、原确认不存在后的有限同 ID 重发保持。
+
+当前 panel 的原 16 组恢复矩阵实际重跑全部通过，20 秒空闲新增请求 0，事件重放、实时进度、失败、取消、切换与卸载保持；证据 pr9MobileRecoveryBarrierFinalEvidence.json。该组无 pending，使用原未变的 SDK 快照／订阅实现；最新 SDK 的命令路径由以下独立增量覆盖。正式 SDK 18 组内联 fetch 替换验证全部通过：未知 POST 加查询 401/403/409 保留原错误、网络错误保持同一对象、明确 POST 400/409 不查询、真实有效回执正常返回、原 null/404 的有限重发与公开 getCommand 错误语义保持；证据 pr9CommandLookupEvidence.json，无真实网络。
+
+完整两 SFC、真实 Vue 生命周期、原 hook、最新 SDK、实际 Axios 与正式隔离 HTTP/NDJSON 的七组增量全部通过：GET403 不提交 cursor 并在原 3 秒恢复链中自动核对成功；已受理 POST 的 ACK503 加 SDK 查询 401 保凭据，恢复后 POST 总数仍 1；accepted/running 有效回执允许订阅，终态查询失败不消费事件并自动恢复；busy、2200ms idle、取消／切换／卸载无旧游标提交或重复订阅；编辑器受理后的 settle401 保 pending/sent/draft，原 ID reconcile 后正确清理，明确 POST400/409 仅清拒绝凭据保草稿。109 次正式 API，外部请求 0，订阅最多 1、卸载归零，隔离服务已关闭并确认 ConnectionRefused。证据 pr9PendingCommandRecoveryEvidence.json；运行阶段是定向回执状态 fixture，终态回执实际为 completed，并通过现有隔离 store 追加原命令事件走正式 NDJSON，没有验证真实模型任务或浏览器 DOM。
+
+最终 Web／节点 SDK 类型检查、Web 构建和独立只读复核通过；Web 构建与类型检查首次并行出现既有设置页 TS7006，构建结束后顺序重跑通过，自动声明无最终差异，未修改无关设置页面。最终产物 mobileNodeDetail-DeN44YS-.js，panel SHA256 ef15833b251660b07a78560c109d1cb86b2af075560ef01016d391c966b5f925，editor SHA256 8aaa44c69030fd49d82233de08655d82da69bbc9d6d7fee01c2007ce60c09cc6，SDK SHA256 d4ddbd6ccbc4e3a76e4ac314478374ef56ad47c9e516805677f24544af30b75e。未新增测试、脚本、插件实现文件或检查入口，未访问生产数据或发送供应商请求。

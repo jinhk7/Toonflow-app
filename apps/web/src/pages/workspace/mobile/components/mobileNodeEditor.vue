@@ -358,6 +358,7 @@ async function saveSection(section: EditorSection) {
   const signal = connection.signal;
   section.saving = true;
   section.error = "";
+  let commandReceived = false;
   try {
     if (!Number.isSafeInteger(section.baseVersion) || section.baseVersion < 0) throw new Error("草稿缺少原节点版本，请保留草稿并重新核对节点信息");
     if (section.action.editor?.readAction && section.action.editor.values?.expectedRevision?.result && section.fields.some(field => field.name === "expectedRevision" && field.editor?.hidden) && [undefined, null, ""].includes(section.values.expectedRevision)) throw new Error("草稿缺少原文件版本，请保留草稿并重新核对正文");
@@ -370,11 +371,12 @@ async function saveSection(section: EditorSection) {
     section.pendingCommands.push(pending);
     section.pending = command;
     const response = await createExecutionClient(command.directory).command(command, signal);
+    commandReceived = true;
     signal.throwIfAborted();
     await settleSection(section, response, signal);
   } catch (reason) {
     if (signal.aborted) return;
-    if (reason instanceof ExecutionRequestError && reason.status >= 400 && reason.status < 500 && section.pending) {
+    if (!commandReceived && reason instanceof ExecutionRequestError && reason.status >= 400 && reason.status < 500 && section.pending) {
       clearSectionCommand(section, section.pending);
     }
     section.error = reason instanceof Error ? reason.message : "保存结果待确认，原命令和草稿已保留";

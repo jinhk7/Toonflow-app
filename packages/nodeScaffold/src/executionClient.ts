@@ -87,7 +87,7 @@ export function createExecutionClient(directory: string) {
       } catch (error) {
         if (error instanceof ExecutionRequestError && error.status < 500) throw error;
         signal?.throwIfAborted();
-        const accepted = await getCommand(body.commandId, signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000));
+        const accepted = await getCommand(body.commandId, signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000)).catch(() => { throw error; });
         if (accepted) return accepted;
         if (attempt) throw error;
       }

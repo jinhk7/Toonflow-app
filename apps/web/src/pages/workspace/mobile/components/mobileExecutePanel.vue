@@ -249,7 +249,9 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   const failed = [local, ...results].find(item => item.status === "rejected");
   if (failed?.status === "rejected") error.value = failed.reason instanceof Error ? failed.reason.message : "任务查询失败";
   loading.value = false;
-  const loaded = !!snapshot && !error.value && !mediaError.value && media.status === "fulfilled" && media.value && synchronized;
+  let loaded = !!snapshot && !error.value && !mediaError.value && media.status === "fulfilled" && media.value && synchronized;
+  if (loaded && pendingCommand.value) loaded = await reconcileCommand(signal, false);
+  if (!current()) return newer();
   // 先固定任务游标，再核对目录、媒体和编辑内容；完整同步成功才跳过历史事件。
   if (loaded) snapshotCursor = Math.max(snapshotCursor, cursor);
   return loaded;
@@ -303,15 +305,27 @@ function displayCommand(response: CanvasCommandResult, command: CanvasCommand) {
   }
   return false;
 }
-async function reconcileCommand(signal?: AbortSignal, refreshJobs = true) {
+async function reconcileCommand(signal?: AbortSignal, refreshJobs = true): Promise<boolean> {
   const command = pendingCommand.value;
-  if (!command || submitting.value) return;
+  if (!command) return true;
+  if (submitting.value) return false;
+  const current = requestSignal(signal);
+  let posting = false;
   submitting.value = true;
   try {
     const client = createExecutionClient(command.directory);
-    const response = await client.getCommand(command.commandId, signal) ?? await client.command(command, signal);
-    if (displayCommand(response, command) && refreshJobs) await load(signal);
-  } catch (err) { if (!signal?.aborted && !disposed) commandFailed(command, err); }
+    let response = await client.getCommand(command.commandId, current);
+    if (!response) { posting = true; response = await client.command(command, current); }
+    if (current.aborted || disposed || !commandMatches(command) || pendingCommand.value?.commandId !== command.commandId) return false;
+    if (displayCommand(response, command) && refreshJobs) return load(signal);
+    return true;
+  } catch (err) {
+    if (!current.aborted && !disposed && commandMatches(command) && pendingCommand.value?.commandId === command.commandId) {
+      if (posting) commandFailed(command, err);
+      else error.value = err instanceof Error ? err.message : "命令核对失败，原命令已保留";
+    }
+    return false;
+  }
   finally { submitting.value = false; }
 }
 async function cancelJob(job: NodeJobView) {
@@ -359,11 +373,7 @@ const { error: connectionError } = useWorkspaceEvents({
   directory: () => props.directory,
   context: () => JSON.stringify([props.canvasPath, props.node?.id]),
   cursor: () => snapshotCursor,
-  refresh: async signal => {
-    const loaded = await load(signal);
-    if (pendingCommand.value) await reconcileCommand(signal, false);
-    return loaded;
-  },
+  refresh: signal => load(signal),
   receive: async (event, signal) => {
     if (event.type === "pluginsChanged") return syncNode(signal);
     if (event.type === "contentChanged" && props.node && (!event.canvasId || event.canvasId === props.canvasPath)) {
@@ -381,10 +391,10 @@ const { error: connectionError } = useWorkspaceEvents({
       jobSequences.set(job.jobId, event.seq);
       if (index < 0) jobs.value.unshift(job);
       else if (graphValueJson(jobs.value[index]) !== graphValueJson(job)) jobs.value[index] = job;
-      if (pendingCommand.value && pendingCommand.value.commandId === event.commandId) await reconcileCommand(signal, false);
+      if (pendingCommand.value && pendingCommand.value.commandId === event.commandId && !await reconcileCommand(signal, false)) return false;
       if (job.kind === "media") return loadMedia(signal);
     }
-    if (event.type === "graphChanged" && (!event.canvasId || event.canvasId === props.canvasPath) && pendingCommand.value && pendingCommand.value.commandId === event.commandId) await reconcileCommand(signal, false);
+    if (event.type === "graphChanged" && (!event.canvasId || event.canvasId === props.canvasPath) && pendingCommand.value && pendingCommand.value.commandId === event.commandId) return reconcileCommand(signal, false);
   },
 });
 const stopHiddenMedia = () => { if (document.hidden) clearTimeout(mediaTimer); };
