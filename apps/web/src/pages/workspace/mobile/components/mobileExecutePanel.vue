@@ -218,13 +218,18 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   if (!directory) return false;
   loading.value = true;
   error.value = "";
-  const results = await Promise.allSettled([
+  const [local] = await Promise.allSettled([
     createExecutionClient(directory).listJobSnapshot(requestSignal(signal)),
+  ]);
+  if (!current()) return newer();
+  const snapshot = local.status === "fulfilled" && local.value && Array.isArray(local.value.jobs) && Number.isSafeInteger(local.value.cursor) && local.value.cursor >= 0 ? local.value : undefined;
+  const cursor = snapshot?.cursor ?? 0;
+  const results = await Promise.allSettled([
     loadMedia(signal),
     loadCatalog(signal),
   ]);
   if (!current()) return newer();
-  const [local, media, described] = results;
+  const [media, described] = results;
   let synchronized = described.status === "fulfilled" && described.value;
   if (synchronized) {
     try { synchronized = await refreshNode(signal); }
@@ -234,20 +239,20 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
     }
   }
   if (!current()) return newer();
-  if (local.status === "fulfilled" && Array.isArray(local.value.jobs) && Number.isSafeInteger(local.value.cursor) && local.value.cursor >= 0) {
-    const snapshot = local.value;
+  if (snapshot) {
     const latest = new Map(jobs.value.map(job => [job.jobId, job]));
-    const next = snapshot.jobs.filter(matchesNode).map(job => (jobSequences.get(job.jobId) ?? 0) > snapshot.cursor ? latest.get(job.jobId) ?? job : job);
-    for (const job of jobs.value) if ((jobSequences.get(job.jobId) ?? 0) > snapshot.cursor && !next.some(item => item.jobId === job.jobId)) next.push(job);
+    const next = snapshot.jobs.filter(matchesNode).map(job => (jobSequences.get(job.jobId) ?? 0) > cursor ? latest.get(job.jobId) ?? job : job);
+    for (const job of jobs.value) if ((jobSequences.get(job.jobId) ?? 0) > cursor && !next.some(item => item.jobId === job.jobId)) next.push(job);
     next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     if (graphValueJson(next) !== graphValueJson(jobs.value)) jobs.value = next;
-    // 正文文件变化不一定改变节点；完成编辑投影核对后才能跳过历史内容事件。
-    if (synchronized) snapshotCursor = Math.max(snapshotCursor, snapshot.cursor);
   } else if (local.status === "fulfilled") error.value = "任务快照缺少有效列表或游标";
-  const failed = results.find(item => item.status === "rejected");
+  const failed = [local, ...results].find(item => item.status === "rejected");
   if (failed?.status === "rejected") error.value = failed.reason instanceof Error ? failed.reason.message : "任务查询失败";
   loading.value = false;
-  return !error.value && !mediaError.value && media.status === "fulfilled" && media.value && synchronized;
+  const loaded = !!snapshot && !error.value && !mediaError.value && media.status === "fulfilled" && media.value && synchronized;
+  // 先固定任务游标，再核对目录、媒体和编辑内容；完整同步成功才跳过历史事件。
+  if (loaded) snapshotCursor = Math.max(snapshotCursor, cursor);
+  return loaded;
 }
 
 function argumentsFromDraft() {
