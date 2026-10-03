@@ -277,10 +277,15 @@ function acceptRemote(section: EditorSection) {
   if (!section.remote || section.loading || section.saving || section.pending) return;
   section.baseVersion = section.remote.baseVersion;
   section.baselineValues = section.remote.baselineValues;
-  for (const name of ["expectedRevision", "expectedOutput"]) {
-    if (!section.fields.some(field => field.name === name && field.editor?.hidden)) continue;
+  const controls = section.fields.filter(field => !field.editor?.hidden);
+  const providerFields = new Set(controls.map(field => field.editor?.model?.providerField));
+  const modelSources = new Set(controls.flatMap(field => field.editor?.model ? [field.editor.model.sourcePath] : []));
+  const choiceFields = new Set(controls.filter(field => !field.editor?.model && (field.editor?.choices || field.schema.enum || isNullableBoolean(field))).map(field => field.name));
+  for (const { name, editor } of section.fields.filter(field => field.editor?.hidden)) {
+    if (providerFields.has(name) || editor?.choices?.modelProperty && modelSources.has(editor.choices.sourcePath) || editor?.choices?.dependentField && choiceFields.has(editor.choices.dependentField)) continue;
     section.values[name] = section.remote.values[name];
     if (section.remote.jsonValues[name] !== undefined) section.jsonValues[name] = section.remote.jsonValues[name];
+    else delete section.jsonValues[name];
   }
   section.reviewing = false;
   section.error = "";

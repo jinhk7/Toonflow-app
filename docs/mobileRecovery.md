@@ -161,3 +161,11 @@ Codex 对 5770c024 发现待确认命令查询临时失败后，恢复仍采纳�
 完整两 SFC、真实 Vue 生命周期、原 hook、最新 SDK、实际 Axios 与正式隔离 HTTP/NDJSON 的七组增量全部通过：GET403 不提交 cursor 并在原 3 秒恢复链中自动核对成功；已受理 POST 的 ACK503 加 SDK 查询 401 保凭据，恢复后 POST 总数仍 1；accepted/running 有效回执允许订阅，终态查询失败不消费事件并自动恢复；busy、2200ms idle、取消／切换／卸载无旧游标提交或重复订阅；编辑器受理后的 settle401 保 pending/sent/draft，原 ID reconcile 后正确清理，明确 POST400/409 仅清拒绝凭据保草稿。109 次正式 API，外部请求 0，订阅最多 1、卸载归零，隔离服务已关闭并确认 ConnectionRefused。证据 pr9PendingCommandRecoveryEvidence.json；运行阶段是定向回执状态 fixture，终态回执实际为 completed，并通过现有隔离 store 追加原命令事件走正式 NDJSON，没有验证真实模型任务或浏览器 DOM。
 
 最终 Web／节点 SDK 类型检查、Web 构建和独立只读复核通过；Web 构建与类型检查首次并行出现既有设置页 TS7006，构建结束后顺序重跑通过，自动声明无最终差异，未修改无关设置页面。最终产物 mobileNodeDetail-DeN44YS-.js，panel SHA256 ef15833b251660b07a78560c109d1cb86b2af075560ef01016d391c966b5f925，editor SHA256 8aaa44c69030fd49d82233de08655d82da69bbc9d6d7fee01c2007ce60c09cc6，SDK SHA256 d4ddbd6ccbc4e3a76e4ac314478374ef56ad47c9e516805677f24544af30b75e。未新增测试、脚本、插件实现文件或检查入口，未访问生产数据或发送供应商请求。
+
+## 隐藏并发令牌与用户联动字段
+
+Codex 对 26668d6d 发现：显式接受远端版本时，仅同步 expectedRevision/expectedOutput 会让合法的 etag、revisionToken 等隐藏令牌继续使用旧值。接受入口现在按已有 fields.hidden 元数据同步远端值，并删除远端已不存在的 JSON 缓存；可见草稿保持。隐藏 provider 以及可见模型／选项直接控制的隐藏依赖字段属于用户草稿，沿用现有 changeModel/changeChoice 的绑定与模板优先级保持，不把已清除的不兼容值重新带回。没有新增令牌字段协议、递归依赖或保存回执映射；原 pending/loading/saving guard、owner 和不可复用草稿保护保持。
+
+最终完整 mobileNodeEditor SFC、真实 Vue 生命周期、正式 SDK 与隔离 createApp HTTP 的六组针对验证全部通过：自定义 etag/revisionToken 及内置文件 CAS 冲突后保稿、接受新令牌再保存成功；原 providerId/modelId 与自定义 vendor/engine 保留用户 A/X 配对，接受远端 B/Y 的节点版本后以版本 3 保存至 4；缺失 JSON 缓存清除且参数不复活旧令牌，可见同名参数保留；延迟正式保存回执期间禁止接受远端，新输入和 editedAt 保持，显式再次接受后可保存。另两组受控完整 SFC/Vue/Zod 验证确认模型尺寸与选项依赖隐藏值被清除后不会复活。证据 pr9HiddenTokenRecoveryEvidence.json；120 次正式 API，外部／供应商请求 0。自定义字段元数据、请求别名和读回执增补／省略、回执延迟属于受控部分；实际文件与模型配置持久化、原节点／文件 CAS、Zod 由正式接口完成。两组隐藏依赖使用受控只读状态，没有第三方后端实现或 HTTP 保存，不代表真实第三方插件验证；此项非浏览器 DOM。
+
+最终 Web 类型检查、随后构建与独立只读复核通过，产物 mobileNodeDetail-CGu93xMw.js；编辑器 SHA256 9149d17b78fd12e30f0d234ba5cd4d28647683816d5042afb5f037cd21f2e0d0。未新增测试、脚本、插件实现文件或检查入口，未访问生产或发出模型请求。
