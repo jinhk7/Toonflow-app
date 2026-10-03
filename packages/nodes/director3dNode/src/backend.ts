@@ -84,7 +84,8 @@ const definition: NodeExecutionDefinition = {
         const current = await readModel(context);
         if (!current.document.plans.some(plan => plan.id === args.selectedPlanId)) throw new Error("选择的导演方案不存在");
       }
-      return context.patchData({ ...args, ...(args.prompt !== undefined && args.prompt !== (context.node.data.prompt ?? "") && args.promptModel === undefined ? { promptModel: args.prompt.split("\n").map(text => [{ type: "Write", text }]) } : {}) });
+      const node = await context.patchData({ ...args, ...(args.prompt !== undefined && args.prompt !== (context.node.data.prompt ?? "") && args.promptModel === undefined ? { promptModel: args.prompt.split("\n").map(text => [{ type: "Write", text }]) } : {}) });
+      return { ...node, nodeVersion: node.version };
     }, false, {
       label: "导演设置", readAction: "getPreferences",
       values: { prompt: { result: "config.prompt" }, model: { result: "config.model" }, selectedPlanId: { result: "config.selectedPlanId" }, anchors: { result: "config.anchors" }, lighting: { result: "config.lighting" }, sceneSettings: { result: "config.sceneSettings" } },

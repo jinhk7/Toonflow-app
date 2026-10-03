@@ -291,13 +291,16 @@ async function finishSection(section: EditorSection, response: CanvasCommandResu
   const sent = section.sent;
   clearSectionCommand(section, command);
   if (response.status !== "completed") { section.error = response.errorMessage || "保存失败，编辑草稿已保留"; return; }
-  if (sent?.draftId) removeWorkspaceDraft(command.directory, command.canvasPath, `${draftKind(section)}:${sent.draftId}`);
+  const unchanged = isEqual(draftOf(section), sent);
+  if (sent?.draftId) {
+    removeWorkspaceDraft(command.directory, command.canvasPath, `${draftKind(section)}:${sent.draftId}`);
+    if (section.draftId === sent.draftId) section.draftId = undefined;
+  }
   if (!sent?.draftId || !section.ownerId || section.ownerId !== sent.ownerId) {
     section.error = "原保存已完成，当前草稿已保留，请核对最新内容后接受当前版本";
     emit("changed");
     return;
   }
-  const unchanged = isEqual(draftOf(section), sent);
   const version = at(response.result, "nodeVersion");
   if (Number.isSafeInteger(version) && version >= 0) {
     const previousVersion = command.expectedVersions?.[String(command.args.nodeId)];
@@ -313,20 +316,32 @@ async function finishSection(section: EditorSection, response: CanvasCommandResu
   section.baselineValues = JSON.parse(JSON.stringify({ ...sent?.values, ...at(command, "args.args"), ...Object.fromEntries(["expectedRevision", "expectedOutput"].filter(name => section.values[name] !== undefined && section.fields.some(field => field.name === name && field.editor?.hidden)).map(name => [name, section.values[name]])) }));
   if (unchanged) {
     section.dirty = false;
-    section.draftId = undefined;
-    section.editedAt = undefined;
-    if (section.action.editor?.readAction) await readSection(section, signal);
-    else {
-      const graph = await useWorkspaceFiles(command.directory).readGraph(command.canvasPath, signal);
+    try {
+      if (section.action.editor?.readAction) {
+        if (!await readSection(section, signal)) throw new Error(section.error || "最新节点信息读取失败");
+      } else {
+        const graph = await useWorkspaceFiles(command.directory).readGraph(command.canvasPath, signal);
+        signal.throwIfAborted();
+        if (!graph.nodes.some(node => node.id === props.node.id)) throw new Error("节点已不存在，草稿已保留");
+        fillSection(section, graph);
+      }
       signal.throwIfAborted();
-      if (!graph.nodes.some(node => node.id === props.node.id)) throw new Error("节点已不存在，草稿已保留");
-      fillSection(section, graph);
+    } catch (reason) {
+      if (signal.aborted) return;
+      section.ready = false;
+      section.remote = undefined;
+      section.error = `节点信息已保存，但最新内容读取失败：${reason instanceof Error ? reason.message : "请重新核对节点信息"}`;
+      changeSection(section, false);
+      emit("changed");
+      return;
     }
-  } else {
-    section.dirty = true;
-    changeSection(section, false);
-  }
+    if (!section.dirty) {
+      section.draftId = undefined;
+      section.editedAt = undefined;
+    }
+  } else section.dirty = true;
   signal.throwIfAborted();
+  if (section.dirty && !changeSection(section, false)) { emit("changed"); return; }
   section.error = "";
   section.reviewing = false;
   emit("changed");

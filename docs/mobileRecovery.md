@@ -179,3 +179,17 @@ Codex 对 f7a1025e 发现：首次无版本读取曾通过两次动作执行确�
 完整实际 SFC、真实 Vue 生命周期、原 SDK 与隔离正式 HTTP 的六组针对验证全部通过：内置与定向删可选版本的 reader 首次／刷新／核对分别执行一次，CAS 全部为 2，核对复用图仅一次图 GET；受控非幂等 reader 首次分配计数 1，旧 CAS／缺节点在执行前拒绝，取消保稿。无 reader 使用原 imageNode.setImage、有效 nodeVersion 回执和实际 PNG 资源：隐藏字段 etag 映射 data.outputs.image，父 props 保持旧值，连续保存采用 null→imageFirst→imageSecond 输出令牌，每次 clean 保存一次图读取；原后台输出 CAS、Zod、文件读取和持久化真实。图屏障期间第二次写入为 0，新输入与 editedAt 保留；外部输出冲突保留，取消后持久草稿及 foreign owner 旧令牌保护通过，原命令 POST 一次。证据 pr9SingleReadAndNodeMappingEvidence.json，73 次正式 API，外部／供应商请求 0。
 
 可选版本回执删除、隐藏 expectedOutput→etag 元数据／请求别名及图／回执延迟是受控部分；节点版本和输出回执未改。非幂等分配计数及其 CAS 使用 inline 合法元数据／原 Zod／受控 SDK，未验证真实第三方插件执行；跨 owner 使用共享 localStorage 的两个实际 Vue scope，此项非浏览器 DOM。未新增测试、脚本或插件实现文件。最终 Web 类型检查、随后构建、独立只读复核及差异检查通过，产物 mobileNodeDetail-CwDcoylL.js，编辑器 SHA256 effc68ab3c7b87d93cc8d315bfc824050ae8f343714ab32af5f6ff47b5d6e41b。
+
+## 保存后回读失败与持久草稿恢复
+
+Codex 对 3d2eec3f 发现保存完成后 readSection=false 被忽略，随后错误清空并误报完整成功。现在 reader 的 false 与无 reader 的图读取异常统一恢复：明确说明写入已完成但最新内容核对失败，保留当前值、owner 和编辑时间，清除旧远端预览，生成新的不可复用恢复草稿；ready=false 阻止旧基线直接保存，dirty 保证表单仍能编辑与核对。原确认命令及其精确 sent 快照正常结算，重试不重发原写入。取消不会按新的 props 目录持久化旧区块。只有成功回读且仍 clean 时清除编辑时间；其间的新输入不清理。
+
+独立完整复核另发现续输持久化失败会被成功尾部清错；两分支合流检查 changeSection(false)，失败保持错误并停止成功提示。已确认删除 sent 快照后，仅仍指向该 ID 的 draftId 被清理，新真实 ID 和编辑时间保持，使后续保存必须先备份，包含 foreign owner 的早退路径。没有新增轮询、协议或存储抽象。
+
+证据 pr9PostSaveReadFailureEvidence.json 保留两版实际运行：6a44d764 的六组正式回读故障与两个 quota 入口 8/8，通过 126 次 API；最终 30d7d4ef 的三个指针／持久化增量 3/3，通过 67 次 API。没有宣称前八组在最终 hash 重跑。首次读失败矩阵覆盖内置／无版本回执 reader503、无 reader 图503、期间续输、取消及 foreign owner；原写 POST 都为一次，故障不显示成功，ready=false 防直接再写，核对及明确接受后可继续保存。最新增量覆盖成功回读期间输入 quota、原续输分支 quota，以及回读与备份双失败：旧 ID 清空，存储恢复后先生成新备份，原后台异步 CAS 失败（POST202→GET200 terminal failed）后重载仍保原版本草稿，明确接受外部版本后保存成功。14 个记录 scope 均停止、连接取消，三个记录端口均确认 ConnectionRefused，外部请求 0。读／图响应失败、时序门和 RAM localStorage quota 为受控注入，后端 CAS、命令状态和持久化为正式隔离 HTTP；此项不是浏览器 DOM 或真实浏览器存储配额验证。
+
+七类加载补查在 3d2eec3／effc68ab 源码实际通过：14 个编辑区块 ready/clean 并通过原 Zod；6 个 reader 各一次命令及前置图读取、固定节点 CAS，其他区块直接节点映射；原模型选项与能力可获得，合成业务文件和设置未变。证据 pr9FinalBuiltinReaderEvidence.json。最终 30d7d4ef 的 readSection/readCurrentSection 与该源码逐字相同，后续改动限定在保存完成处理；保存失败增量另行覆盖。
+
+同轮独立复核发现官方导演 setPreferences 只返回 NodeExecutionSnapshot.version。该动作现在保留全部原快照字段，并将本次写入的 version 明确附为 nodeVersion；前端不接受通用业务 version。原动作类型检查、production 单包构建以及最终 30d7d4ef 完整 SFC／真实 Vue／正式隔离 HTTP 通过：保存期间续输的草稿持久 baseVersion=2，两次写 expectedVersions 为 1、2，回执 version=nodeVersion 为 2、3，最终新内容和节点版本 3 保持。证据 pr9DirectorPreferencesVersionEvidence.json；未调用模型，随机隔离端口确认关闭。其它七类官方编辑保存已明确 nodeVersion，没有第二处同根返回遗漏；此项非浏览器 DOM。
+
+最终 Web 类型检查、随后构建、导演类型检查与单包构建、独立完整只读复核和 git diff --check 通过。Web 产物 mobileNodeDetail-CbQXZqSA.js，编辑器 SHA256 30d7d4eff3db36bb34c75a5b0db74601b3f951bd2fbd07326970d7ae5201f6cf，导演后端 SHA256 8d1eb62c293917dd4b411118647e0505491ad919ce333640f0ce2d1fe16f3ae7。未新增测试、脚本或插件实现文件，未访问生产或发出真实 Agent／模型／供应商请求。
