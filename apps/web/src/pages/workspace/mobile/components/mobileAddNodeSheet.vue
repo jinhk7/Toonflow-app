@@ -1,5 +1,5 @@
 <template>
-  <el-drawer v-model="visible" title="新增节点" direction="btt" size="70%" appendToBody>
+  <el-drawer v-model="visible" class="mobileSheet" modalClass="mobileSheetOverlay" title="新增节点" direction="btt" size="70%" appendToBody>
     <el-form labelPosition="top" @submit.prevent>
       <el-form-item label="节点类型">
         <el-select v-model="type" filterable placeholder="选择类型" style="width: 100%">

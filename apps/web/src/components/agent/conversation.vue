@@ -120,7 +120,8 @@
           :width="280"
           :offset="10"
           :showArrow="false"
-          popperClass="agentContextPopover">
+          popperClass="agentContextPopover"
+          :popperOptions="mobile ? mobilePopupOptions : undefined">
           <template #reference>
             <el-button class="contextButton" text circle aria-label="查看上下文用量" title="查看上下文用量">
               <icon-circle-dashed :size="14" />
@@ -165,6 +166,7 @@
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch, type ComponentPublicInstance } from "vue";
+import { mobilePopupOptions } from "./popupPosition";
 import { defaultRangeExtractor, observeElementRect, useVirtualizer } from "@tanstack/vue-virtual";
 import axios from "axios";
 import {
@@ -290,6 +292,7 @@ watch([() => props.active, messageList], async ([active, element]) => {
 let sender: xSender | undefined;
 let controller: AbortController | undefined;
 const senderElement = ref<HTMLElement>();
+const mobile = inject("mobilePage", false);
 const skillMenuRef = ref<InstanceType<typeof skillMenu>>();
 const skillQuery = ref<string>();
 const mentionMenuRef = ref<InstanceType<typeof mentionMenu>>();
@@ -878,7 +881,7 @@ watch(senderElement, (element, _previous, onCleanup) => {
   const instance = new xSender(element, {
     autoFocus: props.active,
     placeholder: "输入消息，@ 提及节点输出或全局素材…",
-    chatStyle: { minHeight: "44px", maxHeight: "var(--senderMaxHeight, 50vh)", fontSize: "14px", lineHeight: "24px" },
+    chatStyle: { minHeight: "44px", maxHeight: "var(--senderMaxHeight, 50vh)", fontSize: "var(--senderFontSize, 14px)", lineHeight: "24px" },
     keyboardSendFun: event => event.key === "Enter" && !event.shiftKey && !event.isComposing,
     keyboardWrapFun: event => event.key === "Enter" && event.shiftKey && !event.isComposing,
   });
@@ -920,11 +923,41 @@ watch(senderElement, (element, _previous, onCleanup) => {
   editor.setAttribute("role", "textbox");
   editor.setAttribute("aria-label", "消息");
   editor.setAttribute("aria-multiline", "true");
+  let senderFrame = 0;
+  const senderContainer = element;
+  function updateMobileSenderHeight() {
+    senderFrame = 0;
+    const conversation = senderContainer.closest<HTMLElement>(".agentConversation");
+    const input = senderContainer.closest<HTMLElement>(".messageInput");
+    if (!senderContainer.closest(".mobileAgent") || !conversation?.clientHeight || !input) return;
+    const extraHeight = input.offsetHeight - instance.chatElement.rollBox.offsetHeight;
+    const inputStyle = getComputedStyle(input);
+    const marginHeight = Number.parseFloat(inputStyle.marginTop) + Number.parseFloat(inputStyle.marginBottom);
+    conversation.style.setProperty("--mobileConversationMinHeight", `${44 + extraHeight + marginHeight + 24}px`);
+    const available = conversation.clientHeight - extraHeight - marginHeight - 24;
+    const viewportHeight = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobileViewportHeight")) || window.innerHeight;
+    const maxHeight = Math.max(44, Math.min(available, viewportHeight * 0.3));
+    senderContainer.style.setProperty("--senderMaxHeight", `${maxHeight}px`);
+    updateSenderMaxHeight();
+    senderHeight.value = instance.chatElement.rollBox.clientHeight;
+  }
+  function scheduleSenderHeight() {
+    if (!senderFrame) senderFrame = requestAnimationFrame(updateMobileSenderHeight);
+  }
+  const sizeObserver = new ResizeObserver(scheduleSenderHeight);
+  if (element.closest(".mobileAgent")) {
+    for (const target of [element, element.closest(".messageInput"), element.closest(".agentConversation")]) if (target) sizeObserver.observe(target);
+    window.addEventListener("mobileViewportChange", scheduleSenderHeight);
+    scheduleSenderHeight();
+  }
   element.addEventListener("paste", pasteAttachments, true);
   const updateCursor = (event: Event) => { if (!(event instanceof KeyboardEvent) || event.key !== "Escape") updateMentionQuery(); };
   editor.addEventListener("keyup", updateCursor);
   editor.addEventListener("compositionend", updateCursor);
   onCleanup(() => {
+    cancelAnimationFrame(senderFrame);
+    sizeObserver.disconnect();
+    window.removeEventListener("mobileViewportChange", scheduleSenderHeight);
     controller?.abort();
     reconnectController?.abort();
     draftMentionTargets.value = [];
@@ -1246,7 +1279,7 @@ watch(() => !props.initialSession?.parentFile && !!workspaceStore.pendingAgentMe
     }
 
     .senderEditor .chat-placeholder-wrap {
-      font-size: 14px;
+      font-size: var(--senderFontSize, 14px);
       font-style: normal;
       line-height: 24px;
     }

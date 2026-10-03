@@ -1,5 +1,5 @@
 <template>
-  <el-drawer v-model="visible" title="添加连接" direction="btt" size="75%" appendToBody>
+  <el-drawer v-model="visible" class="mobileSheet" modalClass="mobileSheetOverlay" title="添加连接" direction="btt" size="75%" appendToBody>
     <el-form labelPosition="top">
       <el-form-item label="目标节点">
         <el-select v-model="targetId" filterable placeholder="选择节点" style="width: 100%" @change="syncHandles">

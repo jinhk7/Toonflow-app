@@ -16,7 +16,7 @@
       <span class="conversationTitle" :class="{ readOnly: parentFile }" :title="name" :tabindex="sessionFile && !parentFile ? 0 : -1" @dblclick="editName" @keydown.enter.prevent="editName">{{ name }}</span>
     </span>
     <div class="menuActions">
-      <el-popover v-if="subAgents?.length" v-model:visible="subAgentsVisible" trigger="click" placement="bottom-end" :width="340" :showArrow="false" :popperStyle="{ maxWidth: 'calc(100vw - 24px)' }">
+      <el-popover v-if="subAgents?.length" v-model:visible="subAgentsVisible" trigger="click" placement="bottom-end" :width="340" :showArrow="false" popperClass="agentSubAgentPopover" :popperOptions="mobile ? mobilePopupOptions : undefined" :popperStyle="{ maxWidth: 'calc(100vw - 24px)' }">
         <template #reference>
           <el-button class="subAgentTrigger" text circle :aria-label="`子 Agent，共 ${subAgents.length} 个`" :aria-expanded="subAgentsVisible" title="子 Agent">
             <icon-users-group :size="17" />
@@ -45,7 +45,7 @@
         </div>
       </el-popover>
       <el-button v-if="!parentFile" text circle aria-label="新建对话" title="新建对话" @click="emit('newChat')"><icon-message-plus :size="17" /></el-button>
-      <el-popover v-if="!parentFile" v-model:visible="historyVisible" trigger="click" placement="bottom-end" :width="280" :showArrow="false" @show="emit('history')">
+      <el-popover v-if="!parentFile" v-model:visible="historyVisible" trigger="click" placement="bottom-end" :width="280" :showArrow="false" popperClass="agentHistoryPopover" :popperOptions="mobile ? mobilePopupOptions : undefined" @show="emit('history')">
         <template #reference>
           <el-button text circle :loading="loading" :icon="IconHistory" aria-label="历史对话" title="历史对话" />
         </template>
@@ -85,7 +85,8 @@
 
 <script setup lang="ts">
 import axios from "axios";
-import { nextTick, ref, shallowRef, watch } from "vue";
+import { inject, nextTick, ref, shallowRef, watch } from "vue";
+import { mobilePopupOptions } from "./popupPosition";
 import { ElMessage, ElMessageBox, type InputInstance } from "element-plus";
 import type { AgentHistory } from "./types";
 import type { AgentSubAgent } from "@toonflow/server/agent/types";
@@ -108,6 +109,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ newChat: []; history: []; select: [file: string]; rename: [file: string, name: string]; remove: [file: string]; close: []; openSubAgent: [file: string]; back: [] }>();
 const historyVisible = ref(false);
+const mobile = inject("mobilePage", false);
 const subAgentsVisible = ref(false);
 const editingName = ref(false);
 const nameDraft = ref("");

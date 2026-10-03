@@ -61,23 +61,27 @@ onMounted(() => { if (!directory.value) void router.replace("/mobile"); });
 .mobileAgent {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  flex: 1;
   min-height: 0;
-  padding-bottom: env(safe-area-inset-bottom);
+  min-width: 0;
+  overflow: auto;
   box-sizing: border-box;
 
   .contextBar {
     display: flex;
+    flex-shrink: 0;
     gap: 8px;
     padding: 8px 12px;
 
     .el-select { flex: 1; min-width: 0; }
   }
-  .agent { flex: 1; min-height: 0; }
+  .agent { flex: 1; height: auto; min-height: 0; overflow: visible; }
+  :deep(.agentConversation) { min-height: var(--mobileConversationMinHeight, 130px); overflow: visible; }
+  :deep(.messageViewport) { overflow: hidden; }
   :deep(.senderActions) { flex-wrap: wrap; gap: 4px; }
   :deep(.welcomeMessage) { padding: 16px 8px; }
   :deep(.welcomeSuggestions) { flex-direction: column; }
   :deep(.messageActions) { opacity: 1; }
-  :deep(.senderEditor) { --senderMaxHeight: 30dvh; }
+  :deep(.senderEditor) { --senderMaxHeight: max(44px, calc(var(--mobileViewportHeight, 100dvh) * 0.3)); }
 }
 </style>

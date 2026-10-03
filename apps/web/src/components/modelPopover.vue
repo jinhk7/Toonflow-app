@@ -8,6 +8,7 @@
       :offset="10"
       :showArrow="false"
       popperClass="agentModelPopover"
+      :popperOptions="mobile ? mobilePopupOptions : undefined"
       :popperStyle="{ padding: '20px', maxWidth: 'calc(100vw - 24px)' }">
       <template #reference>
         <el-button class="modelButton" text :disabled="disabled" aria-label="模型与推理设置">
@@ -20,7 +21,7 @@
       </template>
       <el-form class="modelOptions" labelPosition="top">
         <el-form-item label="模型">
-          <el-select v-model="selectedModel" filterable :disabled="disabled" :teleported="false" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型">
+          <el-select v-model="selectedModel" filterable :disabled="disabled" :teleported="mobile" placeholder="选择模型" aria-label="选择模型" noDataText="请先在设置中添加模型">
             <template #prefix><modelIcon v-if="selectedModelChoice" :model="selectedModelChoice.modelId" :size="18" /></template>
             <el-option-group v-for="provider in modelGroups" :key="provider.id" :label="provider.label">
               <el-option v-for="model in provider.models" :key="model.id" :label="model.label" :value="JSON.stringify([provider.id, model.id])">
@@ -42,6 +43,8 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useRoute } from "vue-router";
+import { mobilePopupOptions } from "./agent/popupPosition";
 import { IconChevronDown } from "@tabler/icons-vue";
 import { modelIcon } from "@toonflow/model-icons";
 import { customProviders, modelChoices } from "@/stores/settings";
@@ -50,6 +53,8 @@ const selectedModel = defineModel<string>({ default: "" });
 const reasoningEffort = defineModel<string>("reasoningEffort", { default: "" });
 const props = withDefaults(defineProps<{ active?: boolean; disabled?: boolean }>(), { active: true, disabled: false });
 const visible = ref(false);
+const route = useRoute();
+const mobile = computed(() => route.path === "/mobile" || route.path.startsWith("/mobile/"));
 const reasoningOptions = [
   { label: "默认", value: "" },
   { label: "低", value: "low" },
