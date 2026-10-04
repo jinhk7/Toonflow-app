@@ -5,8 +5,8 @@
     <el-form v-for="section in sections.filter(item => !isOutputSection(item))" :key="section.action.name" class="editorSection" labelPosition="top" :disabled="!section.ready && !section.dirty" @submit.prevent="saveSection(section)">
       <h3>{{ section.action.editor?.label }}</h3>
       <el-form-item v-for="field in section.fields.filter(item => !item.editor?.hidden)" :key="field.name" :label="field.editor?.label || field.schema.title || field.name" :required="field.required">
-        <el-select v-if="field.editor?.model" :modelValue="modelValue(section, field)" :clearable="canClear(field)" @change="value => changeModel(section, field, value)">
-          <el-option v-for="model in models(section, field)" :key="modelOptionValue(model, field)" :label="model.label || model.name || model.modelName || model[field.name] || model.modelId" :value="modelOptionValue(model, field)" />
+        <el-select v-if="field.editor?.model" :modelValue="modelValue(section, field)" :placeholder="modelPlaceholder(section, field)" :clearable="canClear(field)" @change="value => changeModel(section, field, value)">
+          <el-option v-for="model in models(section, field)" :key="modelOptionValue(model, field)" :label="modelLabel(model, field)" :value="modelOptionValue(model, field)" />
         </el-select>
         <el-select v-else-if="field.editor?.choices || field.schema.enum" :modelValue="section.values[field.name] === '' ? undefined : JSON.stringify(section.values[field.name])" :clearable="canClear(field)" @change="value => changeChoice(section, field, value)">
           <el-option v-for="value in choices(section, field)" :key="JSON.stringify(value)" :label="choiceLabel(field, value)" :value="JSON.stringify(value?.value ?? value)" />
@@ -77,7 +77,7 @@ const descriptor = computed(() => {
 const sections = ref<EditorSection[]>([]);
 const hasUnsavedChanges = computed(() => sections.value.some(section => section.dirty || section.saving || section.pending || section.loading || section.error));
 const hasPendingChanges = computed(() => sections.value.some(section => section.saving || section.pending));
-const hasGenerationModel = computed(() => sections.value.some(section => section.fields.some(field => field.editor?.model && models(section, field).some(model => modelOptionValue(model, field) === modelValue(section, field)))));
+const hasGenerationModel = computed(() => sections.value.some(section => section.fields.some(field => field.editor?.model && (models(section, field).some(model => modelOptionValue(model, field) === modelValue(section, field)) || !!defaultTextModel(section, field)))));
 const error = ref("");
 const editorOwnerId = crypto.randomUUID();
 let connection: AbortController | undefined;
@@ -174,6 +174,14 @@ function models(section: EditorSection, field: EditorField): ModelChoice[] {
   const source = at(section.current, field.editor?.model?.sourcePath);
   const providerField = field.editor?.model?.providerField;
   return Array.isArray(source) ? source.filter(item => item && (typeof item.providerId === "string" && typeof item.modelId === "string" || typeof item[field.name] === "string" && (!providerField || typeof item[providerField] === "string"))) : [];
+}
+function defaultTextModel(section: EditorSection, field: EditorField) {
+  return props.node.type === "remote-textNode" && !props.node.data.model && !section.dirty && field.editor?.model ? models(section, field)[0] : undefined;
+}
+function modelLabel(model: ModelChoice, field: EditorField) { return String(model.label || model.name || model.modelName || model[field.name] || model.modelId); }
+function modelPlaceholder(section: EditorSection, field: EditorField) {
+  const model = defaultTextModel(section, field);
+  return model ? "默认：" + modelLabel(model, field) : "请选择模型";
 }
 function modelOptionValue(model: ModelChoice, field: EditorField) {
   const providerField = field.editor?.model?.providerField;
