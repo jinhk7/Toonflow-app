@@ -44,7 +44,7 @@
               <img v-if="referenceMedia[link.edgeId]?.type === 'IMAGE' && previewUrls['reference:' + link.edgeId]" class="referencePreview" :src="previewUrls['reference:' + link.edgeId]" alt="引用图片" />
               <video v-else-if="referenceMedia[link.edgeId]?.type === 'VIDEO' && previewUrls['reference:' + link.edgeId]" class="referencePreview" :src="previewUrls['reference:' + link.edgeId]" muted playsinline preload="metadata" aria-label="引用视频" />
               <span>{{ link.peerLabel }}</span>
-              <span v-if="referenceValue(link)?.dataType === 'STRING'" class="referenceText">{{ String(referenceValue(link)?.value).slice(0, 200) }}</span>
+              <span v-if="referenceValue(link)?.dataType === 'STRING'" class="referenceText">{{ typeof referenceValue(link)?.value === "string" ? String(referenceValue(link)?.value).slice(0, 200) || "正文为空" : "点此查看源节点正文" }}</span>
               <span class="handles">{{ link.sourceHandle }} → {{ link.targetHandle }}</span>
             </button>
             <div v-if="referenceIndex(link) >= 0 && inputReferences.length > 1" class="referenceActions">

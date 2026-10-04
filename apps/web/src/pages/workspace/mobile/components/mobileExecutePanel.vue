@@ -70,7 +70,7 @@ import saveFile from "@/lib/saveFile";
 import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
 import type { NodeMediaValue, NodeOutputs } from "@toonflow/nodes-scaffold/values";
 import type { NodeMediaJobView } from "@toonflow/nodes-scaffold/runtime";
-import { getTargetValues } from "@toonflow/nodes-scaffold/inputValues";
+import { getTargetSources } from "@toonflow/nodes-scaffold/inputValues";
 import type { CanvasNode } from "../lib/mobileGraphModel";
 
 type GenerationState = { status: string; controlsBlocked?: boolean; canCancelObservation?: boolean; mediaJob?: NodeMediaJobView; error?: string; outputs?: NodeOutputs };
@@ -102,7 +102,8 @@ const currentOutput = computed(() => {
 });
 const running = computed(() => ["accepted", "running"].includes(generationState.value?.status ?? ""));
 const hasGenerationAction = computed(() => !!generationName.value && descriptor.value?.actions.some(item => item.name === generationName.value));
-const hasPrompt = computed(() => typeof props.node?.data.prompt === "string" && !!props.node.data.prompt.trim() || !!mediaType.value && !!props.graph && !!props.node && getTargetValues(props.node.id, "in", props.graph.nodes, props.graph.edges).some(item => item.dataType === "STRING" && typeof item.value === "string" && item.value.trim()));
+// 文本引用可能只保留 textPath；正文由后端 readOutputs 读取并在生成前校验。
+const hasPrompt = computed(() => typeof props.node?.data.prompt === "string" && !!props.node.data.prompt.trim() || !!mediaType.value && !!props.graph && !!props.node && getTargetSources(props.node.id, "in", props.graph.nodes, props.graph.edges).some(({ handle }) => handle.dataType === "STRING" || Array.isArray(handle.dataType) && handle.dataType.includes("STRING")));
 const generationBlocked = computed(() => !hasGenerationAction.value || !hasPrompt.value || !props.modelReady || !generationState.value || !!generationError.value || !!error.value || !!mediaError.value || loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || running.value || generationState.value.status === "needsReview" || !!generationState.value.controlsBlocked);
 const resultBlocked = computed(() => loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || !!generationError.value || !!error.value || !!mediaError.value || !!generationName.value && (!generationState.value || !!generationState.value.controlsBlocked || running.value));
 const legacyDrafts = ref<{ kind: string; value: unknown }[]>([]);
