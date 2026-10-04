@@ -18,6 +18,10 @@ let viewportFrame = 0;
 let compactControlPointer: number | undefined;
 const viewport = window.visualViewport;
 const root = document.documentElement;
+const mobileKeyboard = navigator.maxTouchPoints > 0 && window.matchMedia("(pointer: coarse)").matches && /Android|iPhone|iPad/.test(navigator.userAgent);
+let viewportSize = "";
+let expandedViewportHeight = 0;
+let keyboardVisible = false;
 
 function updateViewport() {
   viewportFrame = 0;
@@ -25,6 +29,14 @@ function updateViewport() {
   const height = pinching
     ? Number.parseFloat(root.style.getPropertyValue("--mobileViewportHeight")) || window.innerHeight
     : viewport?.height ?? window.innerHeight;
+  if (!pinching) {
+    const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
+    const size = `${window.innerWidth}:${window.screen.width}:${window.screen.height}`;
+    // 旋转或窗口尺寸变化时重记基线；仅触控移动设备使用历史高度后备。
+    expandedViewportHeight = size !== viewportSize || !mobileKeyboard ? Math.max(layoutHeight, height) : Math.max(expandedViewportHeight, layoutHeight, height);
+    viewportSize = size;
+    keyboardVisible = !!viewport && (mobileKeyboard ? expandedViewportHeight : layoutHeight) - height > 120;
+  }
   const focused = document.activeElement;
   const visibleFocus = focused instanceof HTMLElement && focused.getClientRects().length > 0;
   const editorFocus = visibleFocus && focused.isContentEditable && !!focused.closest(".mobileAgent .senderEditor");
@@ -32,8 +44,8 @@ function updateViewport() {
   const editingControl = compactEditing.value && visibleFocus && !!focused.closest(".mobileAgent, .agentModelPopover, .agentContextPopover, .agentHistoryPopover, .agentSubAgentPopover, .mentionOverlay, .skillOverlay");
   if (!conversationLayout.value) compactControlPointer = undefined;
   const pressedControl = compactControlPointer !== undefined;
-  // 短编辑视口优先留给正文；焦点与可视高度共同判断，不将单纯缩放当作键盘。
-  compactEditing.value = conversationLayout.value && (pressedControl || height < 600 && (editorFocus || editingControl));
+  // 短屏本身不表示键盘；还需正常缩放下视口明显收缩且处于编辑操作。
+  compactEditing.value = conversationLayout.value && (pressedControl || keyboardVisible && height < 600 && (editorFocus || editingControl));
   // 主动 pinch 时保留布局，让浏览器负责缩放和平移。
   if (pinching) return;
   root.style.setProperty("--mobileViewportHeight", `${height}px`);
