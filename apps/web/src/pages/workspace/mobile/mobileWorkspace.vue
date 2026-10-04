@@ -6,6 +6,10 @@
         <el-option v-for="canvas in canvases" :key="canvas.id" :label="canvas.name" :value="canvas.id" />
       </el-select>
       <el-input v-model="query" clearable placeholder="搜索节点名或类型" aria-label="搜索节点" />
+      <el-radio-group v-model="viewMode" class="viewMode" aria-label="节点展示方式">
+        <el-radio-button value="all">全部节点</el-radio-button>
+        <el-radio-button value="type">按类型分组</el-radio-button>
+      </el-radio-group>
     </div>
     <div class="actions">
       <el-button type="primary" :disabled="!graph" @click="addNodeVisible = true">新增节点</el-button>
@@ -20,12 +24,13 @@
     <el-scrollbar v-loading="loading" class="nodeScroll">
       <mobileNodeList
         v-if="graph"
-        :tree="filteredTree"
+        :nodes="filteredNodes"
+        :typeLabels="typeLabels"
+        :groupByType="viewMode === 'type'"
         :selectedIds="selectedIds"
         :highlightId="highlightId"
         @toggleSelect="toggleSelect"
-        @openNode="openNode"
-        @openRef="openNode" />
+        @openNode="openNode" />
       <el-empty v-else-if="!loading" description="无法加载画布" />
     </el-scrollbar>
     <mobileAddNodeSheet v-model="addNodeVisible" :nodeTypes="nodeTypes" @create="createNode" />
@@ -41,7 +46,7 @@ import mobileTopBar from "./components/mobileTopBar.vue";
 import mobileNodeList from "./components/mobileNodeList.vue";
 import mobileAddNodeSheet from "./components/mobileAddNodeSheet.vue";
 import { listProjectCanvases } from "./lib/canvasList";
-import { buildGroupTree, flattenTreeForSearch, nodeLabel, type CanvasNode, type GroupTreeItem } from "./lib/mobileGraphModel";
+import { nodeLabel, type CanvasNode } from "./lib/mobileGraphModel";
 import { createGroupAroundNodes, createNodePayload } from "./lib/mobileGraphOps";
 import { fetchEnabledNodeTypes, type MobileNodeType } from "./lib/nodeCatalog";
 import useWorkspaceExecution from "@/lib/workspaceExecution";
@@ -56,6 +61,7 @@ const canvasId = ref(String(route.query.canvas ?? ""));
 const canvases = ref<{ id: string; name: string }[]>([]);
 const canvasLoading = ref(false);
 const query = ref("");
+const viewMode = ref<"all" | "type">("type");
 const selectedIds = ref<string[]>([]);
 const highlightId = ref("");
 const addNodeVisible = ref(false);
@@ -67,25 +73,14 @@ const { graph, loading, error: graphError, connectionError, conflict, load, appl
 );
 
 const canvasName = computed(() => canvases.value.find(c => c.id === canvasId.value)?.name ?? "");
-const tree = computed(() => (graph.value ? buildGroupTree(graph.value.nodes as CanvasNode[]) : { group: null, nodes: [], children: [] }));
-
-const filteredTree = computed(() => {
+const typeLabels = computed(() => new Map(nodeTypes.value.map(item => [item.type, item.label])));
+const filteredNodes = computed(() => {
   const q = query.value.trim().toLowerCase();
-  if (!q || !graph.value) return tree.value;
-  const flat = flattenTreeForSearch(tree.value);
-  const allowed = new Set(
-    flat
-      .filter(item => nodeLabel(item.node).toLowerCase().includes(q) || String(item.node.type ?? "").toLowerCase().includes(q))
-      .map(item => item.node.id),
-  );
-  function prune(item: GroupTreeItem): GroupTreeItem {
-    return {
-      group: item.group,
-      nodes: item.nodes.filter(n => allowed.has(n.id)),
-      children: item.children.map(prune).filter(child => child.nodes.length || child.children.length),
-    };
-  }
-  return prune(tree.value);
+  return ((graph.value?.nodes ?? []) as CanvasNode[])
+    .filter(node => node.type !== "canvasGroup")
+    .filter(node => !q || [nodeLabel(node), String(node.type ?? ""), typeLabels.value.get(String(node.type ?? "")) ?? ""]
+      .some(value => value.toLowerCase().includes(q)))
+    .sort((left, right) => nodeLabel(left).localeCompare(nodeLabel(right), "zh-CN"));
 });
 
 watch(() => route.query.highlight, value => { highlightId.value = typeof value === "string" ? value : ""; }, { immediate: true });
@@ -191,6 +186,14 @@ onMounted(async () => {
 
   .canvasSelect {
     width: 100%;
+  }
+
+  .viewMode {
+    :deep(.el-radio-button__inner) {
+      display: flex;
+      align-items: center;
+      min-height: 44px;
+    }
   }
 }
 

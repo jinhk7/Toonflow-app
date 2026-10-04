@@ -1,144 +1,178 @@
 <template>
   <div class="mobileNodeList">
     <section v-for="section in sections" :key="section.key" class="groupSection">
-      <h2 v-if="section.title" class="groupTitle">{{ section.title }}</h2>
-      <ul class="nodeRows">
-        <li v-for="row in section.rows" :key="row.node.id">
-          <div class="nodeRow" :class="{ highlighted: row.node.id === highlightId }">
+      <h2 v-if="groupByType" class="groupTitle">
+        <button
+          class="groupToggle"
+          type="button"
+          :aria-expanded="!collapsedTypes.has(section.key)"
+          :aria-controls="`${listId}-${encodeURIComponent(section.key)}`"
+          @click="toggleGroup(section.key)">
+          <icon-chevron-right :size="18" class="chevron" :class="{ expanded: !collapsedTypes.has(section.key) }" aria-hidden="true" />
+          <span class="typeName">{{ section.title }}</span>
+          <span class="count">{{ section.nodes.length }}</span>
+        </button>
+      </h2>
+      <ul :id="`${listId}-${encodeURIComponent(section.key)}`" v-show="!groupByType || !collapsedTypes.has(section.key)" class="nodeRows">
+        <li v-for="node in section.nodes" :key="node.id">
+          <div class="nodeRow" :class="{ highlighted: node.id === highlightId }">
             <el-checkbox
-              :modelValue="selectedIds.includes(row.node.id)"
-              :aria-label="`选择 ${row.label}`"
-              @update:modelValue="emit('toggleSelect', row.node.id)" />
-            <button class="nodeMain" type="button" @click="emit('openNode', row.node.id)">
-              <span class="label">{{ row.label }}</span>
-              <span class="meta">{{ row.type }}</span>
-              <span v-if="row.path" class="path">{{ row.path }}</span>
+              :modelValue="selectedIds.includes(node.id)"
+              :aria-label="`选择 ${nodeLabel(node)}`"
+              @update:modelValue="emit('toggleSelect', node.id)" />
+            <button class="nodeMain" type="button" @click="emit('openNode', node.id)">
+              <span class="label">{{ nodeLabel(node) }}</span>
+              <span class="meta">{{ typeLabels.get(String(node.type ?? 'unknown')) ?? node.type ?? 'unknown' }}</span>
             </button>
           </div>
         </li>
       </ul>
-      <mobileNodeList
-        v-for="child in section.children"
-        :key="child.key"
-        :tree="child.tree"
-        :selectedIds="selectedIds"
-        :groupPath="section.path"
-        :highlightId="highlightId"
-        @toggleSelect="emit('toggleSelect', $event)"
-        @openNode="emit('openNode', $event)"
-        @openRef="emit('openRef', $event)" />
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
-import { nodeLabel, type GroupTreeItem } from "../lib/mobileGraphModel";
+import { computed, ref, useId, watch } from "vue";
+import { IconChevronRight } from "@tabler/icons-vue";
+import { nodeLabel, type CanvasNode } from "../lib/mobileGraphModel";
 
 const props = defineProps<{
-  tree: GroupTreeItem;
+  nodes: CanvasNode[];
+  typeLabels: Map<string, string>;
+  groupByType: boolean;
   selectedIds: string[];
   highlightId?: string;
-  groupPath?: string[];
 }>();
 
 const emit = defineEmits<{
   toggleSelect: [nodeId: string];
   openNode: [nodeId: string];
-  openRef: [nodeId: string];
 }>();
 
+const listId = useId();
+const collapsedTypes = ref(new Set<string>());
 const sections = computed(() => {
-  const items: { key: string; title: string; path: string[]; rows: { node: GroupTreeItem["nodes"][number]; label: string; type: string; path: string }[]; children: { key: string; tree: GroupTreeItem }[] }[] = [];
-  for (const child of props.tree.group || props.tree.nodes.length ? [props.tree] : props.tree.children) {
-    const title = child.group ? nodeLabel(child.group) : "未分组";
-    const path = child.group ? [...(props.groupPath ?? []), title] : props.groupPath ?? [];
-    items.push({
-      key: child.group?.id ?? "root-loose",
-      path,
-      title,
-      rows: child.nodes.map(node => ({
-        node,
-        label: nodeLabel(node),
-        type: String(node.type ?? "unknown"),
-        path: path.join(" / "),
-      })),
-      children: child.children.map((sub, index) => ({
-        key: `${child.group?.id ?? "root"}-${index}`,
-        tree: sub,
-      })),
-    });
+  if (!props.groupByType) return [{ key: "all", title: "", nodes: props.nodes }];
+  const groups = new Map<string, { key: string; title: string; nodes: CanvasNode[] }>();
+  for (const node of props.nodes) {
+    const type = String(node.type ?? "unknown");
+    if (!groups.has(type)) groups.set(type, { key: type, title: props.typeLabels.get(type) ?? type, nodes: [] });
+    groups.get(type)!.nodes.push(node);
   }
-  return items;
+  return [...groups.values()].sort((left, right) => left.title.localeCompare(right.title, "zh-CN"));
+});
+
+function toggleGroup(type: string) {
+  if (collapsedTypes.value.has(type)) collapsedTypes.value.delete(type);
+  else collapsedTypes.value.add(type);
+}
+
+watch(() => props.highlightId, id => {
+  const node = props.nodes.find(item => item.id === id);
+  if (node) collapsedTypes.value.delete(String(node.type ?? "unknown"));
 });
 </script>
 
 <style lang="scss" scoped>
-.groupSection {
-  margin-bottom: 16px;
-}
+.mobileNodeList {
+  .groupSection {
+    margin-bottom: 16px;
 
-.groupTitle {
-  margin: 0 0 8px 8px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--el-text-color-secondary);
-}
+    .groupTitle {
+      margin: 0 0 6px;
+      font-size: 14px;
 
-.nodeRows {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
+      .groupToggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        min-height: 44px;
+        padding: 8px;
+        border: 0;
+        border-radius: var(--el-border-radius-base);
+        background: transparent;
+        color: var(--el-text-color-primary);
+        font: inherit;
+        font-weight: 600;
+        text-align: left;
+        cursor: pointer;
 
-.nodeRow {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
-  border-radius: var(--el-border-radius-base);
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  :deep(.el-checkbox) {
-    min-width: 44px;
-    min-height: 48px;
-    margin: 0;
-    justify-content: center;
-  }
+        .chevron {
+          flex-shrink: 0;
 
-  &.highlighted {
-    border-color: var(--el-color-primary);
-    box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
-  }
-}
+          &.expanded {
+            transform: rotate(90deg);
+          }
+        }
 
-.nodeMain {
-  flex: 1;
-  min-height: 48px;
-  padding: 10px 12px 10px 4px;
-  border: 0;
-  background: transparent;
-  text-align: left;
-  color: inherit;
-  cursor: pointer;
+        .typeName {
+          flex: 1;
+          min-width: 0;
+          overflow-wrap: anywhere;
+        }
 
-  .label {
-    display: block;
-    font-weight: 600;
-  }
+        .count {
+          flex-shrink: 0;
+          color: var(--el-text-color-secondary);
+        }
+      }
+    }
 
-  .meta {
-    display: block;
-    font-size: 12px;
-    color: var(--el-text-color-secondary);
-  }
+    .nodeRows {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
 
-  .path {
-    display: block;
-    font-size: 11px;
-    color: var(--el-text-color-placeholder);
+      .nodeRow {
+        display: flex;
+        align-items: stretch;
+        gap: 4px;
+        border-radius: var(--el-border-radius-base);
+        background: var(--el-bg-color);
+        border: 1px solid var(--el-border-color-lighter);
+
+        :deep(.el-checkbox) {
+          flex-shrink: 0;
+          min-width: 44px;
+          min-height: 48px;
+          margin: 0;
+          justify-content: center;
+        }
+
+        &.highlighted {
+          border-color: var(--el-color-primary);
+          box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
+        }
+
+        .nodeMain {
+          flex: 1;
+          min-width: 0;
+          min-height: 48px;
+          padding: 10px 12px 10px 4px;
+          border: 0;
+          background: transparent;
+          text-align: left;
+          color: inherit;
+          cursor: pointer;
+          overflow-wrap: anywhere;
+
+          .label {
+            display: block;
+            font-weight: 600;
+          }
+
+          .meta {
+            display: block;
+            font-size: 12px;
+            color: var(--el-text-color-secondary);
+          }
+        }
+      }
+    }
   }
 }
 </style>
