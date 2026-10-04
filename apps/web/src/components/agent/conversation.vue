@@ -763,8 +763,14 @@ async function terminateRun() {
     ElMessage.success(mobile && remoteRunning.value ? "终止请求已受理" : "已终止本次流程");
   } catch (error) {
     if (mobile && (disposed || currentRunId.value !== runId)) return;
-    if (mobile && (accepted || error instanceof ExecutionRequestError && error.status === 409 && error.message === "运行已结束" && !remoteRunning.value && ["completed", "error"].includes(runStatus.value ?? ""))) {
-      if (!remoteRunning.value) runStatus.value = "completed";
+    const ended = error instanceof ExecutionRequestError && error.status === 409 && error.message === "运行已结束";
+    if (mobile && (accepted || ended)) {
+      if (ended) {
+        // 服务端确认该运行已完成，清理其过期订阅。
+        remoteRunning.value = false;
+        runStatus.value = "completed";
+        reconnectController?.abort();
+      } else if (!remoteRunning.value) runStatus.value = "completed";
       if (remoteRunning.value) scheduleReconnect(1000);
       ElMessage.success(remoteRunning.value ? "终止请求已受理，正在同步运行状态" : "本次流程已结束");
     } else ElMessage.error(error instanceof Error ? error.message : "终止失败");
