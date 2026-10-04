@@ -16,7 +16,19 @@
           </el-select>
         </el-form-item>
       </el-form>
-      <mobileNodeEditor ref="nodeEditor" :directory="directory" :canvasPath="canvasPath" :node="node" :graph="graph" :catalog="catalog" @changed="load" />
+      <mobileExecutePanel
+        :key="nodeBinding"
+        :directory="directory"
+        :canvasPath="canvasPath"
+        :node="node"
+        :graph="graph"
+        :editorBlocked="!nodeEditor || nodeEditor.hasUnsavedChanges || !!conflict || referenceSaving"
+        :editorPending="nodeEditor?.hasPendingChanges || referenceSaving"
+        :modelReady="nodeEditor?.hasGenerationModel"
+        :refreshNode="refreshNodeEditor"
+        @catalog="catalog = $event"
+        @changed="load" />
+      <mobileNodeEditor :key="nodeBinding" ref="nodeEditor" :directory="directory" :canvasPath="canvasPath" :node="node" :graph="graph" :catalog="catalog" @changed="load" />
       <el-card shadow="never" class="section">
         <template #header>
           <div class="sectionHeader">
@@ -28,9 +40,18 @@
           <li v-for="link in refs" :key="link.edgeId">
             <button class="refButton" type="button" @click="jumpToPeer(link.peerId)">
               <el-tag size="small" :type="link.direction === 'in' ? 'info' : 'success'">{{ link.direction === 'in' ? '入' : '出' }}</el-tag>
+              <strong v-if="referenceIndex(link) >= 0">参考 {{ referenceIndex(link) + 1 }}</strong>
+              <img v-if="referenceMedia[link.edgeId]?.type === 'IMAGE' && previewUrls['reference:' + link.edgeId]" class="referencePreview" :src="previewUrls['reference:' + link.edgeId]" alt="引用图片" />
+              <video v-else-if="referenceMedia[link.edgeId]?.type === 'VIDEO' && previewUrls['reference:' + link.edgeId]" class="referencePreview" :src="previewUrls['reference:' + link.edgeId]" muted playsinline preload="metadata" aria-label="引用视频" />
               <span>{{ link.peerLabel }}</span>
+              <span v-if="referenceValue(link)?.invalid" class="referenceText">引用内容格式有误，点此查看源节点</span>
+              <span v-else-if="referenceValue(link)?.dataType === 'STRING'" class="referenceText">{{ typeof referenceValue(link)?.value === "string" ? String(referenceValue(link)?.value).slice(0, 200) || "正文为空" : "点此查看源节点正文" }}</span>
               <span class="handles">{{ link.sourceHandle }} → {{ link.targetHandle }}</span>
             </button>
+            <div v-if="referenceIndex(link) >= 0 && inputReferences.length > 1" class="referenceActions">
+              <el-button :disabled="referenceSaving || referenceIndex(link) === 0" :aria-label="'上移引用 ' + (referenceIndex(link) + 1)" @click="moveReference(link, -1)">上移</el-button>
+              <el-button :disabled="referenceSaving || referenceIndex(link) === inputReferences.length - 1" :aria-label="'下移引用 ' + (referenceIndex(link) + 1)" @click="moveReference(link, 1)">下移</el-button>
+            </div>
             <el-button text type="danger" aria-label="删除连接" @click="removeConnection(link.edgeId)">删除</el-button>
           </li>
         </ul>
@@ -46,16 +67,14 @@
           <img v-if="asset.type === 'IMAGE' && previewUrls[asset.slot]" :src="previewUrls[asset.slot]" :alt="title + ' ' + asset.slot" />
           <video v-else-if="asset.type === 'VIDEO' && previewUrls[asset.slot]" :src="previewUrls[asset.slot]" controls playsinline />
           <audio v-else-if="asset.type === 'AUDIO' && previewUrls[asset.slot]" :src="previewUrls[asset.slot]" controls />
+          <div class="resultActions">
+            <el-button :disabled="!previewUrls[asset.slot]" @click="downloadOutput(asset)">下载</el-button>
+            <el-button v-if="asset.type !== 'AUDIO'" :disabled="!previewUrls[asset.slot]" @click="previewSlot = asset.slot">全屏</el-button>
+            <el-button @click="saveOutputToLibrary(asset)">添加到素材库</el-button>
+          </div>
         </div>
       </el-card>
-      <mobileExecutePanel
-        :directory="directory"
-        :canvasPath="canvasPath"
-        :node="node"
-        :graph="graph"
-        :refreshNode="refreshNodeEditor"
-        @catalog="catalog = $event"
-        @changed="load" />
+      <assetLibrary :key="nodeBinding" ref="assetLibraryRef" :directory="directory" />
     </el-main>
     <el-empty v-else-if="!loading" description="节点不存在" />
     <mobileConnectionSheet
@@ -64,11 +83,15 @@
       :sourceId="node.id"
       :nodes="graph.nodes as CanvasNode[]"
       @connect="addConnection" />
+    <el-image-viewer v-if="previewAsset?.type === 'IMAGE' && previewUrls[previewAsset.slot]" :urlList="[previewUrls[previewAsset.slot]]" teleported @close="previewSlot = ''" />
+    <el-dialog :modelValue="previewAsset?.type === 'VIDEO'" title="视频预览" width="min(800px, calc(100vw - 32px))" alignCenter appendToBody destroyOnClose @update:modelValue="previewSlot = ''">
+      <video v-if="previewAsset?.type === 'VIDEO'" class="fullscreenVideo" :src="previewUrls[previewAsset.slot]" controls playsinline />
+    </el-dialog>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, provide, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import type { Connection } from "@vue-flow/core";
@@ -76,12 +99,17 @@ import mobileTopBar from "./components/mobileTopBar.vue";
 import mobileConnectionSheet from "./components/mobileConnectionSheet.vue";
 import mobileExecutePanel from "./components/mobileExecutePanel.vue";
 import mobileNodeEditor from "./components/mobileNodeEditor.vue";
+import assetLibrary from "../panels/canvas/components/assetLibrary.vue";
+import saveFile from "@/lib/saveFile";
+import { isNodeOutput, type NodeInputValue, type NodeOutput } from "@toonflow/nodes-scaffold/values";
+import { getSourceValue, getTargetSources } from "@toonflow/nodes-scaffold/inputValues";
 import type { NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
 import {
   listGroups,
   nodeLabel,
   nodeReferences,
   type CanvasNode,
+  type NodeRefLink,
 } from "./lib/mobileGraphModel";
 import {
   changeForNode,
@@ -106,14 +134,49 @@ const { graph, loading, error: graphError, connectionError, conflict, load, appl
 );
 
 const node = computed(() => (graph.value?.nodes as CanvasNode[] | undefined)?.find(n => n.id === nodeId.value));
+const nodeBinding = computed(() => JSON.stringify([directory.value, canvasPath.value, node.value?.id, node.value?.type]));
+provide("workspaceFiles", () => useWorkspaceFiles(directory.value));
 const groups = computed(() => (graph.value ? listGroups(graph.value.nodes as CanvasNode[]) : []));
-const refs = computed(() => (graph.value && nodeId.value ? nodeReferences(nodeId.value, graph.value) : []));
+const inputReferences = computed(() => {
+  const currentGraph = graph.value, target = node.value;
+  if (!currentGraph || !target) return [];
+  const values: (NodeInputValue & { invalid?: boolean })[] = getTargetSources(target.id, "in", currentGraph.nodes, currentGraph.edges).map(({ node: source, handle }) => {
+    const reference = { source: source.id, sourceHandle: handle.id };
+    try {
+      const output = getSourceValue(source.id, handle.id, currentGraph.nodes);
+      return output ? { ...output, ...reference } : { dataType: handle.dataType, value: undefined, ...reference };
+    } catch {
+      return { dataType: handle.dataType, value: undefined, ...reference, invalid: true };
+    }
+  });
+  const order = target.data.referenceOrder?.in;
+  if (!Array.isArray(order)) return values;
+  const positions = new Map(order.filter((key): key is string => typeof key === "string").map((key, index) => [key, index]));
+  return values.sort((left, right) => (positions.get(encodeURIComponent(JSON.stringify([left.source, left.sourceHandle]))) ?? Infinity) - (positions.get(encodeURIComponent(JSON.stringify([right.source, right.sourceHandle]))) ?? Infinity));
+});
+function referenceIndex(link: NodeRefLink) { return link.direction === "in" && link.targetHandle === "in" ? inputReferences.value.findIndex(item => item.source === link.peerId && item.sourceHandle === link.sourceHandle) : -1; }
+function referenceValue(link: NodeRefLink) { return inputReferences.value[referenceIndex(link)]; }
+const refs = computed(() => (graph.value && nodeId.value ? nodeReferences(nodeId.value, graph.value).sort((left, right) => (referenceIndex(left) < 0 ? Infinity : referenceIndex(left)) - (referenceIndex(right) < 0 ? Infinity : referenceIndex(right))) : []));
+const referenceSaving = ref(false);
+async function moveReference(link: NodeRefLink, offset: number) {
+  if (!graph.value || !node.value || referenceSaving.value) return;
+  const from = referenceIndex(link), to = from + offset, ordered = [...inputReferences.value];
+  if (from < 0 || to < 0 || to >= ordered.length) return;
+  ordered.splice(to, 0, ordered.splice(from, 1)[0]!);
+  const next = { ...node.value, data: { ...node.value.data, referenceOrder: { ...node.value.data.referenceOrder, in: ordered.map(item => encodeURIComponent(JSON.stringify([item.source, item.sourceHandle]))) } } };
+  referenceSaving.value = true;
+  try { await applyChanges([changeForNode(graph.value, next, next.id)]); }
+  catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : "引用顺序保存失败"); }
+  finally { referenceSaving.value = false; }
+}
 
 const labelDraft = ref("");
 const parentGroupId = ref("");
 const connectionVisible = ref(false);
 const catalog = ref<NodeCatalogEntry[]>([]);
 const nodeEditor = ref<InstanceType<typeof mobileNodeEditor>>();
+const assetLibraryRef = ref<InstanceType<typeof assetLibrary>>();
+const previewSlot = ref("");
 async function refreshNodeEditor(signal?: AbortSignal, contentOnly = false) {
   signal?.throwIfAborted();
   const synchronized = await nodeEditor.value?.refresh(signal, contentOnly);
@@ -122,7 +185,7 @@ async function refreshNodeEditor(signal?: AbortSignal, contentOnly = false) {
 }
 
 const title = computed(() => node.value ? nodeLabel(node.value) : "节点");
-const typeLabel = computed(() => String(node.value?.type ?? ""));
+const typeLabel = computed(() => catalog.value.find(entry => `remote-${entry.name}` === node.value?.type)?.displayName ?? String(node.value?.type ?? ""));
 const workspaceLink = computed(() => ({
   path: "/mobile/workspace",
   query: { directory: directory.value, canvas: canvasPath.value, name: projectName.value, highlight: nodeId.value },
@@ -140,14 +203,24 @@ const outputPreview = computed(() => {
   }
   return parts.join("\n");
 });
+function mediaOutput(slot: string, output: unknown) {
+  if (!isNodeOutput(output) || !["IMAGE", "VIDEO", "AUDIO"].includes(output.dataType) || typeof output.value !== "object") return;
+  return { slot, type: output.dataType, path: output.value.url, mimeType: output.value.mimeType, output };
+}
 const mediaOutputs = computed(() => Object.entries(node.value?.data?.outputs ?? {}).flatMap(([slot, output]) => {
-  if (!output || typeof output !== "object") return [];
-  const value = output as { dataType?: string; value?: { url?: string; mimeType?: string } };
-  if (!["IMAGE", "VIDEO", "AUDIO"].includes(value.dataType ?? "") || typeof value.value?.url !== "string") return [];
-  return [{ slot, type: value.dataType, path: value.value.url, mimeType: value.value.mimeType }];
+  const media = mediaOutput(slot, output);
+  return media ? [media] : [];
 }));
+const referenceMedia = computed(() => Object.fromEntries(refs.value.filter(link => link.direction === "in").flatMap(link => {
+  if (referenceValue(link)?.invalid) return [];
+  const peer = graph.value?.nodes.find(item => item.id === link.peerId);
+  const media = mediaOutput("reference:" + link.edgeId, peer?.data?.outputs?.[link.sourceHandle ?? ""]);
+  return media ? [[link.edgeId, media]] : [];
+})));
+const previewAsset = computed(() => mediaOutputs.value.find(asset => asset.slot === previewSlot.value));
+const previewAssets = computed(() => [...mediaOutputs.value, ...Object.values(referenceMedia.value)]);
 const previewUrls = ref<Record<string, string>>({});
-watch([mediaOutputs, directory], async ([outputs, currentDirectory], _, onCleanup) => {
+watch([previewAssets, directory], async ([outputs, currentDirectory], _, onCleanup) => {
   let stale = false;
   const releases: (() => void)[] = [];
   onCleanup(() => { stale = true; releases.forEach(release => release()); });
@@ -163,6 +236,18 @@ watch([mediaOutputs, directory], async ([outputs, currentDirectory], _, onCleanu
     } catch { /* 保留其他已载入的输出 */ }
   }));
 }, { immediate: true });
+
+async function downloadOutput(asset: { path: string; mimeType: string }) {
+  const files = useWorkspaceFiles(directory.value);
+  try {
+    await saveFile(async () => new Blob([await files.read(asset.path)], { type: asset.mimeType }), asset.path.split(/[\\/]/).at(-1) || "result");
+  } catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : "下载失败"); }
+}
+async function saveOutputToLibrary(asset: { slot: string; output: NodeOutput }) {
+  try { await assetLibraryRef.value?.openSave(title.value, [{ label: asset.slot, output: JSON.parse(JSON.stringify(asset.output)) }]); }
+  catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : "素材库保存失败"); }
+}
+watch(nodeBinding, () => { previewSlot.value = ""; });
 
 let previousNodeId = "";
 let previousLabel = "";
@@ -267,13 +352,16 @@ watch([directory, canvasPath], async () => {
 
   li {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 4px;
+    .referenceActions { display: flex; gap: 4px; .el-button { min-height: 44px; margin: 0; } }
   }
 }
 
 .refButton {
   flex: 1;
+  min-width: 0;
   min-height: 44px;
   display: flex;
   flex-wrap: wrap;
@@ -290,6 +378,8 @@ watch([directory, canvasPath], async () => {
     font-size: 11px;
     color: var(--el-text-color-placeholder);
   }
+  .referencePreview { width: 64px; height: 64px; object-fit: contain; }
+  .referenceText { display: block; width: 100%; overflow-wrap: anywhere; }
 }
 
 .outputText {
@@ -298,7 +388,16 @@ watch([directory, canvasPath], async () => {
   margin: 0;
 }
 .mediaPreview {
+  margin-bottom: 12px;
   img, video { display: block; max-width: 100%; max-height: 70dvh; }
   audio { max-width: 100%; }
+  .resultActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+    .el-button { margin: 0; min-height: 44px; }
+  }
 }
+.fullscreenVideo { display: block; width: 100%; max-height: min(70dvh, max(80px, calc(var(--mobileViewportHeight, 100dvh) - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 120px))); }
 </style>

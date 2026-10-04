@@ -1,15 +1,15 @@
 <template>
-  <el-card v-if="sections.length" class="mobileNodeEditor" shadow="never">
+  <el-card v-if="sections.some(section => !isOutputSection(section) || section.dirty || section.pending || section.error)" class="mobileNodeEditor" shadow="never">
     <template #header>节点编辑</template>
     <el-alert v-if="error" :title="error" type="error" :closable="false" showIcon />
-    <el-form v-for="section in sections" :key="section.action.name" class="editorSection" labelPosition="top" :disabled="!section.ready && !section.dirty" @submit.prevent="saveSection(section)">
+    <el-form v-for="section in sections.filter(item => !isOutputSection(item))" :key="section.action.name" class="editorSection" labelPosition="top" :disabled="!section.ready && !section.dirty" @submit.prevent="saveSection(section)">
       <h3>{{ section.action.editor?.label }}</h3>
       <el-form-item v-for="field in section.fields.filter(item => !item.editor?.hidden)" :key="field.name" :label="field.editor?.label || field.schema.title || field.name" :required="field.required">
-        <el-select v-if="field.editor?.model" :modelValue="modelValue(section, field)" :clearable="canClear(field)" @change="value => changeModel(section, field, value)">
-          <el-option v-for="model in models(section, field)" :key="modelOptionValue(model, field)" :label="model.name || model.modelName || model[field.name] || model.modelId" :value="modelOptionValue(model, field)" />
+        <el-select v-if="field.editor?.model" :modelValue="modelValue(section, field)" :placeholder="modelPlaceholder(section, field)" :clearable="canClear(field)" @change="value => changeModel(section, field, value)">
+          <el-option v-for="model in models(section, field)" :key="modelOptionValue(model, field)" :label="modelLabel(model, field)" :value="modelOptionValue(model, field)" />
         </el-select>
         <el-select v-else-if="field.editor?.choices || field.schema.enum" :modelValue="section.values[field.name] === '' ? undefined : JSON.stringify(section.values[field.name])" :clearable="canClear(field)" @change="value => changeChoice(section, field, value)">
-          <el-option v-for="value in choices(section, field)" :key="JSON.stringify(value)" :label="value?.label || (typeof value === 'string' ? value : JSON.stringify(value))" :value="JSON.stringify(value?.value ?? value)" />
+          <el-option v-for="value in choices(section, field)" :key="JSON.stringify(value)" :label="choiceLabel(field, value)" :value="JSON.stringify(value?.value ?? value)" />
         </el-select>
         <el-select v-else-if="isNullableBoolean(field)" :modelValue="JSON.stringify(section.values[field.name])" @change="value => changeChoice(section, field, value)">
           <el-option label="开启" value="true" />
@@ -34,6 +34,19 @@
       </div>
       <el-alert v-if="section.error" :title="section.error" type="warning" :closable="false" showIcon />
     </el-form>
+    <template v-for="section in sections.filter(isOutputSection)" :key="section.action.name">
+      <div v-if="section.dirty || section.pending || section.error" class="editorSection">
+        <h3>保留的素材修改</h3>
+        <p v-if="section.values.path">{{ String(section.values.path).split(/[\\/]/).at(-1) }}</p>
+        <div class="sectionActions">
+          <el-button v-if="section.pending" :loading="section.saving" :disabled="sections.some(item => item !== section && item.saving)" @click="reconcileSection(section)">核对上次素材修改</el-button>
+          <el-button v-else-if="section.dirty" type="primary" :loading="section.saving" :disabled="!section.ready || section.loading || sections.some(item => item !== section && item.saving)" @click="saveSection(section)">保存保留的素材选择</el-button>
+          <el-button v-if="section.error" :loading="section.loading" :disabled="section.saving || !!section.pending" @click="retryRead(section)">核对最新素材</el-button>
+        </div>
+        <el-button v-if="section.reviewing && section.remote" :disabled="section.loading || section.saving || !!section.pending" @click="acceptRemote(section)">接受当前版本并保留素材草稿</el-button>
+        <el-alert v-if="section.error" :title="section.error" type="warning" :closable="false" showIcon />
+      </div>
+    </template>
   </el-card>
 </template>
 
@@ -62,6 +75,9 @@ const descriptor = computed(() => {
   return entry && isExecutableNode(entry) ? entry : undefined;
 });
 const sections = ref<EditorSection[]>([]);
+const hasUnsavedChanges = computed(() => sections.value.some(section => section.dirty || section.saving || section.pending || section.loading || section.error));
+const hasPendingChanges = computed(() => sections.value.some(section => section.saving || section.pending));
+const hasGenerationModel = computed(() => sections.value.some(section => section.fields.some(field => field.editor?.model && (models(section, field).some(model => modelOptionValue(model, field) === modelValue(section, field)) || !!defaultTextModel(section, field)))));
 const error = ref("");
 const editorOwnerId = crypto.randomUUID();
 let connection: AbortController | undefined;
@@ -70,6 +86,22 @@ const readGenerations = new WeakMap<EditorSection, number>();
 let readGeneration = 0;
 const ownVersions = new Map<number, number>();
 const binding = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node.id, descriptor.value?.executionRevision]));
+
+function isOutputSection(section: EditorSection) {
+  return ["remote-imageGenerationNode", "remote-imageNode"].includes(props.node.type ?? "") && section.action.name === "setImage"
+    || ["remote-videoGenerationNode", "remote-videoNode"].includes(props.node.type ?? "") && section.action.name === "setVideo"
+    || props.node.type === "remote-audioNode" && section.action.name === "setAudio";
+}
+
+function choiceLabel(field: EditorField, value: any) {
+  if (value?.label) return value.label;
+  if (typeof value === "boolean") return value ? "开启" : "关闭";
+  if (props.node.type === "remote-videoGenerationNode" && field.name === "mode") {
+    if (Array.isArray(value)) return "混合素材参考";
+    return ({ text: "文生视频", singleImage: "单图参考", startEndRequired: "首尾帧必填", endFrameOptional: "尾帧可选", startFrameOptional: "首帧可选" } as Record<string, string>)[value] ?? String(value);
+  }
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
 
 function at(value: unknown, path?: string): any {
   return path?.split(".").reduce((current: any, key) => current && typeof current === "object" && Object.hasOwn(current, key) ? current[key] : undefined, value);
@@ -142,6 +174,14 @@ function models(section: EditorSection, field: EditorField): ModelChoice[] {
   const source = at(section.current, field.editor?.model?.sourcePath);
   const providerField = field.editor?.model?.providerField;
   return Array.isArray(source) ? source.filter(item => item && (typeof item.providerId === "string" && typeof item.modelId === "string" || typeof item[field.name] === "string" && (!providerField || typeof item[providerField] === "string"))) : [];
+}
+function defaultTextModel(section: EditorSection, field: EditorField) {
+  return props.node.type === "remote-textNode" && !props.node.data.model && !section.dirty && field.editor?.model ? models(section, field)[0] : undefined;
+}
+function modelLabel(model: ModelChoice, field: EditorField) { return String(model.label || model.name || model.modelName || model[field.name] || model.modelId); }
+function modelPlaceholder(section: EditorSection, field: EditorField) {
+  const model = defaultTextModel(section, field);
+  return model ? "默认：" + modelLabel(model, field) : "请选择模型";
 }
 function modelOptionValue(model: ModelChoice, field: EditorField) {
   const providerField = field.editor?.model?.providerField;
@@ -453,7 +493,7 @@ async function refresh(signal?: AbortSignal, contentOnly = false, fresh = false)
   return !current.aborted && results.every(Boolean);
 }
 watch(() => props.node, () => { void refresh(); });
-defineExpose({ refresh: (signal?: AbortSignal, contentOnly = true) => refresh(signal, contentOnly, true) });
+defineExpose({ hasUnsavedChanges, hasPendingChanges, hasGenerationModel, refresh: (signal?: AbortSignal, contentOnly = true) => refresh(signal, contentOnly, true) });
 onScopeDispose(() => connection?.abort());
 </script>
 

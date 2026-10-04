@@ -47,7 +47,7 @@
     </div>
   </el-dialog>
 
-  <el-dialog v-model="saveVisible" title="保存到素材库" width="460px" alignCenter appendToBody :closeOnClickModal="false" @opened="assetNameInput?.select()">
+  <el-dialog v-model="saveVisible" class="assetSaveDialog" title="保存到素材库" width="min(460px, calc(100vw - 32px))" alignCenter appendToBody :closeOnClickModal="false" @opened="assetNameInput?.select()">
     <el-form class="saveForm" labelPosition="top" @submit.prevent="saveAsset">
       <el-form-item label="素材名称">
         <el-input ref="assetNameInput" v-model="assetName" aria-label="素材名称" placeholder="输入完整文件名" :disabled="saving" @keydown.enter.prevent="saveAsset" />
@@ -316,6 +316,7 @@ defineExpose({ openSave });
 </script>
 
 <style lang="scss" scoped>
+.saveForm { max-height: max(80px, calc(var(--mobileViewportHeight, 100dvh) - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 180px)); overflow: auto; }
 .assetLibrary {
   width: min(320px, calc(100vw - 30px));
   max-height: calc(100dvh - 140px);
