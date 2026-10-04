@@ -4,10 +4,12 @@
       <template #actions><el-button text @click="openTasks">任务</el-button></template>
     </mobileTopBar>
     <div class="contextBar">
+      <el-button class="compactHeaderButton contextNavigationButton" text :icon="IconChevronLeft" aria-label="返回" @pointerdown="focusCompactControl" @click="openCanvas" />
       <el-select v-model="canvasId" clearable placeholder="选择会话画布上下文" aria-label="会话画布上下文" @change="updateCanvas">
         <el-option v-for="canvas in canvases" :key="canvas.id" :label="canvas.name" :value="canvas.id" />
       </el-select>
-      <el-button :disabled="!canvasId" @click="openCanvas">节点</el-button>
+      <el-button class="contextNavigationButton" :disabled="!canvasId" @pointerdown="focusCompactControl" @click="openCanvas">节点</el-button>
+      <el-button class="compactHeaderButton contextNavigationButton" text @pointerdown="focusCompactControl" @click="openTasks">任务</el-button>
     </div>
     <agentPanel v-if="directory" :key="directory" v-model="visible" :directory="directory" :canvasId="canvasId" :selectedNodeIds="selectedNodeIds" :sessionFile="sessionFile" @session="updateSession" />
   </section>
@@ -17,6 +19,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { IconChevronLeft } from "@tabler/icons-vue";
 import agentPanel from "@/components/agent/index.vue";
 import mobileTopBar from "./components/mobileTopBar.vue";
 import { listProjectCanvases } from "./lib/canvasList";
@@ -37,6 +40,9 @@ const canvases = ref<{ id: string; name: string }[]>([]);
 const visible = ref(true);
 const workspaceLink = computed(() => ({ path: "/mobile/workspace", query: { directory: directory.value, name: projectName.value, canvas: canvasId.value } }));
 
+function focusCompactControl(event: PointerEvent) {
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus({ preventScroll: true });
+}
 function openCanvas() { void router.push(workspaceLink.value); }
 function openTasks() { void router.push({ path: "/mobile/tasks", query: { ...route.query, canvas: canvasId.value } }); }
 function updateCanvas() { void router.replace({ query: { ...route.query, canvas: canvasId.value || undefined, selected: undefined } }); }
@@ -74,6 +80,17 @@ onMounted(() => { if (!directory.value) void router.replace("/mobile"); });
     padding: 8px 12px;
 
     .el-select { flex: 1; min-width: 0; }
+    .compactHeaderButton { display: none; }
+  }
+  .mobileLayout.compactEditing & {
+    :deep(.mobileTopBar) { display: none; }
+    .contextBar {
+      padding-block: 4px;
+      padding-top: calc(4px + env(safe-area-inset-top));
+      .el-button { min-width: 44px; min-height: 44px; margin: 0; }
+      .compactHeaderButton { display: inline-flex; }
+    }
+    :deep(.agentMenu) { padding-top: 0; }
   }
   .agent { flex: 1; height: auto; min-height: 0; overflow: visible; }
   :deep(.agentConversation) { min-height: var(--mobileConversationMinHeight, 130px); overflow: visible; }
