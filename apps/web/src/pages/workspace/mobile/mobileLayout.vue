@@ -29,7 +29,7 @@ function updateViewport() {
   const visibleFocus = focused instanceof HTMLElement && focused.getClientRects().length > 0;
   const editorFocus = visibleFocus && focused.isContentEditable && !!focused.closest(".mobileAgent .senderEditor");
   // 编辑期间操作工具栏或其浮层时维持布局，避免焦点切换在 click 前移走按钮。
-  const editingControl = compactEditing.value && visibleFocus && !!focused.closest(".mobileAgent, .agentModelPopover, .agentContextPopover, .agentHistoryPopover, .agentSubAgentPopover");
+  const editingControl = compactEditing.value && visibleFocus && !!focused.closest(".mobileAgent, .agentModelPopover, .agentContextPopover, .agentHistoryPopover, .agentSubAgentPopover, .mentionOverlay, .skillOverlay");
   if (!conversationLayout.value) compactControlPointer = undefined;
   const pressedControl = compactControlPointer !== undefined;
   // 短编辑视口优先留给正文；焦点与可视高度共同判断，不将单纯缩放当作键盘。
@@ -47,7 +47,7 @@ function scheduleViewport() {
 }
 
 function startCompactControl(event: PointerEvent) {
-  if (compactEditing.value && event.isPrimary && event.button === 0 && event.target instanceof Element && event.target.closest(".mobileAgent .compactHeaderButton")) compactControlPointer = event.pointerId;
+  if (compactEditing.value && event.isPrimary && event.button === 0 && event.target instanceof Element && event.target.closest(".mobileAgent .contextNavigationButton")) compactControlPointer = event.pointerId;
 }
 function finishCompactControl(event: PointerEvent) {
   if (event.pointerId === compactControlPointer) clearCompactControl();

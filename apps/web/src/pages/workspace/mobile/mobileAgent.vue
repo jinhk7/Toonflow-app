@@ -4,12 +4,12 @@
       <template #actions><el-button text @click="openTasks">任务</el-button></template>
     </mobileTopBar>
     <div class="contextBar">
-      <el-button class="compactHeaderButton" text :icon="IconChevronLeft" aria-label="返回" @pointerdown="focusCompactControl" @click="openCanvas" />
+      <el-button class="compactHeaderButton contextNavigationButton" text :icon="IconChevronLeft" aria-label="返回" @pointerdown="focusCompactControl" @click="openCanvas" />
       <el-select v-model="canvasId" clearable placeholder="选择会话画布上下文" aria-label="会话画布上下文" @change="updateCanvas">
         <el-option v-for="canvas in canvases" :key="canvas.id" :label="canvas.name" :value="canvas.id" />
       </el-select>
-      <el-button :disabled="!canvasId" @click="openCanvas">节点</el-button>
-      <el-button class="compactHeaderButton" text @pointerdown="focusCompactControl" @click="openTasks">任务</el-button>
+      <el-button class="contextNavigationButton" :disabled="!canvasId" @pointerdown="focusCompactControl" @click="openCanvas">节点</el-button>
+      <el-button class="compactHeaderButton contextNavigationButton" text @pointerdown="focusCompactControl" @click="openTasks">任务</el-button>
     </div>
     <agentPanel v-if="directory" :key="directory" v-model="visible" :directory="directory" :canvasId="canvasId" :selectedNodeIds="selectedNodeIds" :sessionFile="sessionFile" @session="updateSession" />
   </section>
