@@ -49,6 +49,7 @@
         <el-button :loading="uploading" :disabled="resultBlocked" @click="fileInput?.click()">{{ currentOutput ? "替换" : "上传" }}{{ mediaLabel }}</el-button>
         <input ref="fileInput" type="file" :accept="mediaType + '/*'" hidden :disabled="resultBlocked" :aria-label="'选择' + mediaLabel" @change="uploadOutput" />
         <mediaHistory v-if="generationName && (mediaType === 'image' || mediaType === 'video')" :key="node.id" :nodeId="node.id" :mediaType="mediaType" label="历史记录" :current="currentOutput" :disabled="resultBlocked" @select="selectOutput" />
+        <el-button v-if="!generationName" :loading="loading" :disabled="submitting || uploading" @click="load()">刷新节点状态</el-button>
       </div>
       <div v-if="pendingCommand" class="actions"><el-button :loading="submitting" @click="reconcileCommand()">核对上次操作</el-button></div>
     </template>
