@@ -27,7 +27,7 @@
       </template>
       <div v-if="legacyDrafts.length" class="legacyDrafts">
         <p role="status">上次未执行的操作草稿已保留。请先核对，再使用当前已保存的节点内容。</p>
-        <details><summary>查看保留的操作草稿</summary><div v-for="draft in legacyDrafts" :key="draft.kind"><strong>{{ legacyLabel(draft.kind) }}</strong><pre>{{ JSON.stringify(draft.value, null, 2) }}</pre></div></details>
+        <details><summary>查看保留的操作草稿</summary><div v-for="draft in legacyDrafts" :key="draft.kind"><strong>{{ legacyLabel(draft.kind) }}</strong><pre>{{ typeof draft.value === "string" ? draft.value : JSON.stringify(draft.value, null, 2) }}</pre></div></details>
         <div class="actions"><el-button @click="downloadLegacyDrafts">下载保留草稿</el-button><el-button v-if="!legacyAcknowledged" @click="legacyAcknowledged = true">使用已保存的节点内容</el-button></div>
       </div>
       <div v-if="generationName" class="nodeActions">
@@ -192,11 +192,22 @@ const hasGenerationAction = computed(() => !!generationName.value && descriptor.
 const hasPrompt = computed(() => typeof props.node?.data.prompt === "string" && !!props.node.data.prompt.trim() || !!mediaType.value && !!props.graph && !!props.node && getTargetSources(props.node.id, "in", props.graph.nodes, props.graph.edges).some(({ handle }) => handle.dataType === "STRING" || Array.isArray(handle.dataType) && handle.dataType.includes("STRING")));
 const generationBlocked = computed(() => !hasGenerationAction.value || !hasPrompt.value || !props.modelReady || !generationState.value || !!generationError.value || !!error.value || !!mediaType.value && !!mediaError.value || loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || running.value || generationState.value.status === "needsReview" || !!generationState.value.controlsBlocked);
 const resultBlocked = computed(() => loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || !!generationError.value || !!error.value || !!generationName.value && (!!mediaError.value || !generationState.value || !!generationState.value.controlsBlocked || running.value));
-const legacyDrafts = ref<{ kind: string; value: unknown }[]>([]);
+const legacyDrafts = ref<{ kind: string; value: unknown; raw?: string }[]>([]);
 const legacyAcknowledged = ref(false);
 function loadLegacyDrafts() {
-  if (props.node && !generationName.value && !mediaType.value) { legacyDrafts.value = []; return; }
-  const drafts = props.canvasPath && props.node ? readWorkspaceDrafts<any>(props.directory, props.canvasPath, `parameters:${props.node.id}:`).filter(draft => Object.keys(draft.value?.values ?? {}).length || Object.keys(draft.value?.jsonValues ?? {}).length || draft.value?.rawArgs?.trim() && draft.value.rawArgs.trim() !== "{}") : [];
+  let drafts: { kind: string; value: unknown; raw?: string }[] = [];
+  if (props.canvasPath && props.node) {
+    if (!generationName.value && !mediaType.value) {
+      drafts = (descriptor.value?.actions.filter(action => action.editor) ?? []).flatMap(action => {
+        const kind = `parameters:${props.node!.id}:${action.name}`;
+        const raw = localStorage.getItem("toonflow.draft." + JSON.stringify([props.directory, props.canvasPath, kind]));
+        if (raw === null) return [];
+        let value: unknown;
+        try { value = JSON.parse(raw); } catch { value = raw; }
+        return [{ kind, value, raw }];
+      });
+    } else drafts = readWorkspaceDrafts<any>(props.directory, props.canvasPath, `parameters:${props.node.id}:`).filter(draft => Object.keys(draft.value?.values ?? {}).length || Object.keys(draft.value?.jsonValues ?? {}).length || draft.value?.rawArgs?.trim() && draft.value.rawArgs.trim() !== "{}");
+  }
   if (graphValueJson(drafts) !== graphValueJson(legacyDrafts.value)) { legacyDrafts.value = drafts; legacyAcknowledged.value = false; }
 }
 function legacyLabel(kind: string) {
@@ -321,7 +332,6 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   if (!directory) return false;
   loading.value = true;
   error.value = "";
-  try { loadLegacyDrafts(); } catch (reason) { error.value = reason instanceof Error ? reason.message : "保留草稿读取失败"; }
   const [local] = await Promise.allSettled([
     createExecutionClient(directory).listJobSnapshot(requestSignal(signal)),
   ]);
@@ -334,6 +344,7 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   ]);
   if (!current()) return newer();
   const [media, described] = results;
+  try { loadLegacyDrafts(); } catch (reason) { error.value = reason instanceof Error ? reason.message : "保留草稿读取失败"; }
   let synchronized = described.status === "fulfilled" && described.value;
   if (synchronized) {
     try { synchronized = await refreshNode(signal); }
