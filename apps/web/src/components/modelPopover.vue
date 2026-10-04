@@ -16,8 +16,7 @@
         <el-button ref="modelButtonRef" class="modelButton" text :disabled="disabled" aria-label="模型与推理设置" @click="toggleMobilePopover">
           <modelIcon v-if="selectedModelChoice" :model="selectedModelChoice.modelId" :size="14" />
           <span class="modelName">{{ selectedModelChoice?.label ?? "选择模型" }}</span>
-          ·
-          <span class="reasoningLabel">{{ reasoningLabel }}</span>
+          <span class="reasoningSummary">· <span class="reasoningLabel">{{ reasoningLabel }}</span></span>
           <icon-chevron-down :size="12" />
         </el-button>
       </template>
@@ -169,6 +168,7 @@ watch(() => !props.active || props.disabled, close => { if (close) visible.value
       color: var(--el-text-color-secondary);
       font-size: 12px;
     }
+    .reasoningSummary { display: flex; gap: 6px; flex-shrink: 0; }
 
     .modelName {
       overflow: hidden;

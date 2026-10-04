@@ -108,9 +108,9 @@
       <mentionContent ref="draftMentionPreview" :mentions="draftMentions" :directory="directory" removable @remove="removeDraftMention" />
       <div class="senderActions">
         <modelPopover v-model="selectedModel" v-model:reasoningEffort="reasoningEffort" :active="active" :disabled="disabled" />
-        <el-button v-if="currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="pauseRun">暂停后续</el-button>
-        <el-button v-if="currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="terminateRun">终止流程</el-button>
-        <el-button v-if="currentRunId && resumableRun" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="resumeRun">继续运行</el-button>
+        <el-button v-if="!mobile && currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="pauseRun">暂停后续</el-button>
+        <el-button v-if="!mobile && currentRunId && remoteRunning" class="runControlButton" text size="small" :disabled="disabled || deletingId !== undefined" @click="terminateRun">终止流程</el-button>
+        <el-button v-if="currentRunId && resumableRun" class="runControlButton" :class="{ mobileResumeButton: mobile }" text size="small" :circle="mobile" :icon="mobile ? IconPlayerPlay : undefined" :disabled="disabled || deletingId !== undefined || mobile && runControlPending" aria-label="继续运行" :title="mobile ? '继续运行' : undefined" @click="resumeRun"><template v-if="!mobile">继续运行</template></el-button>
         <mentionMenu ref="mentionMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="mentionQuery" :editor="senderElement" :currentCanvasId="currentCanvasId" @open="captureMentionPosition" @select="insertMentions" @dismiss="mentionQuery = undefined" />
         <skillMenu ref="skillMenuRef" :directory="directory" :active="active" :disabled="locked || !directory" :query="skillQuery" :editor="senderElement" @select="selectSkill" @dismiss="skillQuery = undefined" />
         <el-popover
@@ -146,8 +146,8 @@
             </div>
           </div>
         </el-popover>
-        <el-button class="sendButton" type="primary" circle :disabled="!busy && locked" :aria-label="busy ? '停止生成' : editingId ? '重发消息' : '发送消息'" :title="busy ? '停止生成' : editingId ? '重发消息' : '发送消息'" @click="busy ? stopMessage() : submitMessage()">
-          <icon-player-stop-filled v-if="busy" :size="14" />
+        <el-button class="sendButton" type="primary" circle :disabled="mobile && (runControlPending || runStatus === 'terminating') || !stopMode && locked" :aria-label="sendActionLabel" :title="sendActionLabel" @click="stopMode ? stopMessage() : submitMessage()">
+          <icon-player-stop-filled v-if="stopMode" :size="14" />
           <icon-arrow-up v-else :size="16" />
         </el-button>
       </div>
@@ -171,7 +171,7 @@ import { defaultRangeExtractor, observeElementRect, useVirtualizer } from "@tans
 import axios from "axios";
 import {
   IconArrowUp, IconArrowDown, IconAtom, IconCopy,
-  IconCircleDashed, IconPencil, IconPlayerStopFilled, IconX, IconLoader2,
+  IconCircleDashed, IconPencil, IconPlayerPlay, IconPlayerStopFilled, IconX, IconLoader2,
   IconTrash, IconLayoutGrid, IconMovie, IconPhoto, IconArrowUpRight, IconUsersGroup,
 } from "@tabler/icons-vue";
 import { ElMessage } from "element-plus";
@@ -215,6 +215,7 @@ const messages = ref<AgentMessage[]>([]);
 const stream = createConversationStream(messages);
 stream.restore(props.initialSession?.messages ?? []);
 const remoteRunning = ref(props.initialSession?.running ?? false);
+const runControlPending = ref(false);
 const currentRunId = ref(props.initialSession?.eventCursor?.runId ?? props.initialSession?.activeRun?.runId);
 const runStatus = ref(props.initialSession?.activeRun?.status);
 const authorizationError = ref<string>();
@@ -235,7 +236,7 @@ const contextUsage = ref(props.initialSession?.contextUsage);
 const busy = ref(false);
 const compacting = ref(false);
 const deletingId = ref<string>();
-const locked = computed(() => props.disabled || busy.value || deletingId.value !== undefined);
+const locked = computed(() => props.disabled || busy.value || deletingId.value !== undefined || mobile && (runControlPending.value || runStatus.value === "terminating" || reviewOpen.value));
 const resumableRun = computed(() => {
   return Boolean(currentRunId.value && runStatus.value && ["paused", "needsReview", "error", "waitingApproval"].includes(runStatus.value));
 });
@@ -293,6 +294,10 @@ let sender: xSender | undefined;
 let controller: AbortController | undefined;
 const senderElement = ref<HTMLElement>();
 const mobile = inject("mobilePage", false);
+const stopMode = computed(() => busy.value || mobile && (remoteRunning.value || runStatus.value === "terminating"));
+const sendActionLabel = computed(() => stopMode.value
+  ? mobile && (remoteRunning.value || runStatus.value === "terminating") ? runStatus.value === "terminating" ? "正在终止本次运行" : "终止本次运行" : "停止生成"
+  : editingId.value ? "重发消息" : "发送消息");
 const skillMenuRef = ref<InstanceType<typeof skillMenu>>();
 const skillQuery = ref<string>();
 const mentionMenuRef = ref<InstanceType<typeof mentionMenu>>();
@@ -500,7 +505,8 @@ function applyEvent(event: AgentEvent) {
       break;
     case "error":
       remoteRunning.value = false;
-      runStatus.value = "error";
+      // 已受理的终止也可能通过 error 事件结束，不再恢复这个运行。
+      runStatus.value = mobile && (runStatus.value === "terminating" || runStatus.value === "completed") ? "completed" : "error";
       if (event.message.includes("尚未授权")) authorizationError.value = event.message;
       stream.receive(event);
       break;
@@ -712,19 +718,23 @@ async function pauseRun() {
 }
 
 async function resumeRun() {
-  if (!currentRunId.value) return;
+  const runId = currentRunId.value;
+  if (!runId || mobile && runControlPending.value) return;
+  if (mobile) runControlPending.value = true;
   try {
-    const snapshot = await fetchAgentRunSnapshot(currentRunId.value);
+    const snapshot = await fetchAgentRunSnapshot(runId);
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
     reviewCalls.value = snapshot.reviewCalls ?? [];
     if (reviewCalls.value.length) { reviewOpen.value = true; return; }
-    await controlAgentRun(currentRunId.value, "resume");
+    await controlAgentRun(runId, "resume");
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
     runStatus.value = "running";
     remoteRunning.value = true;
     ElMessage.success("已继续运行");
     void reconnectActiveRun();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "继续运行失败");
-  }
+  } finally { if (mobile) runControlPending.value = false; }
 }
 async function confirmReview(toolCallId: string) {
   if (!currentRunId.value) return;
@@ -738,17 +748,40 @@ async function confirmReview(toolCallId: string) {
 }
 
 async function terminateRun() {
-  if (!currentRunId.value) return;
+  const runId = currentRunId.value;
+  if (!runId || mobile && (runControlPending.value || runStatus.value === "terminating")) return;
+  if (mobile) runControlPending.value = true;
+  let accepted = false;
   try {
-    await controlAgentRun(currentRunId.value, "terminate");
-    await refreshRunStatus(currentRunId.value);
-    ElMessage.success("已终止本次流程");
+    await controlAgentRun(runId, "terminate");
+    accepted = true;
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
+    // 控制受理后保护终止态；已先收到结束事件时固定完成，避免恢复已终止运行。
+    if (mobile) runStatus.value = remoteRunning.value ? "terminating" : "completed";
+    await refreshRunStatus(runId);
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
+    ElMessage.success(mobile && remoteRunning.value ? "终止请求已受理" : "已终止本次流程");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "终止失败");
-  }
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
+    const ended = error instanceof ExecutionRequestError && error.status === 409 && error.message === "运行已结束";
+    if (mobile && (accepted || ended)) {
+      if (ended) {
+        // 服务端确认该运行已完成，清理其过期订阅。
+        remoteRunning.value = false;
+        runStatus.value = "completed";
+        reconnectController?.abort();
+      } else if (!remoteRunning.value) runStatus.value = "completed";
+      if (remoteRunning.value) scheduleReconnect(1000);
+      ElMessage.success(remoteRunning.value ? "终止请求已受理，正在同步运行状态" : "本次流程已结束");
+    } else ElMessage.error(error instanceof Error ? error.message : "终止失败");
+  } finally { if (mobile) runControlPending.value = false; }
 }
 
 async function stopMessage() {
+  if (mobile && currentRunId.value && remoteRunning.value) {
+    await terminateRun();
+    return;
+  }
   if (currentRunId.value && remoteRunning.value) {
     try { await controlAgentRun(currentRunId.value, "stopGeneration"); }
     catch (error) { ElMessage.error(error instanceof Error ? error.message : "停止生成失败"); return; }

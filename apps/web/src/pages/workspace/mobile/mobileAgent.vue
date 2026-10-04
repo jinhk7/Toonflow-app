@@ -95,7 +95,19 @@ onMounted(() => { if (!directory.value) void router.replace("/mobile"); });
   .agent { flex: 1; height: auto; min-height: 0; overflow: visible; }
   :deep(.agentConversation) { min-height: var(--mobileConversationMinHeight, 130px); overflow: visible; }
   :deep(.messageViewport) { overflow: hidden; }
-  :deep(.senderActions) { flex-wrap: wrap; gap: 4px; }
+  :deep(.senderActions) {
+    flex-wrap: nowrap;
+    gap: 4px;
+    .modelPopover { flex: 1 1 0; min-width: 44px; }
+    > .el-button, .mentionMenu, .skillMenu { flex-shrink: 0; }
+    .mobileResumeButton { width: 44px; height: 44px; padding: 0; }
+    @media (max-width: 360px) {
+      gap: 2px;
+      .modelButton { padding-inline: 4px; }
+      .modelButton > span { gap: 4px; }
+      .reasoningSummary { display: none; }
+    }
+  }
   :deep(.welcomeMessage) { padding: 16px 8px; }
   :deep(.welcomeSuggestions) { flex-direction: column; }
   :deep(.messageActions) { opacity: 1; }
