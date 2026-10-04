@@ -1,9 +1,30 @@
 <template>
-  <el-card v-if="!node || mediaType || generationName || pendingCommand || legacyDrafts.length || error" class="mobileExecutePanel" shadow="never">
+  <el-card v-if="!node || mediaType || generationName || pluginActions.length || pendingCommand || legacyDrafts.length || error" class="mobileExecutePanel" shadow="never">
     <template #header>{{ node ? generationName ? generationLabel : mediaType ? mediaLabel + "素材" : "节点操作" : "后台任务" }}</template>
-    <el-alert v-if="error || mediaError || generationError" :title="error || mediaError || generationError" type="error" :closable="false" showIcon />
+    <el-alert v-if="error || generationError || (!node || generationName && mediaType) && mediaError" :title="error || generationError || mediaError" type="error" :closable="false" showIcon />
     <el-alert v-if="connectionError" :title="connectionError" type="warning" :closable="false" showIcon />
     <template v-if="node">
+      <template v-if="pluginActions.length">
+        <el-alert v-if="pluginReadError" :title="pluginReadError" type="error" :closable="false" showIcon />
+        <el-select v-model="pluginActionName" :disabled="submitting || !!pendingCommand || pluginWriteFailed" class="actionSelect" aria-label="节点操作">
+          <el-option v-for="item in pluginActions" :key="item.name" :label="item.description || item.name" :value="item.name" />
+        </el-select>
+        <el-form v-if="pluginAction" :disabled="!!pluginReadError || submitting || !!pendingCommand" labelPosition="top" class="parameterForm" novalidate @submit.prevent="executePluginAction">
+          <el-form-item v-for="field in pluginFields" :key="field.name" :label="field.schema.title || field.name" :required="field.required">
+            <el-select v-if="field.schema.enum" v-model="pluginValues[field.name]" clearable><el-option v-for="(value, index) in field.schema.enum" :key="index" :label="String(value)" :value="value" /></el-select>
+            <el-input v-else-if="isJsonField(field.schema)" v-model="pluginJsonValues[field.name]" type="textarea" :autosize="{ minRows: 2, maxRows: 12 }" />
+            <el-switch v-else-if="field.schema.type === 'boolean'" v-model="pluginValues[field.name]" />
+            <el-input-number v-else-if="field.schema.type === 'number' || field.schema.type === 'integer'" v-model="pluginValues[field.name]" :min="field.schema.minimum" :max="field.schema.maximum" :precision="field.schema.type === 'integer' ? 0 : undefined" />
+            <el-input v-else v-model="pluginValues[field.name]" :maxlength="field.schema.maxLength" :type="field.schema.maxLength && field.schema.maxLength > 200 ? 'textarea' : 'text'" />
+            <p v-if="field.schema.description" class="fieldDescription">{{ field.schema.description }}</p>
+          </el-form-item>
+          <el-input v-if="!pluginHasProperties" v-model="pluginRawArgs" type="textarea" :autosize="{ minRows: 3, maxRows: 12 }" aria-label="操作 JSON 参数" />
+          <div class="actions"><el-button type="primary" nativeType="submit" :loading="submitting" :disabled="loading || !canvasPath || !!pendingCommand || !!pluginReadError || editorBlocked">执行</el-button></div>
+        </el-form>
+        <div class="actions"><el-button :disabled="!!pluginReadError && !pluginWriteFailed && pluginOriginalDraft === undefined" @click="downloadPluginDraft">下载操作草稿</el-button><el-button v-if="pluginWriteFailed" @click="savePluginDraft">重试保存草稿</el-button></div>
+        <details v-if="result"><summary>操作结果</summary><pre>{{ result }}</pre></details>
+        <ul class="jobList"><li v-for="job in jobs" :key="job.jobId"><strong>{{ statusLabel(job.status) }}</strong><p v-if="job.errorMessage">{{ job.errorMessage }}</p><div class="actions"><el-button v-if="job.result !== undefined" @click="downloadResult(job)">下载任务结果</el-button><el-button v-if="job.canResume" @click="resumeJob(job)">继续原任务</el-button><el-button v-if="job.status === 'accepted' || job.status === 'running'" @click="cancelJob(job)">{{ job.kind === 'media' ? '停止观察' : '取消任务' }}</el-button></div></li></ul>
+      </template>
       <div v-if="legacyDrafts.length" class="legacyDrafts">
         <p role="status">上次未执行的操作草稿已保留。请先核对，再使用当前已保存的节点内容。</p>
         <details><summary>查看保留的操作草稿</summary><div v-for="draft in legacyDrafts" :key="draft.kind"><strong>{{ legacyLabel(draft.kind) }}</strong><pre>{{ JSON.stringify(draft.value, null, 2) }}</pre></div></details>
@@ -61,6 +82,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import axios from "axios";
+import { isPlainObject } from "lodash-es";
 import { createExecutionClient, ExecutionRequestError, fetchNodeCatalog, getExecutionClientId, isExecutableNode, type NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
 import type { CanvasCommand, CanvasCommandResult, NodeJobView } from "@toonflow/nodes-scaffold/execution";
 import useWorkspaceFiles, { graphValueJson, type WorkspaceGraph } from "@/lib/workspaceFiles";
@@ -74,6 +96,8 @@ import { getTargetSources } from "@toonflow/nodes-scaffold/inputValues";
 import type { CanvasNode } from "../lib/mobileGraphModel";
 
 type GenerationState = { status: string; controlsBlocked?: boolean; canCancelObservation?: boolean; mediaJob?: NodeMediaJobView; error?: string; outputs?: NodeOutputs };
+type ParameterSchema = { type?: string | string[]; title?: string; description?: string; default?: unknown; enum?: any[]; minimum?: number; maximum?: number; maxLength?: number; $ref?: string; oneOf?: unknown; anyOf?: unknown; allOf?: unknown };
+function isJsonField(schema: ParameterSchema) { return !schema.enum && (Array.isArray(schema.type) || schema.type === "object" || schema.type === "array" || schema.type === "null" || !!schema.$ref || !!schema.oneOf || !!schema.anyOf || !!schema.allOf); }
 type MediaJob = { jobId: string; mediaType?: string; status: string; linkStatus?: string; nodeId?: string; canvasPath?: string; errorMessage?: string };
 const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph; refreshNode?: (signal?: AbortSignal, contentOnly?: boolean) => Promise<boolean | void>; editorBlocked?: boolean; editorPending?: boolean; modelReady?: boolean }>();
 const emit = defineEmits<{ changed: []; catalog: [entries: NodeCatalogEntry[]] }>();
@@ -92,6 +116,67 @@ const mediaType = computed(() => ({
 } as Record<string, "image" | "video" | "audio">)[props.node?.type ?? ""]);
 const mediaLabel = computed(() => ({ image: "图片", video: "视频", audio: "音频" }[mediaType.value ?? "image"]));
 const generationLabel = computed(() => generationName.value === "generateText" ? "生成文本" : "生成" + mediaLabel.value);
+const pluginActions = computed(() => !generationName.value && !mediaType.value ? descriptor.value?.actions.filter(action => !action.editor) ?? [] : []);
+const pluginActionName = ref("");
+watch(pluginActions, actions => { if (!actions.some(action => action.name === pluginActionName.value)) pluginActionName.value = actions[0]?.name ?? ""; });
+const pluginAction = computed(() => pluginActions.value.find(action => action.name === pluginActionName.value));
+const pluginHasProperties = computed(() => pluginAction.value?.parameters.type === "object" && !!pluginAction.value.parameters.properties);
+const pluginFields = computed(() => {
+  const properties = pluginAction.value?.parameters.properties, required = pluginAction.value?.parameters.required;
+  return properties && typeof properties === "object" ? Object.entries(properties).map(([name, schema]) => ({ name, schema: schema as ParameterSchema, required: Array.isArray(required) && required.includes(name) })) : [];
+});
+const pluginValues = ref<Record<string, any>>({});
+const pluginJsonValues = ref<Record<string, string>>({});
+const pluginRawArgs = ref("{}");
+const pluginReadError = ref("");
+const pluginWriteFailed = ref(false);
+const pluginOriginalDraft = ref<string>();
+let pluginBinding = "";
+let pluginSnapshot: unknown;
+function savePluginDraft() {
+  if (!pluginBinding || pluginReadError.value && !pluginWriteFailed.value) return false;
+  const [directory, canvasPath, nodeId, name] = JSON.parse(pluginBinding) as string[];
+  try { saveWorkspaceDraft(directory, canvasPath, `parameters:${nodeId}:${name}`, { values: pluginValues.value, jsonValues: pluginJsonValues.value, rawArgs: pluginRawArgs.value, snapshot: pluginSnapshot }); pluginWriteFailed.value = false; pluginReadError.value = ""; return true; }
+  catch (reason) { pluginWriteFailed.value = true; pluginReadError.value = reason instanceof Error ? reason.message : "操作草稿保存失败，请先下载保留"; return false; }
+}
+watch(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id, pluginActionName.value]), key => {
+  pluginBinding = ""; pluginReadError.value = ""; pluginWriteFailed.value = false; pluginSnapshot = undefined; pluginOriginalDraft.value = undefined;
+  pluginValues.value = {}; pluginJsonValues.value = {}; pluginRawArgs.value = "{}";
+  if (!props.canvasPath || !props.node || !pluginAction.value) return;
+  try {
+    const saved = readWorkspaceDraft<any>(props.directory, props.canvasPath, `parameters:${props.node.id}:${pluginActionName.value}`);
+    if (saved !== undefined && (!isPlainObject(saved) || saved.values !== undefined && !isPlainObject(saved.values) || saved.jsonValues !== undefined && (!isPlainObject(saved.jsonValues) || Object.values(saved.jsonValues).some(value => typeof value !== "string")) || saved.rawArgs !== undefined && typeof saved.rawArgs !== "string")) throw new Error("操作草稿格式无法读取，原内容已保留");
+    pluginValues.value = saved?.values ?? Object.fromEntries(pluginFields.value.filter(field => field.schema.default !== undefined).map(field => [field.name, JSON.parse(JSON.stringify(field.schema.default))]));
+    pluginJsonValues.value = saved?.jsonValues ?? Object.fromEntries(pluginFields.value.filter(field => isJsonField(field.schema)).filter(field => field.schema.default !== undefined).map(field => [field.name, JSON.stringify(field.schema.default, null, 2)]));
+    pluginRawArgs.value = saved?.rawArgs ?? "{}";
+    pluginSnapshot = saved?.snapshot;
+  } catch (reason) {
+    pluginReadError.value = reason instanceof Error ? reason.message : "操作草稿读取失败";
+    try { pluginOriginalDraft.value = localStorage.getItem("toonflow.draft." + JSON.stringify([props.directory, props.canvasPath, `parameters:${props.node.id}:${pluginActionName.value}`])) ?? undefined; } catch { /* 读取被限制时不导出空替代稿。 */ }
+  }
+  pluginBinding = key;
+}, { immediate: true, flush: "sync" });
+watch([pluginValues, pluginJsonValues, pluginRawArgs], () => { if (pluginBinding) savePluginDraft(); }, { deep: true, flush: "sync" });
+async function downloadPluginDraft() {
+  try { await saveFile(new Blob([pluginOriginalDraft.value ?? JSON.stringify({ values: pluginValues.value, jsonValues: pluginJsonValues.value, rawArgs: pluginRawArgs.value, snapshot: pluginSnapshot }, null, 2)], { type: "application/json" }), "nodeOperationDraft.json"); }
+  catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : "草稿下载失败"); }
+}
+async function executePluginAction() {
+  if (!pluginAction.value || pluginReadError.value || props.editorBlocked || loading.value || !savePluginDraft()) return;
+  try {
+    const args: Record<string, unknown> = pluginHasProperties.value ? { ...pluginValues.value } : JSON.parse(pluginRawArgs.value);
+    if (!isPlainObject(args)) throw new Error("操作参数必须是 JSON 对象");
+    for (const field of pluginFields.value) {
+      if (isJsonField(field.schema)) {
+        const value = pluginJsonValues.value[field.name];
+        if (value?.trim()) args[field.name] = JSON.parse(value);
+        else delete args[field.name];
+      }
+      if (field.required && (args[field.name] === undefined || args[field.name] === "")) throw new Error("请填写 " + (field.schema.title || field.name));
+    }
+    await executeNodeAction(pluginAction.value.name, args);
+  } catch (reason) { error.value = reason instanceof Error ? reason.message : "操作参数无效"; }
+}
 const generationState = ref<GenerationState>();
 const generationError = ref("");
 const fileInput = ref<HTMLInputElement>();
@@ -104,11 +189,12 @@ const running = computed(() => ["accepted", "running"].includes(generationState.
 const hasGenerationAction = computed(() => !!generationName.value && descriptor.value?.actions.some(item => item.name === generationName.value));
 // 文本引用可能只保留 textPath；正文由后端 readOutputs 读取并在生成前校验。
 const hasPrompt = computed(() => typeof props.node?.data.prompt === "string" && !!props.node.data.prompt.trim() || !!mediaType.value && !!props.graph && !!props.node && getTargetSources(props.node.id, "in", props.graph.nodes, props.graph.edges).some(({ handle }) => handle.dataType === "STRING" || Array.isArray(handle.dataType) && handle.dataType.includes("STRING")));
-const generationBlocked = computed(() => !hasGenerationAction.value || !hasPrompt.value || !props.modelReady || !generationState.value || !!generationError.value || !!error.value || !!mediaError.value || loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || running.value || generationState.value.status === "needsReview" || !!generationState.value.controlsBlocked);
-const resultBlocked = computed(() => loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || !!generationError.value || !!error.value || !!mediaError.value || !!generationName.value && (!generationState.value || !!generationState.value.controlsBlocked || running.value));
+const generationBlocked = computed(() => !hasGenerationAction.value || !hasPrompt.value || !props.modelReady || !generationState.value || !!generationError.value || !!error.value || !!mediaType.value && !!mediaError.value || loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || running.value || generationState.value.status === "needsReview" || !!generationState.value.controlsBlocked);
+const resultBlocked = computed(() => loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || !!generationError.value || !!error.value || !!generationName.value && (!!mediaError.value || !generationState.value || !!generationState.value.controlsBlocked || running.value));
 const legacyDrafts = ref<{ kind: string; value: unknown }[]>([]);
 const legacyAcknowledged = ref(false);
 function loadLegacyDrafts() {
+  if (props.node && !generationName.value && !mediaType.value) { legacyDrafts.value = []; return; }
   const drafts = props.canvasPath && props.node ? readWorkspaceDrafts<any>(props.directory, props.canvasPath, `parameters:${props.node.id}:`).filter(draft => Object.keys(draft.value?.values ?? {}).length || Object.keys(draft.value?.jsonValues ?? {}).length || draft.value?.rawArgs?.trim() && draft.value.rawArgs.trim() !== "{}") : [];
   if (graphValueJson(drafts) !== graphValueJson(legacyDrafts.value)) { legacyDrafts.value = drafts; legacyAcknowledged.value = false; }
 }
@@ -174,6 +260,7 @@ function loadMedia(signal?: AbortSignal, includeGeneration = true) {
   return task;
 }
 async function readMedia(signal?: AbortSignal, includeGeneration = true): Promise<boolean> {
+  if (props.node && !(generationName.value && mediaType.value)) { mediaJobs.value = []; mediaError.value = ""; return !includeGeneration || !generationName.value || !!await readGeneration(signal); }
   const binding = taskBinding.value;
   const directory = props.directory;
   const version = ++mediaRevision;
@@ -317,7 +404,7 @@ async function executeNodeAction(name: string, args: Record<string, unknown> = {
   error.value = "";
   try {
     loadLegacyDrafts();
-    if ((name === generationName.value || name.startsWith("set")) && legacyDrafts.value.length && !legacyAcknowledged.value) throw new Error("请先核对保留的操作草稿");
+    if ((generationName.value || mediaType.value) && (name === generationName.value || name.startsWith("set")) && legacyDrafts.value.length && !legacyAcknowledged.value) throw new Error("请先核对保留的操作草稿");
     if (generationName.value) {
       const state = await readGeneration(undefined, true);
       if (!state || disposed || binding !== taskBinding.value) return;
@@ -502,6 +589,9 @@ onUnmounted(() => {
 .mobileExecutePanel {
   margin-top: 12px;
   overflow-wrap: anywhere;
+  .actionSelect { width: 100%; margin-top: 12px; }
+  .parameterForm { margin-top: 12px; .el-select { width: 100%; } .fieldDescription { width: 100%; margin: 4px 0; color: var(--el-text-color-secondary); } }
+  pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
   .nodeActions {
     .generateButton { width: 100%; min-height: 44px; }
     .generationStatus { margin: 0 0 12px; }
