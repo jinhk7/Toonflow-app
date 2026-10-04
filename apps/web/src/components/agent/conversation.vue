@@ -750,15 +750,22 @@ async function terminateRun() {
   const runId = currentRunId.value;
   if (!runId || mobile && (runControlPending.value || runStatus.value === "terminating")) return;
   if (mobile) runControlPending.value = true;
+  let accepted = false;
   try {
     await controlAgentRun(runId, "terminate");
+    accepted = true;
     if (mobile && (disposed || currentRunId.value !== runId)) return;
     // 控制受理后保护仍在运行的终止态；保留订阅先收到的结束状态。
     if (mobile && remoteRunning.value) runStatus.value = "terminating";
     await refreshRunStatus(runId);
-    ElMessage.success("已终止本次流程");
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
+    ElMessage.success(mobile && remoteRunning.value ? "终止请求已受理" : "已终止本次流程");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "终止失败");
+    if (mobile && (disposed || currentRunId.value !== runId)) return;
+    if (mobile && (accepted || !remoteRunning.value && ["completed", "error"].includes(runStatus.value ?? ""))) {
+      if (remoteRunning.value) scheduleReconnect(1000);
+      ElMessage.success(remoteRunning.value ? "终止请求已受理，正在同步运行状态" : "本次流程已结束");
+    } else ElMessage.error(error instanceof Error ? error.message : "终止失败");
   } finally { if (mobile) runControlPending.value = false; }
 }
 
