@@ -1,53 +1,58 @@
 <template>
-  <el-card class="mobileExecutePanel" shadow="never">
-    <template #header>{{ node ? "后端节点动作与任务" : "后台任务" }}</template>
-    <el-alert v-if="parameterReadError || error || mediaError || snapshotIssue" :title="parameterReadError || error || mediaError || snapshotIssue" type="error" :closable="false" showIcon />
+  <el-card v-if="!node || mediaType || generationName || pendingCommand || legacyDrafts.length || error" class="mobileExecutePanel" shadow="never">
+    <template #header>{{ node ? generationName ? generationLabel : mediaType ? mediaLabel + "素材" : "节点操作" : "后台任务" }}</template>
+    <el-alert v-if="error || mediaError || generationError" :title="error || mediaError || generationError" type="error" :closable="false" showIcon />
     <el-alert v-if="connectionError" :title="connectionError" type="warning" :closable="false" showIcon />
     <template v-if="node">
-      <el-alert v-if="!descriptor && !loading" title="此节点尚未提供后端执行描述，请迁移插件后使用" type="warning" :closable="false" />
-      <el-select v-if="descriptor?.actions.length" v-model="actionName" :disabled="submitting || reviewingParameters || !!pendingCommand" class="actionSelect" placeholder="选择节点动作" aria-label="节点动作">
-        <el-option v-for="item in descriptor.actions" :key="item.name" :label="item.description || item.name" :value="item.name" />
-      </el-select>
-      <el-form v-if="action" :disabled="!!parameterReadError" labelPosition="top" class="parameterForm" @submit.prevent="executeAction">
-        <el-form-item v-for="field in visibleFields" :key="field.name" :label="field.schema.title || field.name" :required="field.required">
-          <el-select v-if="field.schema.enum" v-model="values[field.name]" clearable>
-            <el-option v-for="(value, index) in field.schema.enum" :key="index" :label="String(value)" :value="value" />
-          </el-select>
-          <el-switch v-else-if="field.schema.type === 'boolean'" v-model="values[field.name]" />
-          <el-input-number v-else-if="['number', 'integer'].includes(field.schema.type || '')" v-model="values[field.name]" :min="field.schema.minimum" :max="field.schema.maximum" :precision="field.schema.type === 'integer' ? 0 : undefined" />
-          <el-input v-else-if="field.schema.type === 'object' || field.schema.type === 'array' || field.schema.$ref || field.schema.oneOf || field.schema.anyOf" v-model="jsonValues[field.name]" type="textarea" :autosize="{ minRows: 2, maxRows: 12 }" />
-          <el-input v-else v-model="values[field.name]" :maxlength="field.schema.maxLength" :type="field.schema.maxLength && field.schema.maxLength > 200 ? 'textarea' : 'text'" />
-          <p v-if="field.schema.description" class="fieldDescription">{{ field.schema.description }}</p>
-        </el-form-item>
-        <el-input v-if="!hasProperties" v-model="rawArgs" type="textarea" :autosize="{ minRows: 3, maxRows: 12 }" aria-label="动作 JSON 参数" />
+      <div v-if="legacyDrafts.length" class="legacyDrafts">
+        <p role="status">上次未执行的操作草稿已保留。请先核对，再使用当前已保存的节点内容。</p>
+        <details><summary>查看保留的操作草稿</summary><div v-for="draft in legacyDrafts" :key="draft.kind"><strong>{{ legacyLabel(draft.kind) }}</strong><pre>{{ JSON.stringify(draft.value, null, 2) }}</pre></div></details>
+        <div class="actions"><el-button @click="downloadLegacyDrafts">下载保留草稿</el-button><el-button v-if="!legacyAcknowledged" @click="legacyAcknowledged = true">使用已保存的节点内容</el-button></div>
+      </div>
+      <div v-if="generationName" class="nodeActions">
+        <p v-if="generationState" class="generationStatus" role="status">{{ statusLabel(generationState.status) }}<span v-if="generationState.error"> · {{ generationState.error }}</span></p>
+        <el-progress v-if="currentJob?.progress !== undefined" :percentage="Math.max(0, Math.min(100, currentJob.progress <= 1 ? currentJob.progress * 100 : currentJob.progress))" />
+        <el-button type="primary" class="generateButton" :loading="submitting && !pendingCommand" :disabled="generationBlocked" @click="executeNodeAction(generationName)">{{ generationLabel }}</el-button>
+        <p v-if="editorBlocked && !loading" class="saveHint" role="status">请先保存节点修改，再生成或替换结果</p>
+        <p v-else-if="!hasPrompt && !loading" class="saveHint" role="status">{{ mediaType ? "请填写并保存提示词，或连接有内容的文本引用" : "请填写并保存提示词" }}</p>
+        <p v-else-if="!modelReady && !loading" class="saveHint" role="status">请选择并保存可用模型</p>
         <div class="actions">
-          <el-button v-if="nodeFields.length" :loading="reviewingParameters" :disabled="submitting || !!pendingCommand" @click="reviewParameters">核对当前节点并保留参数</el-button>
-          <el-button type="primary" nativeType="submit" :loading="submitting" :disabled="!canvasPath || !!pendingCommand || reviewingParameters || !!snapshotIssue">执行</el-button>
+          <el-button v-if="generationState?.canCancelObservation || !mediaType && running" :disabled="submitting || !!pendingCommand || editorPending" @click="executeNodeAction('cancelGeneration')">{{ mediaType ? "取消本地等待" : "停止生成" }}</el-button>
+          <el-button v-if="generationState?.mediaJob?.status === 'collectionFailed'" :disabled="submitting || !!pendingCommand || editorPending" @click="executeNodeAction('retryCollection')">重试保存原结果</el-button>
+          <el-button v-if="generationState?.mediaJob?.status === 'unknown' || node.data.pendingMediaJob && generationState && !generationState.mediaJob || !mediaType && generationState?.status === 'needsReview'" :disabled="submitting || !!pendingCommand || editorPending" @click="executeNodeAction('abandonUnknownGeneration', { confirmed: true })">核对并放弃原任务</el-button>
+          <el-button v-if="currentJob?.canResume" :disabled="submitting || !!pendingCommand || editorPending" @click="resumeJob(currentJob)">继续原任务</el-button>
+          <el-button :loading="loading" :disabled="submitting || uploading" @click="load()">核对生成状态</el-button>
         </div>
-      </el-form>
-      <div v-if="pendingCommand" class="actions"><el-button :loading="submitting" :disabled="reviewingParameters" @click="reconcileCommand()">查询待确认命令 {{ pendingCommand.commandId }}</el-button></div>
-      <pre v-if="result" class="json">{{ result }}</pre>
+      </div>
+      <div v-if="mediaType" class="actions">
+        <el-button :loading="uploading" :disabled="resultBlocked" @click="fileInput?.click()">{{ currentOutput ? "替换" : "上传" }}{{ mediaLabel }}</el-button>
+        <input ref="fileInput" type="file" :accept="mediaType + '/*'" hidden :disabled="resultBlocked" :aria-label="'选择' + mediaLabel" @change="uploadOutput" />
+        <mediaHistory v-if="generationName && (mediaType === 'image' || mediaType === 'video')" :key="node.id" :nodeId="node.id" :mediaType="mediaType" label="历史记录" :current="currentOutput" :disabled="resultBlocked" @select="selectOutput" />
+      </div>
+      <div v-if="pendingCommand" class="actions"><el-button :loading="submitting" @click="reconcileCommand()">核对上次操作</el-button></div>
     </template>
-    <div class="actions"><el-button :loading="loading" @click="load()">刷新任务</el-button></div>
-    <ul class="jobList">
-      <li v-for="job in jobs" :key="job.jobId">
-        <strong>{{ job.kind }} · {{ job.jobId }}</strong>
-        <p>{{ job.status }}<span v-if="job.errorMessage"> · {{ job.errorMessage }}</span></p>
-        <el-progress v-if="job.progress !== undefined" :percentage="Math.max(0, Math.min(100, job.progress <= 1 ? job.progress * 100 : job.progress))" />
-        <div class="actions">
-          <el-button v-if="job.nodeId && job.canvasPath" text @click="openJobNode(job)">查看节点</el-button>
-          <el-button v-if="job.result !== undefined" text @click="downloadResult(job)">下载任务结果</el-button>
-          <el-button v-if="job.canResume" text @click="resumeJob(job)">恢复原任务</el-button>
-          <el-button v-if="job.status === 'accepted' || job.status === 'running'" text type="danger" @click="cancelJob(job)">{{ job.kind === "media" ? "停止观察" : "取消任务" }}</el-button>
-        </div>
-      </li>
-    </ul>
-    <ul class="jobList">
-      <li v-for="job in mediaJobs" :key="job.jobId">
-        <strong>{{ job.mediaType || "媒体" }} · {{ job.jobId }}</strong>
-        <p>{{ job.status }}<span v-if="job.linkStatus"> · {{ job.linkStatus }}</span><span v-if="job.errorMessage"> · {{ job.errorMessage }}</span></p>
-      </li>
-    </ul>
+    <template v-else>
+      <div class="actions"><el-button :loading="loading" @click="load()">刷新任务</el-button></div>
+      <ul class="jobList">
+        <li v-for="job in jobs" :key="job.jobId">
+          <strong>{{ job.kind }} · {{ job.jobId }}</strong>
+          <p>{{ job.status }}<span v-if="job.errorMessage"> · {{ job.errorMessage }}</span></p>
+          <el-progress v-if="job.progress !== undefined" :percentage="Math.max(0, Math.min(100, job.progress <= 1 ? job.progress * 100 : job.progress))" />
+          <div class="actions">
+            <el-button v-if="job.nodeId && job.canvasPath" text @click="openJobNode(job)">查看节点</el-button>
+            <el-button v-if="job.result !== undefined" text @click="downloadResult(job)">下载任务结果</el-button>
+            <el-button v-if="job.canResume" text @click="resumeJob(job)">恢复原任务</el-button>
+            <el-button v-if="job.status === 'accepted' || job.status === 'running'" text type="danger" @click="cancelJob(job)">{{ job.kind === "media" ? "停止观察" : "取消任务" }}</el-button>
+          </div>
+        </li>
+      </ul>
+      <ul class="jobList">
+        <li v-for="job in mediaJobs" :key="job.jobId">
+          <strong>{{ job.mediaType || "媒体" }} · {{ job.jobId }}</strong>
+          <p>{{ job.status }}<span v-if="job.linkStatus"> · {{ job.linkStatus }}</span><span v-if="job.errorMessage"> · {{ job.errorMessage }}</span></p>
+        </li>
+      </ul>
+    </template>
   </el-card>
 </template>
 
@@ -56,18 +61,21 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import axios from "axios";
-import { get, isPlainObject } from "lodash-es";
 import { createExecutionClient, ExecutionRequestError, fetchNodeCatalog, getExecutionClientId, isExecutableNode, type NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
 import type { CanvasCommand, CanvasCommandResult, NodeJobView } from "@toonflow/nodes-scaffold/execution";
 import useWorkspaceFiles, { graphValueJson, type WorkspaceGraph } from "@/lib/workspaceFiles";
-import { readWorkspaceDraft, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
+import { readWorkspaceDraft, readWorkspaceDrafts, removeWorkspaceDraft, saveWorkspaceDraft } from "@/lib/workspaceDrafts";
 import { useWorkspaceEvents } from "@/lib/workspaceEvents";
 import saveFile from "@/lib/saveFile";
+import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
+import type { NodeMediaValue, NodeOutputs } from "@toonflow/nodes-scaffold/values";
+import type { NodeMediaJobView } from "@toonflow/nodes-scaffold/runtime";
+import { getTargetValues } from "@toonflow/nodes-scaffold/inputValues";
 import type { CanvasNode } from "../lib/mobileGraphModel";
 
-type ParameterSchema = { type?: string; title?: string; description?: string; default?: unknown; enum?: any[]; minimum?: number; maximum?: number; maxLength?: number; $ref?: string; oneOf?: unknown; anyOf?: unknown };
+type GenerationState = { status: string; controlsBlocked?: boolean; canCancelObservation?: boolean; mediaJob?: NodeMediaJobView; error?: string; outputs?: NodeOutputs };
 type MediaJob = { jobId: string; mediaType?: string; status: string; linkStatus?: string; nodeId?: string; canvasPath?: string; errorMessage?: string };
-const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph; refreshNode?: (signal?: AbortSignal, contentOnly?: boolean) => Promise<boolean | void> }>();
+const props = defineProps<{ directory: string; canvasPath?: string; node?: CanvasNode; graph?: WorkspaceGraph; refreshNode?: (signal?: AbortSignal, contentOnly?: boolean) => Promise<boolean | void>; editorBlocked?: boolean; editorPending?: boolean; modelReady?: boolean }>();
 const emit = defineEmits<{ changed: []; catalog: [entries: NodeCatalogEntry[]] }>();
 const route = useRoute();
 const router = useRouter();
@@ -76,39 +84,45 @@ const descriptor = computed(() => {
   const entry = catalog.value.find(item => `remote-${item.name}` === props.node?.type);
   return entry && isExecutableNode(entry) ? entry : undefined;
 });
-const actionName = ref("");
-watch(descriptor, current => {
-  if (current && !current.actions.some(item => item.name === actionName.value)) actionName.value = current.actions[0]?.name ?? "";
+const generationName = computed(() => ({
+  "remote-imageGenerationNode": "generateImage", "remote-videoGenerationNode": "generateVideo", "remote-textNode": "generateText",
+} as Record<string, string>)[props.node?.type ?? ""]);
+const mediaType = computed(() => ({
+  "remote-imageGenerationNode": "image", "remote-imageNode": "image", "remote-videoGenerationNode": "video", "remote-videoNode": "video", "remote-audioNode": "audio",
+} as Record<string, "image" | "video" | "audio">)[props.node?.type ?? ""]);
+const mediaLabel = computed(() => ({ image: "图片", video: "视频", audio: "音频" }[mediaType.value ?? "image"]));
+const generationLabel = computed(() => generationName.value === "generateText" ? "生成文本" : "生成" + mediaLabel.value);
+const generationState = ref<GenerationState>();
+const generationError = ref("");
+const fileInput = ref<HTMLInputElement>();
+const uploading = ref(false);
+const currentOutput = computed(() => {
+  const output = mediaType.value && props.node?.data.outputs?.[mediaType.value];
+  return output?.value && typeof output.value.url === "string" ? output.value as NodeMediaValue : undefined;
 });
-const action = computed(() => descriptor.value?.actions.find(item => item.name === actionName.value));
-const hasProperties = computed(() => action.value?.parameters.type === "object" && !!action.value.parameters.properties);
-const fields = computed(() => {
-  const properties = action.value?.parameters.properties;
-  const required = action.value?.parameters.required;
-  return properties && typeof properties === "object" ? Object.entries(properties).map(([name, schema]) => ({
-    name, schema: schema as ParameterSchema, required: Array.isArray(required) && required.includes(name),
-  })) : [];
-});
-const values = ref<Record<string, any>>({});
-const jsonValues = ref<Record<string, string>>({});
-const rawArgs = ref("{}");
-type ParameterSnapshot = { baseVersion: number; executionRevision: string; fields: Record<string, { node: string; value?: unknown }> };
-type ParameterDraft = { values: Record<string, any>; jsonValues: Record<string, string>; rawArgs: string; snapshot?: ParameterSnapshot };
-const parameterSnapshot = ref<ParameterSnapshot>();
-const parameterReadError = ref("");
-const reviewingParameters = ref(false);
-const nodeFields = computed(() => fields.value.flatMap(field => {
-  const nodePath = action.value?.editor?.values?.[field.name]?.node;
-  return action.value?.editor?.fields?.[field.name]?.hidden && nodePath ? [{ ...field, nodePath }] : [];
-}));
-const visibleFields = computed(() => fields.value.filter(field => !nodeFields.value.some(item => item.name === field.name)));
-const snapshotIssue = computed(() => {
-  if (parameterReadError.value) return parameterReadError.value;
-  if (!nodeFields.value.length) return "";
-  const snapshot = parameterSnapshot.value;
-  return snapshot && Number.isSafeInteger(snapshot.baseVersion) && snapshot.baseVersion >= 0 && snapshot.executionRevision === descriptor.value?.executionRevision && nodeFields.value.every(field => snapshot.fields?.[field.name]?.node === field.nodePath)
-    ? "" : "参数草稿缺少当前节点快照，请核对当前节点并保留参数";
-});
+const running = computed(() => ["accepted", "running"].includes(generationState.value?.status ?? ""));
+const hasGenerationAction = computed(() => !!generationName.value && descriptor.value?.actions.some(item => item.name === generationName.value));
+const hasPrompt = computed(() => typeof props.node?.data.prompt === "string" && !!props.node.data.prompt.trim() || !!mediaType.value && !!props.graph && !!props.node && getTargetValues(props.node.id, "in", props.graph.nodes, props.graph.edges).some(item => item.dataType === "STRING" && typeof item.value === "string" && item.value.trim()));
+const generationBlocked = computed(() => !hasGenerationAction.value || !hasPrompt.value || !props.modelReady || !generationState.value || !!generationError.value || !!error.value || !!mediaError.value || loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || running.value || generationState.value.status === "needsReview" || !!generationState.value.controlsBlocked);
+const resultBlocked = computed(() => loading.value || submitting.value || uploading.value || !!pendingCommand.value || !!props.editorBlocked || legacyDrafts.value.length > 0 && !legacyAcknowledged.value || !!generationError.value || !!error.value || !!mediaError.value || !!generationName.value && (!generationState.value || !!generationState.value.controlsBlocked || running.value));
+const legacyDrafts = ref<{ kind: string; value: unknown }[]>([]);
+const legacyAcknowledged = ref(false);
+function loadLegacyDrafts() {
+  const drafts = props.canvasPath && props.node ? readWorkspaceDrafts<any>(props.directory, props.canvasPath, `parameters:${props.node.id}:`).filter(draft => Object.keys(draft.value?.values ?? {}).length || Object.keys(draft.value?.jsonValues ?? {}).length || draft.value?.rawArgs?.trim() && draft.value.rawArgs.trim() !== "{}") : [];
+  if (graphValueJson(drafts) !== graphValueJson(legacyDrafts.value)) { legacyDrafts.value = drafts; legacyAcknowledged.value = false; }
+}
+function legacyLabel(kind: string) {
+  const name = kind.slice(kind.lastIndexOf(":") + 1);
+  return descriptor.value?.actions.find(action => action.name === name)?.editor?.label ?? "保留的操作草稿";
+}
+async function downloadLegacyDrafts() {
+  try { await saveFile(new Blob([JSON.stringify(legacyDrafts.value, null, 2)], { type: "application/json" }), "nodeDrafts.json"); }
+  catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : "草稿下载失败"); }
+}
+const currentJob = computed(() => jobs.value.find(job => job.jobId === props.node?.data.generationJobId));
+function statusLabel(status: string) {
+  return ({ idle: "尚未生成", accepted: "已排队", running: "生成中", prepared: "已准备", submitting: "提交中", tracking: "生成中", collecting: "保存结果中", completed: "已完成", failed: "生成失败", cancelled: "已停止本地等待", unknown: "上次任务状态待确认", collectionFailed: "结果保存失败", needsReview: "上次任务待核对" } as Record<string, string>)[status] ?? status;
+}
 const jobs = ref<NodeJobView[]>([]);
 const mediaJobs = ref<MediaJob[]>([]);
 const pendingCommand = ref<CanvasCommand>();
@@ -127,89 +141,8 @@ let latestTasks: { revision: number; binding: string; task: Promise<boolean> } |
 const lifetime = new AbortController();
 const jobSequences = new Map<string, number>();
 let disposed = false;
-const taskBinding = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id]));
-const draftKey = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id, actionName.value]));
-let parameterBinding = "";
-let parameterReview: AbortController | undefined;
-function captureParameterSnapshot(node: CanvasNode, baseVersion: number, executionRevision: string, parameters = nodeFields.value): ParameterSnapshot {
-  if (!Number.isSafeInteger(baseVersion) || baseVersion < 0) throw new Error("节点版本无法确认，参数草稿已保留");
-  return { baseVersion, executionRevision, fields: Object.fromEntries(parameters.map(field => {
-    const mapped = get(node, field.nodePath);
-    const value = mapped === undefined ? field.schema.default : mapped;
-    return [field.name, { node: field.nodePath, ...(value !== undefined ? { value: JSON.parse(JSON.stringify(value)) } : {}) }];
-  })) };
-}
-function saveParameters() {
-  if (parameterReadError.value) return false;
-  if (!parameterBinding) return true;
-  const [directory, path, nodeId, name] = JSON.parse(parameterBinding) as string[];
-  if (!directory || !path || !nodeId || !name) return true;
-  try { saveWorkspaceDraft(directory, path, `parameters:${nodeId}:${name}`, { values: values.value, jsonValues: jsonValues.value, rawArgs: rawArgs.value, snapshot: parameterSnapshot.value }); return true; }
-  catch (reason) { error.value = reason instanceof Error ? reason.message : "参数草稿保存失败"; return false; }
-}
-watch(draftKey, key => {
-  parameterReview?.abort();
-  reviewingParameters.value = false;
-  saveParameters();
-  parameterBinding = "";
-  parameterReadError.value = "";
-  parameterSnapshot.value = undefined;
-  let saved: ParameterDraft | undefined;
-  try {
-    saved = props.canvasPath && props.node && actionName.value ? readWorkspaceDraft<ParameterDraft>(props.directory, props.canvasPath, `parameters:${props.node.id}:${actionName.value}`) : undefined;
-    if (saved !== undefined && (!isPlainObject(saved) || saved.values !== undefined && !isPlainObject(saved.values) || saved.jsonValues !== undefined && (!isPlainObject(saved.jsonValues) || Object.values(saved.jsonValues).some(value => typeof value !== "string")) || saved.rawArgs !== undefined && typeof saved.rawArgs !== "string")) throw new Error("参数草稿格式无法读取，请先保留原始内容");
-  }
-  catch (reason) {
-    parameterReadError.value = reason instanceof Error ? reason.message : "参数草稿读取失败，请先保留原始内容";
-    values.value = {};
-    jsonValues.value = {};
-    rawArgs.value = "{}";
-    parameterBinding = key;
-    return;
-  }
-  try {
-    values.value = saved?.values ?? Object.fromEntries(fields.value.filter(field => field.schema.default !== undefined).map(field => [field.name, JSON.parse(JSON.stringify(field.schema.default))]));
-    jsonValues.value = saved?.jsonValues ?? Object.fromEntries(fields.value.filter(field => field.schema.type === "object" || field.schema.type === "array").filter(field => field.schema.default !== undefined).map(field => [field.name, JSON.stringify(field.schema.default, null, 2)]));
-    rawArgs.value = saved?.rawArgs ?? "{}";
-    if (saved) parameterSnapshot.value = saved.snapshot;
-    else if (nodeFields.value.length && props.node && props.graph && descriptor.value) {
-      const node = props.graph.nodes.find(item => item.id === props.node!.id);
-      if (!node || node.type !== props.node.type) throw new Error("节点快照无法确认，参数草稿已保留");
-      parameterSnapshot.value = captureParameterSnapshot(node as CanvasNode, props.graph.toonflowGraph.nodes[node.id], descriptor.value.executionRevision);
-    }
-  } catch (reason) { error.value = reason instanceof Error ? reason.message : "参数草稿读取失败"; }
-  parameterBinding = key;
-  saveParameters();
-}, { immediate: true });
-watch([values, jsonValues, rawArgs], saveParameters, { deep: true, flush: "sync" });
-
-async function reviewParameters() {
-  const node = props.node;
-  const definition = descriptor.value;
-  const selected = action.value;
-  if (!node || !definition || !selected || !props.canvasPath || submitting.value || pendingCommand.value || reviewingParameters.value || parameterReadError.value || !nodeFields.value.length) return;
-  const directory = props.directory, canvasPath = props.canvasPath, binding = draftKey.value, nodeId = node.id, nodeType = node.type, executionRevision = definition.executionRevision;
-  const parameters = JSON.parse(JSON.stringify(nodeFields.value)) as typeof nodeFields.value;
-  const sources = graphValueJson(parameters.map(field => [field.name, field.nodePath]));
-  const controller = new AbortController();
-  parameterReview = controller;
-  reviewingParameters.value = true;
-  const signal = requestSignal(controller.signal);
-  try {
-    const graph = await useWorkspaceFiles(directory).readGraph(canvasPath, signal);
-    signal.throwIfAborted();
-    if (disposed || pendingCommand.value || submitting.value || binding !== draftKey.value || props.node?.type !== nodeType || descriptor.value?.executionRevision !== executionRevision || action.value?.name !== selected.name || graphValueJson(nodeFields.value.map(field => [field.name, field.nodePath])) !== sources) return;
-    const current = graph.nodes.find(item => item.id === nodeId);
-    if (!current || current.type !== nodeType) throw new Error("节点已不存在或类型已改变，参数草稿已保留");
-    parameterSnapshot.value = captureParameterSnapshot(current as CanvasNode, graph.toonflowGraph.nodes[nodeId], executionRevision, parameters);
-    if (saveParameters()) error.value = "";
-  } catch (reason) {
-    if (!signal.aborted && !disposed && binding === draftKey.value) error.value = reason instanceof Error ? reason.message : "节点快照读取失败，参数草稿已保留";
-  } finally {
-    if (parameterReview === controller) { parameterReview = undefined; reviewingParameters.value = false; }
-  }
-}
-
+const taskBinding = computed(() => JSON.stringify([props.directory, props.canvasPath, props.node?.id, props.node?.type, descriptor.value?.executionRevision]));
+let generationRevision = 0;
 function commandMatches(command: CanvasCommand) {
   return command.directory === props.directory && command.canvasPath === props.canvasPath && command.args.nodeId === props.node?.id;
 }
@@ -220,7 +153,7 @@ function clearCommand(command: CanvasCommand) {
 }
 function commandFailed(command: CanvasCommand | undefined, reason: unknown) {
   if (command && reason instanceof ExecutionRequestError && reason.status >= 400 && reason.status < 500) clearCommand(command);
-  if (!command || commandMatches(command)) error.value = reason instanceof Error ? reason.message : "命令结果待确认，参数草稿已保留";
+  if (!command || commandMatches(command)) error.value = reason instanceof Error ? reason.message : "上次操作结果待确认，原操作已保留";
 }
 
 function matchesNode(job: { nodeId?: string; canvasPath?: string }) {
@@ -231,15 +164,15 @@ function requestSignal(signal?: AbortSignal) {
 }
 function scheduleMedia() {
   clearTimeout(mediaTimer);
-  if (!disposed && !document.hidden && mediaJobs.value.some(job => ["prepared", "submitting", "tracking", "collecting"].includes(job.status) || job.status === "completed" && job.linkStatus === "pending"))
+  if (!disposed && !document.hidden && (running.value || mediaJobs.value.some(job => ["prepared", "submitting", "tracking", "collecting"].includes(job.status) || job.status === "completed" && job.linkStatus === "pending")))
     mediaTimer = setTimeout(() => { void loadMedia(); }, 3000);
 }
-function loadMedia(signal?: AbortSignal) {
-  const task = readMedia(signal);
+function loadMedia(signal?: AbortSignal, includeGeneration = true) {
+  const task = readMedia(signal, includeGeneration);
   latestMedia = { revision: mediaRevision, binding: taskBinding.value, task };
   return task;
 }
-async function readMedia(signal?: AbortSignal): Promise<boolean> {
+async function readMedia(signal?: AbortSignal, includeGeneration = true): Promise<boolean> {
   const binding = taskBinding.value;
   const directory = props.directory;
   const version = ++mediaRevision;
@@ -253,7 +186,7 @@ async function readMedia(signal?: AbortSignal): Promise<boolean> {
     const next = data.data.filter(matchesNode);
     if (graphValueJson(next) !== graphValueJson(mediaJobs.value)) mediaJobs.value = next;
     mediaError.value = "";
-    return true;
+    return !includeGeneration || !generationName.value || !!await readGeneration(signal);
   } catch (reason) {
     if (!current()) return newer();
     mediaError.value = reason instanceof Error ? reason.message : "媒体任务查询失败";
@@ -278,7 +211,8 @@ async function loadCatalog(signal?: AbortSignal) {
 }
 async function syncNode(signal?: AbortSignal) {
   if (!await loadCatalog(signal)) return false;
-  return refreshNode(signal);
+  if (!await refreshNode(signal)) return false;
+  return !generationName.value || !!await readGeneration(signal);
 }
 async function refreshNode(signal?: AbortSignal) {
   await nextTick();
@@ -298,6 +232,7 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   if (!directory) return false;
   loading.value = true;
   error.value = "";
+  try { loadLegacyDrafts(); } catch (reason) { error.value = reason instanceof Error ? reason.message : "保留草稿读取失败"; }
   const [local] = await Promise.allSettled([
     createExecutionClient(directory).listJobSnapshot(requestSignal(signal)),
   ]);
@@ -305,7 +240,7 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   const snapshot = local.status === "fulfilled" && local.value && Array.isArray(local.value.jobs) && Number.isSafeInteger(local.value.cursor) && local.value.cursor >= 0 ? local.value : undefined;
   const cursor = snapshot?.cursor ?? 0;
   const results = await Promise.allSettled([
-    loadMedia(signal),
+    loadMedia(signal, false),
     loadCatalog(signal),
   ]);
   if (!current()) return newer();
@@ -318,6 +253,7 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
       synchronized = false;
     }
   }
+  if (synchronized && generationName.value) synchronized = !!await readGeneration(signal);
   if (!current()) return newer();
   if (snapshot) {
     const latest = new Map(jobs.value.map(job => [job.jobId, job]));
@@ -337,48 +273,108 @@ async function readTasks(signal?: AbortSignal): Promise<boolean> {
   return loaded;
 }
 
-function argumentsFromDraft() {
-  if (!hasProperties.value) {
-    const args: unknown = JSON.parse(rawArgs.value);
-    if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("动作参数必须为 JSON 对象");
-    return args as Record<string, unknown>;
-  }
-  if (snapshotIssue.value) throw new Error(snapshotIssue.value);
-  const args: Record<string, unknown> = { ...values.value };
-  for (const field of nodeFields.value) {
-    const value = parameterSnapshot.value!.fields[field.name].value;
-    if (value === undefined) delete args[field.name];
-    else args[field.name] = JSON.parse(JSON.stringify(value));
-  }
-  for (const field of fields.value) {
-    const json = jsonValues.value[field.name]?.trim();
-    if (json && !nodeFields.value.some(item => item.name === field.name)) args[field.name] = JSON.parse(json);
-    if (field.required && (args[field.name] === undefined || args[field.name] === "")) throw new Error(`请填写 ${field.schema.title || field.name}`);
-  }
-  return args;
+function nodeCommand(name: string, args: Record<string, unknown>, baseVersion: number): CanvasCommand {
+  if (!props.node || !descriptor.value || !props.canvasPath || !Number.isSafeInteger(baseVersion) || baseVersion < 0) throw new Error("节点信息尚未同步");
+  if (!descriptor.value.actions.some(item => item.name === name || item.name === "node:" + name)) throw new Error("此节点不支持该操作");
+  return {
+    directory: props.directory, canvasPath: props.canvasPath, commandId: crypto.randomUUID(), name: "nodeTools",
+    args: { nodeId: props.node.id, name: name.startsWith("node:") ? name : "node:" + name, args, expectedNodeRevision: descriptor.value.executionRevision },
+    expectedVersions: { [props.node.id]: baseVersion }, clientContext: { clientId: getExecutionClientId() },
+  };
 }
-
-async function executeAction() {
-  const node = props.node;
-  const definition = descriptor.value;
-  if (!node || !definition || !action.value || !props.canvasPath || submitting.value || reviewingParameters.value || parameterReadError.value || pendingCommand.value) return;
+async function readGeneration(signal?: AbortSignal, forAction = false): Promise<GenerationState | undefined> {
+  if (!generationName.value || !props.node || !props.canvasPath || !descriptor.value) return;
+  const binding = taskBinding.value, version = ++generationRevision, nodeId = props.node.id;
+  const current = requestSignal(signal);
+  try {
+    const graph = await useWorkspaceFiles(props.directory).readGraph(props.canvasPath, current);
+    current.throwIfAborted();
+    if (disposed || binding !== taskBinding.value || !graph.nodes.some(node => node.id === nodeId && node.type === props.node?.type)) return;
+    const state = await createExecutionClient(props.directory).execute<GenerationState>(nodeCommand("getGenerationStatus", {}, graph.toonflowGraph.nodes[nodeId]), current);
+    if (disposed || current.aborted || binding !== taskBinding.value) return;
+    if (!state || typeof state.status !== "string" || mediaType.value && typeof state.controlsBlocked !== "boolean") throw new Error("生成状态暂时无法确认");
+    if (version === generationRevision) { generationState.value = state; generationError.value = ""; }
+    return state;
+  } catch (reason) {
+    if (forAction && !disposed && binding === taskBinding.value) throw reason;
+    if (!disposed && !signal?.aborted && binding === taskBinding.value && version === generationRevision) generationError.value = reason instanceof Error ? reason.message : "生成状态查询失败";
+  }
+}
+async function submitNodeAction(name: string, args: Record<string, unknown>, baseVersion: number) {
+  const command = nodeCommand(name, args, baseVersion);
+  saveWorkspaceDraft(command.directory, command.canvasPath, "command:" + props.node!.id, command);
+  pendingCommand.value = command;
+  try {
+    const response = await createExecutionClient(command.directory).command(command, lifetime.signal);
+    if (displayCommand(response, command)) await load();
+  } catch (reason) { commandFailed(command, reason); }
+}
+async function executeNodeAction(name: string, args: Record<string, unknown> = {}) {
+  if (!props.node || !descriptor.value || !props.graph || submitting.value || uploading.value || pendingCommand.value || props.editorPending) return;
+  const binding = taskBinding.value, originalVersion = props.graph.toonflowGraph.nodes[props.node.id];
   submitting.value = true;
   error.value = "";
-  let command: CanvasCommand | undefined;
   try {
-    if (!saveParameters()) return;
-    command = {
-      directory: props.directory, canvasPath: props.canvasPath, commandId: crypto.randomUUID(), name: "nodeTools",
-      args: { nodeId: node.id, name: action.value.name.startsWith("node:") ? action.value.name : `node:${action.value.name}`, args: argumentsFromDraft(), expectedNodeRevision: definition.executionRevision },
-      expectedVersions: { [node.id]: nodeFields.value.length ? parameterSnapshot.value!.baseVersion : props.graph?.toonflowGraph.nodes[node.id] ?? 0 },
-      clientContext: { clientId: getExecutionClientId() },
-    };
-    saveWorkspaceDraft(command.directory, command.canvasPath, `command:${node.id}`, command);
-    pendingCommand.value = command;
-    const response = await createExecutionClient(command.directory).command(command);
-    if (displayCommand(response, command)) await load();
-  } catch (err) { commandFailed(command, err); }
+    loadLegacyDrafts();
+    if ((name === generationName.value || name.startsWith("set")) && legacyDrafts.value.length && !legacyAcknowledged.value) throw new Error("请先核对保留的操作草稿");
+    if (generationName.value) {
+      const state = await readGeneration(undefined, true);
+      if (!state || disposed || binding !== taskBinding.value) return;
+      if (name === generationName.value && (!hasPrompt.value || !props.modelReady)) throw new Error("请先保存提示词并选择可用模型");
+      if (name === generationName.value && (props.editorBlocked || state.controlsBlocked || ["accepted", "running", "needsReview"].includes(state.status))) throw new Error(props.editorBlocked ? "请先保存节点修改再生成" : "上次任务尚未结束，请先核对原任务");
+      if (name.startsWith("set") && (props.editorBlocked || state.controlsBlocked || ["accepted", "running", "needsReview"].includes(state.status))) throw new Error("请先保存修改并核对原任务，再替换结果");
+      if (name === "retryCollection" && state.mediaJob?.status !== "collectionFailed") throw new Error("原任务状态已变化，请重新核对");
+      if (name === "abandonUnknownGeneration") {
+        if (mediaType.value ? state.mediaJob && state.mediaJob.status !== "unknown" || !props.node.data.pendingMediaJob : state.status !== "needsReview") throw new Error("原任务状态已变化，请重新核对");
+        try { await ElMessageBox.confirm("供应商可能仍在生成或已计费。确认已核对原任务后解除绑定；保留历史结果，不会自动发起新生成。", "放弃原任务？", { type: "warning", confirmButtonText: "确认放弃", cancelButtonText: "取消" }); } catch { return; }
+      }
+      if (name === "cancelGeneration") {
+        if (mediaType.value && !state.canCancelObservation || !mediaType.value && !["accepted", "running"].includes(state.status)) return;
+        if (mediaType.value) {
+          try { await ElMessageBox.confirm("仅停止本地等待，供应商任务仍会继续生成和保存结果，并可能计费。", "取消本地等待", { confirmButtonText: "取消本地等待", cancelButtonText: "继续等待" }); } catch { return; }
+        }
+      }
+      if (disposed || binding !== taskBinding.value || props.editorPending || name === generationName.value && props.editorBlocked) return;
+    } else if (props.editorBlocked) throw new Error("请先保存节点修改");
+    await submitNodeAction(name, args, originalVersion);
+  } catch (reason) { if (!disposed && binding === taskBinding.value) error.value = reason instanceof Error ? reason.message : "节点操作失败"; }
   finally { submitting.value = false; }
+}
+async function selectOutput(value: NodeMediaValue) {
+  if (resultBlocked.value || !mediaType.value) return;
+  const slot = mediaType.value, output = props.node?.data.outputs?.[slot] ?? null;
+  await executeNodeAction({ image: "setImage", video: "setVideo", audio: "setAudio" }[slot], { path: value.url, mimeType: value.mimeType, expectedOutput: JSON.parse(JSON.stringify(output)) });
+}
+async function uploadOutput(event: Event) {
+  const input = event.target as HTMLInputElement, file = input.files?.[0];
+  input.value = "";
+  if (!file || resultBlocked.value || !mediaType.value || !props.node || !props.graph) return;
+  const limit = 100;
+  if (!file.type.startsWith(mediaType.value + "/") || !file.size || file.size > limit * 1024 * 1024) return void ElMessage.error("请选择有效的" + mediaLabel.value + "文件（不超过" + limit + "MB）");
+  const directory = props.directory, binding = taskBinding.value, version = props.graph.toonflowGraph.nodes[props.node.id], name = "upload" + ({ image: "Image", video: "Video", audio: "Audio" }[mediaType.value]);
+  const files = useWorkspaceFiles(directory);
+  uploading.value = true;
+  error.value = "";
+  try {
+    loadLegacyDrafts();
+    if (legacyDrafts.value.length && !legacyAcknowledged.value) throw new Error("请先核对保留的操作草稿");
+    if (generationName.value) {
+      const state = await readGeneration(undefined, true);
+      if (!state || disposed || binding !== taskBinding.value) return;
+      if (state.controlsBlocked || ["accepted", "running", "needsReview"].includes(state.status)) throw new Error("请先核对原任务，再替换结果");
+    }
+    if (props.editorBlocked || disposed || binding !== taskBinding.value) return;
+    const stagedPath = "assets/uploads/" + crypto.randomUUID();
+    for (const path of ["assets", "assets/uploads"]) {
+      await files.mkdir(path).catch((reason: { response?: { data?: { data?: { code?: string } } } }) => { if (reason.response?.data?.data?.code !== "EEXIST") throw reason; });
+      if (disposed || binding !== taskBinding.value) return;
+    }
+    await files.write(stagedPath, file, true, lifetime.signal);
+    if (disposed || binding !== taskBinding.value || props.editorBlocked) return;
+    submitting.value = true;
+    await submitNodeAction(name, { stagedPath, name: file.name, mimeType: file.type }, version);
+  } catch (reason) { if (!disposed && binding === taskBinding.value) error.value = reason instanceof Error ? reason.message : "上传失败"; }
+  finally { uploading.value = false; submitting.value = false; }
 }
 
 function displayCommand(response: CanvasCommandResult, command: CanvasCommand) {
@@ -386,7 +382,7 @@ function displayCommand(response: CanvasCommandResult, command: CanvasCommand) {
   result.value = JSON.stringify(response, null, 2);
   if (response.status === "completed" || response.status === "failed" || response.status === "needsReview") {
     clearCommand(command);
-    if (response.status !== "completed") error.value = response.errorMessage || "执行失败，参数草稿已保留";
+    if (response.status !== "completed") error.value = response.errorMessage || "节点操作未完成，请核对当前状态";
     emit("changed");
     return true;
   }
@@ -395,7 +391,7 @@ function displayCommand(response: CanvasCommandResult, command: CanvasCommand) {
 async function reconcileCommand(signal?: AbortSignal, refreshJobs = true): Promise<boolean> {
   const command = pendingCommand.value;
   if (!command) return true;
-  if (submitting.value || reviewingParameters.value) return false;
+  if (submitting.value) return false;
   const current = requestSignal(signal);
   let posting = false;
   submitting.value = true;
@@ -448,6 +444,12 @@ watch(taskBinding, () => {
   jobs.value = [];
   mediaJobs.value = [];
   mediaError.value = "";
+  error.value = "";
+  generationState.value = undefined;
+  generationError.value = "";
+  generationRevision++;
+  legacyDrafts.value = [];
+  legacyAcknowledged.value = false;
   clearTimeout(mediaTimer);
   pendingCommand.value = undefined;
   result.value = "";
@@ -458,7 +460,7 @@ watch(taskBinding, () => {
 }, { immediate: true });
 const { error: connectionError } = useWorkspaceEvents({
   directory: () => props.directory,
-  context: () => JSON.stringify([props.canvasPath, props.node?.id]),
+  context: () => taskBinding.value,
   cursor: () => snapshotCursor,
   refresh: signal => load(signal),
   receive: async (event, signal) => {
@@ -480,6 +482,7 @@ const { error: connectionError } = useWorkspaceEvents({
       else if (graphValueJson(jobs.value[index]) !== graphValueJson(job)) jobs.value[index] = job;
       if (pendingCommand.value && pendingCommand.value.commandId === event.commandId && !await reconcileCommand(signal, false)) return false;
       if (job.kind === "media") return loadMedia(signal);
+      if (generationName.value) return !!await readGeneration(signal);
     }
     if (event.type === "graphChanged" && (!event.canvasId || event.canvasId === props.canvasPath) && pendingCommand.value && pendingCommand.value.commandId === event.commandId) return reconcileCommand(signal, false);
   },
@@ -489,27 +492,33 @@ document.addEventListener("visibilitychange", stopHiddenMedia);
 onUnmounted(() => {
   disposed = true; revision++;
   lifetime.abort();
-  parameterReview?.abort();
   clearTimeout(mediaTimer);
   document.removeEventListener("visibilitychange", stopHiddenMedia);
-  saveParameters();
 });
 </script>
 
 <style scoped lang="scss">
 .mobileExecutePanel {
   margin-top: 12px;
-  .actionSelect { width: 100%; margin-top: 12px; }
-  .parameterForm {
-    margin-top: 12px;
-    .el-select { width: 100%; }
-    .fieldDescription { width: 100%; margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 12px; }
+  overflow-wrap: anywhere;
+  .nodeActions {
+    .generateButton { width: 100%; min-height: 44px; }
+    .generationStatus { margin: 0 0 12px; }
+    .saveHint { color: var(--el-color-warning); margin: 8px 0; }
   }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
-  .json { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0;
+    :deep(.el-button) { margin: 0; min-height: 44px; }
+  }
   .jobList {
-    padding: 0; list-style: none;
-    li { padding: 8px 0; border-bottom: 1px solid var(--el-border-color-lighter); overflow-wrap: anywhere; }
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    li { padding: 12px 0; border-top: 1px solid var(--el-border-color-lighter); }
   }
+  .legacyDrafts { pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; } }
 }
 </style>

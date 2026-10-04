@@ -1,6 +1,6 @@
 <template>
-  <el-button :icon="IconHistory" :disabled="disabled" text title="历史记录" aria-label="历史记录" @click.stop="visible = true" />
-  <el-dialog v-model="visible" :title="`${mediaType === 'image' ? '图片' : '视频'}历史记录`" width="min(760px, calc(100vw - 32px))" appendToBody destroyOnClose>
+  <el-button :icon="IconHistory" :disabled="disabled" text title="历史记录" aria-label="历史记录" @click.stop="visible = true">{{ label }}</el-button>
+  <el-dialog v-model="visible" class="historyDialog" :title="`${mediaType === 'image' ? '图片' : '视频'}历史记录`" width="min(760px, calc(100vw - 32px))" alignCenter appendToBody destroyOnClose>
     <div v-loading="loading" class="mediaHistory nodrag nopan nowheel" @pointerdown.stop @mousedown.stop @dblclick.stop @keydown.stop>
       <el-alert v-if="loadError" :title="loadError" type="error" :closable="false" />
       <el-empty v-else-if="!loading && !items.length" description="暂无历史记录" />
@@ -30,8 +30,8 @@
       </template>
     </div>
     <template #footer>
-      <el-button @click="visible = false">关闭</el-button>
-      <el-button type="primary" :disabled="disabled || loading || !selected || !previewUrl || !previewReady || !!previewError" @click="selectOutput">设为当前结果</el-button>
+      <el-button class="historyAction" @click="visible = false">关闭</el-button>
+      <el-button class="historyAction" type="primary" :disabled="disabled || loading || !selected || !previewUrl || !previewReady || !!previewError" @click="selectOutput">设为当前结果</el-button>
     </template>
   </el-dialog>
 </template>
@@ -44,10 +44,11 @@ import { IconHistory } from "@tabler/icons-vue";
 import { useNodeFiles } from "../workspaceFiles";
 import type { NodeMediaValue } from "../values";
 
-const props = defineProps<{ mediaType: "image" | "video"; current?: NodeMediaValue; disabled?: boolean }>();
+const props = defineProps<{ mediaType: "image" | "video"; current?: NodeMediaValue; disabled?: boolean; nodeId?: string; label?: string }>();
 const emit = defineEmits<{ select: [value: NodeMediaValue] }>();
 const vLoading = ElLoading.directive;
-const { id } = useNode();
+const flowNode = props.nodeId === undefined ? useNode() : undefined;
+const id = computed(() => props.nodeId ?? flowNode?.id ?? "");
 const files = useNodeFiles();
 const visible = ref(false);
 const loading = ref(false);
@@ -71,6 +72,7 @@ const previewUrl = files.useFileUrl(previewFile, () => { previewError.value = "�
 watch([previewFile, previewUrl], () => { previewReady.value = false; }, { flush: "sync" });
 
 watch(() => props.disabled, disabled => { if (disabled) visible.value = false; });
+watch(() => props.nodeId, () => { visible.value = false; });
 watch(visible, async (open, _previous, onCleanup) => {
   let cancelled = false;
   onCleanup(() => { cancelled = true; });
@@ -81,7 +83,7 @@ watch(visible, async (open, _previous, onCleanup) => {
   if (!open) return;
   loading.value = true;
   try {
-    const { entries } = await files.getWorkspaceFiles().list(`assets/${id}`).catch((error: { response?: { data?: { data?: { code?: string } } } }) => {
+    const { entries } = await files.getWorkspaceFiles().list(`assets/${id.value}`).catch((error: { response?: { data?: { data?: { code?: string } } } }) => {
       if (error.response?.data?.data?.code !== "ENOENT") throw error;
       return { entries: [] };
     });
@@ -119,7 +121,9 @@ function selectOutput() {
 
 <style scoped lang="scss">
 .mediaHistory {
-  min-height: 300px;
+  min-height: min(300px, max(80px, calc(var(--mobileViewportHeight, 100dvh) - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 180px)));
+  max-height: max(80px, calc(var(--mobileViewportHeight, 100dvh) - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 180px));
+  overflow: auto;
 
   .historyContent {
     display: grid;
@@ -163,5 +167,14 @@ function selectOutput() {
   }
 
   .el-pagination { justify-content: center; margin-top: 16px; }
+  @media (max-width: 600px) {
+    min-height: 0;
+    .historyContent {
+      grid-template-columns: minmax(0, 1fr);
+      .historyList { height: min(160px, 25dvh); .historyItem { min-height: 44px; } }
+      .historyPreview { height: min(240px, 30dvh); img, video { max-height: min(240px, 30dvh); } }
+    }
+  }
 }
+@media (pointer: coarse) { .historyAction { min-height: 44px; } }
 </style>
