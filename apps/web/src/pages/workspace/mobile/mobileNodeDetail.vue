@@ -44,7 +44,8 @@
               <img v-if="referenceMedia[link.edgeId]?.type === 'IMAGE' && previewUrls['reference:' + link.edgeId]" class="referencePreview" :src="previewUrls['reference:' + link.edgeId]" alt="引用图片" />
               <video v-else-if="referenceMedia[link.edgeId]?.type === 'VIDEO' && previewUrls['reference:' + link.edgeId]" class="referencePreview" :src="previewUrls['reference:' + link.edgeId]" muted playsinline preload="metadata" aria-label="引用视频" />
               <span>{{ link.peerLabel }}</span>
-              <span v-if="referenceValue(link)?.dataType === 'STRING'" class="referenceText">{{ typeof referenceValue(link)?.value === "string" ? String(referenceValue(link)?.value).slice(0, 200) || "正文为空" : "点此查看源节点正文" }}</span>
+              <span v-if="referenceValue(link)?.invalid" class="referenceText">引用内容格式有误，点此查看源节点</span>
+              <span v-else-if="referenceValue(link)?.dataType === 'STRING'" class="referenceText">{{ typeof referenceValue(link)?.value === "string" ? String(referenceValue(link)?.value).slice(0, 200) || "正文为空" : "点此查看源节点正文" }}</span>
               <span class="handles">{{ link.sourceHandle }} → {{ link.targetHandle }}</span>
             </button>
             <div v-if="referenceIndex(link) >= 0 && inputReferences.length > 1" class="referenceActions">
@@ -100,8 +101,8 @@ import mobileExecutePanel from "./components/mobileExecutePanel.vue";
 import mobileNodeEditor from "./components/mobileNodeEditor.vue";
 import assetLibrary from "../panels/canvas/components/assetLibrary.vue";
 import saveFile from "@/lib/saveFile";
-import { isNodeOutput, type NodeOutput } from "@toonflow/nodes-scaffold/values";
-import { getTargetValues } from "@toonflow/nodes-scaffold/inputValues";
+import { isNodeOutput, type NodeInputValue, type NodeOutput } from "@toonflow/nodes-scaffold/values";
+import { getSourceValue, getTargetSources } from "@toonflow/nodes-scaffold/inputValues";
 import type { NodeCatalogEntry } from "@toonflow/nodes-scaffold/runtime";
 import {
   listGroups,
@@ -136,7 +137,23 @@ const node = computed(() => (graph.value?.nodes as CanvasNode[] | undefined)?.fi
 const nodeBinding = computed(() => JSON.stringify([directory.value, canvasPath.value, node.value?.id, node.value?.type]));
 provide("workspaceFiles", () => useWorkspaceFiles(directory.value));
 const groups = computed(() => (graph.value ? listGroups(graph.value.nodes as CanvasNode[]) : []));
-const inputReferences = computed(() => graph.value && node.value ? getTargetValues(node.value.id, "in", graph.value.nodes, graph.value.edges) : []);
+const inputReferences = computed(() => {
+  const currentGraph = graph.value, target = node.value;
+  if (!currentGraph || !target) return [];
+  const values: (NodeInputValue & { invalid?: boolean })[] = getTargetSources(target.id, "in", currentGraph.nodes, currentGraph.edges).map(({ node: source, handle }) => {
+    const reference = { source: source.id, sourceHandle: handle.id };
+    try {
+      const output = getSourceValue(source.id, handle.id, currentGraph.nodes);
+      return output ? { ...output, ...reference } : { dataType: handle.dataType, value: undefined, ...reference };
+    } catch {
+      return { dataType: handle.dataType, value: undefined, ...reference, invalid: true };
+    }
+  });
+  const order = target.data.referenceOrder?.in;
+  if (!Array.isArray(order)) return values;
+  const positions = new Map(order.filter((key): key is string => typeof key === "string").map((key, index) => [key, index]));
+  return values.sort((left, right) => (positions.get(encodeURIComponent(JSON.stringify([left.source, left.sourceHandle]))) ?? Infinity) - (positions.get(encodeURIComponent(JSON.stringify([right.source, right.sourceHandle]))) ?? Infinity));
+});
 function referenceIndex(link: NodeRefLink) { return link.direction === "in" && link.targetHandle === "in" ? inputReferences.value.findIndex(item => item.source === link.peerId && item.sourceHandle === link.sourceHandle) : -1; }
 function referenceValue(link: NodeRefLink) { return inputReferences.value[referenceIndex(link)]; }
 const refs = computed(() => (graph.value && nodeId.value ? nodeReferences(nodeId.value, graph.value).sort((left, right) => (referenceIndex(left) < 0 ? Infinity : referenceIndex(left)) - (referenceIndex(right) < 0 ? Infinity : referenceIndex(right))) : []));
@@ -195,6 +212,7 @@ const mediaOutputs = computed(() => Object.entries(node.value?.data?.outputs ?? 
   return media ? [media] : [];
 }));
 const referenceMedia = computed(() => Object.fromEntries(refs.value.filter(link => link.direction === "in").flatMap(link => {
+  if (referenceValue(link)?.invalid) return [];
   const peer = graph.value?.nodes.find(item => item.id === link.peerId);
   const media = mediaOutput("reference:" + link.edgeId, peer?.data?.outputs?.[link.sourceHandle ?? ""]);
   return media ? [[link.edgeId, media]] : [];
