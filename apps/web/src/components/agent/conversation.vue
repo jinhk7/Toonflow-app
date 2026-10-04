@@ -946,10 +946,12 @@ watch(senderElement, (element, _previous, onCleanup) => {
     const extraHeight = input.offsetHeight - instance.chatElement.rollBox.offsetHeight;
     const inputStyle = getComputedStyle(input);
     const marginHeight = Number.parseFloat(inputStyle.marginTop) + Number.parseFloat(inputStyle.marginBottom);
-    conversation.style.setProperty("--mobileConversationMinHeight", `${44 + extraHeight + marginHeight + 24}px`);
-    const available = conversation.clientHeight - extraHeight - marginHeight - 24;
+    const compactEditing = !!senderContainer.closest(".mobileLayout.compactEditing");
+    const messageSpace = compactEditing ? 0 : 24;
+    conversation.style.setProperty("--mobileConversationMinHeight", `${44 + extraHeight + marginHeight + messageSpace}px`);
+    const available = conversation.clientHeight - extraHeight - marginHeight - messageSpace;
     const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
-    const maxHeight = Math.max(44, Math.min(available, layoutHeight / 2));
+    const maxHeight = Math.max(44, compactEditing ? available : Math.min(available, layoutHeight / 2));
     senderContainer.style.setProperty("--senderMaxHeight", `${maxHeight}px`);
     updateSenderMaxHeight();
     senderHeight.value = instance.chatElement.rollBox.clientHeight;

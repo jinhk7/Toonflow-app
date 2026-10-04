@@ -1,33 +1,63 @@
 <template>
-  <div class="mobileLayout" :class="{ conversationLayout: route.matched.some(record => record.path === '/mobile/agent') }">
+  <div class="mobileLayout" :class="{ conversationLayout, compactEditing: conversationLayout && compactEditing }">
     <mobileOfflineBanner />
     <router-view />
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, provide } from "vue";
+import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import mobileOfflineBanner from "./components/mobileOfflineBanner.vue";
 
 const route = useRoute();
+const conversationLayout = computed(() => route.matched.some(record => record.path === "/mobile/agent"));
+const compactEditing = ref(false);
 provide("mobilePage", true);
 let viewportFrame = 0;
+let compactControlPointer: number | undefined;
 const viewport = window.visualViewport;
 const root = document.documentElement;
 
 function updateViewport() {
   viewportFrame = 0;
+  const pinching = viewport && Math.abs(viewport.scale - 1) > 0.01;
+  const height = pinching
+    ? Number.parseFloat(root.style.getPropertyValue("--mobileViewportHeight")) || window.innerHeight
+    : viewport?.height ?? window.innerHeight;
+  const focused = document.activeElement;
+  const visibleFocus = focused instanceof HTMLElement && focused.getClientRects().length > 0;
+  const editorFocus = visibleFocus && focused.isContentEditable && !!focused.closest(".mobileAgent .senderEditor");
+  // 编辑期间操作工具栏或其浮层时维持布局，避免焦点切换在 click 前移走按钮。
+  const editingControl = compactEditing.value && visibleFocus && !!focused.closest(".mobileAgent, .agentModelPopover, .agentContextPopover, .agentHistoryPopover, .agentSubAgentPopover");
+  if (!conversationLayout.value) compactControlPointer = undefined;
+  const pressedControl = compactControlPointer !== undefined;
+  // 短编辑视口优先留给正文；焦点与可视高度共同判断，不将单纯缩放当作键盘。
+  compactEditing.value = conversationLayout.value && (pressedControl || height < 600 && (editorFocus || editingControl));
   // 主动 pinch 时保留布局，让浏览器负责缩放和平移。
-  if (viewport && Math.abs(viewport.scale - 1) > 0.01) return;
-  root.style.setProperty("--mobileViewportHeight", `${viewport?.height ?? window.innerHeight}px`);
+  if (pinching) return;
+  root.style.setProperty("--mobileViewportHeight", `${height}px`);
   root.style.setProperty("--mobileViewportTop", `${viewport?.offsetTop ?? 0}px`);
   window.dispatchEvent(new Event("mobileViewportChange"));
 }
 
 function scheduleViewport() {
+  if (!conversationLayout.value || document.visibilityState !== "visible") compactControlPointer = undefined;
   if (!viewportFrame) viewportFrame = requestAnimationFrame(updateViewport);
 }
+
+function startCompactControl(event: PointerEvent) {
+  if (compactEditing.value && event.isPrimary && event.button === 0 && event.target instanceof Element && event.target.closest(".mobileAgent .compactHeaderButton")) compactControlPointer = event.pointerId;
+}
+function finishCompactControl(event: PointerEvent) {
+  if (event.pointerId === compactControlPointer) clearCompactControl();
+}
+function clearCompactControl() {
+  compactControlPointer = undefined;
+  scheduleViewport();
+}
+
+watch(conversationLayout, scheduleViewport);
 
 onMounted(() => {
   root.setAttribute("data-mobile-page", "");
@@ -37,6 +67,12 @@ onMounted(() => {
   window.addEventListener("resize", scheduleViewport);
   window.addEventListener("pageshow", scheduleViewport);
   document.addEventListener("visibilitychange", scheduleViewport);
+  document.addEventListener("focusin", scheduleViewport);
+  document.addEventListener("focusout", scheduleViewport);
+  document.addEventListener("pointerdown", startCompactControl, true);
+  document.addEventListener("pointerup", finishCompactControl, true);
+  document.addEventListener("pointercancel", finishCompactControl, true);
+  window.addEventListener("blur", clearCompactControl);
 });
 
 onBeforeUnmount(() => {
@@ -46,6 +82,12 @@ onBeforeUnmount(() => {
   window.removeEventListener("resize", scheduleViewport);
   window.removeEventListener("pageshow", scheduleViewport);
   document.removeEventListener("visibilitychange", scheduleViewport);
+  document.removeEventListener("focusin", scheduleViewport);
+  document.removeEventListener("focusout", scheduleViewport);
+  document.removeEventListener("pointerdown", startCompactControl, true);
+  document.removeEventListener("pointerup", finishCompactControl, true);
+  document.removeEventListener("pointercancel", finishCompactControl, true);
+  window.removeEventListener("blur", clearCompactControl);
   root.removeAttribute("data-mobile-page");
   root.style.removeProperty("--mobileViewportHeight");
   root.style.removeProperty("--mobileViewportTop");
