@@ -98,7 +98,7 @@ export async function controlAgentRun(runId: string, action: "pause" | "resume" 
     body: JSON.stringify({ runId, action, ...(canvas ? { canvas } : {}) }),
   });
   const payload = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(payload?.message || "运行控制失败");
+  if (!response.ok) throw new ExecutionRequestError(payload?.message || "运行控制失败", response.status);
   return payload?.data as AgentRunSnapshot | { runId: string; action: string };
 }
 

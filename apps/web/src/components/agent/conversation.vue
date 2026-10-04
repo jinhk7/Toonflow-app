@@ -505,7 +505,8 @@ function applyEvent(event: AgentEvent) {
       break;
     case "error":
       remoteRunning.value = false;
-      runStatus.value = "error";
+      // 已受理的终止也可能通过 error 事件结束，不再恢复这个运行。
+      runStatus.value = mobile && (runStatus.value === "terminating" || runStatus.value === "completed") ? "completed" : "error";
       if (event.message.includes("尚未授权")) authorizationError.value = event.message;
       stream.receive(event);
       break;
@@ -755,14 +756,15 @@ async function terminateRun() {
     await controlAgentRun(runId, "terminate");
     accepted = true;
     if (mobile && (disposed || currentRunId.value !== runId)) return;
-    // 控制受理后保护仍在运行的终止态；保留订阅先收到的结束状态。
-    if (mobile && remoteRunning.value) runStatus.value = "terminating";
+    // 控制受理后保护终止态；已先收到结束事件时固定完成，避免恢复已终止运行。
+    if (mobile) runStatus.value = remoteRunning.value ? "terminating" : "completed";
     await refreshRunStatus(runId);
     if (mobile && (disposed || currentRunId.value !== runId)) return;
     ElMessage.success(mobile && remoteRunning.value ? "终止请求已受理" : "已终止本次流程");
   } catch (error) {
     if (mobile && (disposed || currentRunId.value !== runId)) return;
-    if (mobile && (accepted || !remoteRunning.value && ["completed", "error"].includes(runStatus.value ?? ""))) {
+    if (mobile && (accepted || error instanceof ExecutionRequestError && error.status === 409 && error.message === "运行已结束" && !remoteRunning.value && ["completed", "error"].includes(runStatus.value ?? ""))) {
+      if (!remoteRunning.value) runStatus.value = "completed";
       if (remoteRunning.value) scheduleReconnect(1000);
       ElMessage.success(remoteRunning.value ? "终止请求已受理，正在同步运行状态" : "本次流程已结束");
     } else ElMessage.error(error instanceof Error ? error.message : "终止失败");
