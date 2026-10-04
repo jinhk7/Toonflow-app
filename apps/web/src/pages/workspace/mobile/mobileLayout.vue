@@ -18,9 +18,7 @@ let viewportFrame = 0;
 let compactControlPointer: number | undefined;
 const viewport = window.visualViewport;
 const root = document.documentElement;
-const mobileKeyboard = navigator.maxTouchPoints > 0 && window.matchMedia("(pointer: coarse)").matches && /Android|iPhone|iPad/.test(navigator.userAgent);
-let viewportSize = "";
-let expandedViewportHeight = 0;
+const editingRegionSelector = ".mobileAgent, .agentModelPopover, .agentContextPopover, .agentHistoryPopover, .agentSubAgentPopover, .mentionOverlay, .skillOverlay, .el-select__popper";
 let keyboardVisible = false;
 
 function updateViewport() {
@@ -31,23 +29,20 @@ function updateViewport() {
     : viewport?.height ?? window.innerHeight;
   if (!pinching) {
     const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
-    const size = `${window.innerWidth}:${window.screen.width}:${window.screen.height}`;
-    // 旋转或窗口尺寸变化时重记基线；仅触控移动设备使用历史高度后备。
-    expandedViewportHeight = size !== viewportSize || !mobileKeyboard ? Math.max(layoutHeight, height) : Math.max(expandedViewportHeight, layoutHeight, height);
-    viewportSize = size;
-    keyboardVisible = !!viewport && (mobileKeyboard ? expandedViewportHeight : layoutHeight) - height > 120;
+    // ACT: 只按当前两种视口的差值判断；同步缩小时不推测键盘，避免分屏缩窗误判。
+    keyboardVisible = !!viewport && layoutHeight - height > 120;
   }
   const focused = document.activeElement;
   const visibleFocus = focused instanceof HTMLElement && focused.getClientRects().length > 0;
   const editorFocus = visibleFocus && focused.isContentEditable && !!focused.closest(".mobileAgent .senderEditor");
   // 编辑期间操作工具栏或其浮层时维持布局，避免焦点切换在 click 前移走按钮。
-  const editingControl = compactEditing.value && visibleFocus && !!focused.closest(".mobileAgent, .agentModelPopover, .agentContextPopover, .agentHistoryPopover, .agentSubAgentPopover, .mentionOverlay, .skillOverlay");
+  const editingControl = compactEditing.value && visibleFocus && !!focused.closest(editingRegionSelector);
   if (!conversationLayout.value) compactControlPointer = undefined;
   const pressedControl = compactControlPointer !== undefined;
   // 短屏本身不表示键盘；还需正常缩放下视口明显收缩且处于编辑操作。
   compactEditing.value = conversationLayout.value && (pressedControl || keyboardVisible && height < 600 && (editorFocus || editingControl));
-  // 主动 pinch 时保留布局，让浏览器负责缩放和平移。
-  if (pinching) return;
+  // pinch 交给浏览器；按压完成后再调整布局，避免控件或 body 浮层在 click 前移位。
+  if (pinching || pressedControl) return;
   root.style.setProperty("--mobileViewportHeight", `${height}px`);
   root.style.setProperty("--mobileViewportTop", `${viewport?.offsetTop ?? 0}px`);
   window.dispatchEvent(new Event("mobileViewportChange"));
@@ -59,7 +54,8 @@ function scheduleViewport() {
 }
 
 function startCompactControl(event: PointerEvent) {
-  if (compactEditing.value && event.isPrimary && event.button === 0 && event.target instanceof Element && event.target.closest(".mobileAgent .contextNavigationButton")) compactControlPointer = event.pointerId;
+  // 画布、工具栏与浮层也会收起键盘；先让当前按压完成，再恢复完整页头。
+  if (compactEditing.value && event.isPrimary && event.button === 0 && event.target instanceof Element && event.target.closest(editingRegionSelector)) compactControlPointer = event.pointerId;
 }
 function finishCompactControl(event: PointerEvent) {
   if (event.pointerId === compactControlPointer) clearCompactControl();
